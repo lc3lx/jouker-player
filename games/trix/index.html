@@ -1,0 +1,655 @@
+<!DOCTYPE html>
+<html lang="ar" dir="rtl">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>تركس - لعبة الورق</title>
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body {
+      font-family: 'Segoe UI', Tahoma, Arial, sans-serif;
+      background: linear-gradient(135deg, #1a472a 0%, #0d2818 100%);
+      min-height: 100vh;
+      color: #f0e6d2;
+      overflow-x: hidden;
+    }
+    .game-container {
+      max-width: 1100px;
+      margin: 0 auto;
+      padding: 16px;
+    }
+    h1 {
+      text-align: center;
+      margin-bottom: 16px;
+      font-size: 2rem;
+      text-shadow: 1px 1px 2px rgba(0,0,0,0.5);
+    }
+    .game-info {
+      display: flex;
+      justify-content: space-between;
+      flex-wrap: wrap;
+      gap: 12px;
+      margin-bottom: 16px;
+      padding: 12px;
+      background: rgba(0,0,0,0.3);
+      border-radius: 8px;
+    }
+    .game-info span { font-weight: bold; }
+    .scores-panel {
+      display: flex;
+      gap: 24px;
+      flex-wrap: wrap;
+      margin-bottom: 16px;
+    }
+    .score-box {
+      background: rgba(0,0,0,0.4);
+      padding: 12px 20px;
+      border-radius: 8px;
+      min-width: 120px;
+    }
+    .score-box .name { font-size: 0.9rem; opacity: 0.9; }
+    .score-box .value { font-size: 1.5rem; font-weight: bold; }
+    .score-box.player { border: 2px solid #c9b037; }
+    .table-center {
+      position: relative;
+      min-height: 280px;
+      background: radial-gradient(ellipse at center, #2d5a3d 0%, #1a3d27 70%);
+      border: 8px solid #8b4513;
+      border-radius: 20px;
+      padding: 16px;
+      margin-bottom: 16px;
+    }
+    .opponent-hands {
+      display: flex;
+      justify-content: space-around;
+      margin-bottom: 12px;
+    }
+    .opponent-hand {
+      display: flex;
+      gap: 2px;
+    }
+    .trick-area {
+      display: flex;
+      justify-content: center;
+      gap: 12px;
+      min-height: 120px;
+      align-items: center;
+      flex-wrap: wrap;
+    }
+    .player-area {
+      margin-top: 12px;
+      min-height: 140px;
+    }
+    .player-hand {
+      display: flex;
+      justify-content: center;
+      flex-wrap: wrap;
+      gap: 4px;
+    }
+    .card {
+      width: 70px;
+      height: 98px;
+      background: #fff;
+      border-radius: 6px;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      cursor: pointer;
+      transition: transform 0.15s;
+      user-select: none;
+      box-shadow: 1px 2px 4px rgba(0,0,0,0.3);
+      font-weight: bold;
+    }
+    .card:hover:not(.disabled) { transform: translateY(-6px); }
+    .card.selected { transform: translateY(-12px); border: 3px solid #c9b037; }
+    .card.disabled { opacity: 0.5; cursor: not-allowed; }
+    .card.hearts, .card.diamonds { color: #c41e3a; }
+    .card.clubs, .card.spades { color: #222; }
+    .card .rank { font-size: 1.2rem; }
+    .card .suit { font-size: 1.4rem; }
+    .card-back {
+      background: linear-gradient(135deg, #1a237e, #3949ab);
+      color: transparent;
+    }
+    .card-back::before { content: '🂠'; font-size: 2rem; color: #fff; }
+    .card-small {
+      width: 50px;
+      height: 70px;
+      font-size: 0.85rem;
+    }
+    .card-small .suit { font-size: 1rem; }
+    .controls {
+      display: flex;
+      gap: 12px;
+      justify-content: center;
+      flex-wrap: wrap;
+      margin-top: 16px;
+    }
+    button {
+      padding: 12px 24px;
+      font-size: 1rem;
+      border: none;
+      border-radius: 8px;
+      cursor: pointer;
+      background: #c9b037;
+      color: #1a472a;
+      font-weight: bold;
+    }
+    button:hover { background: #e0c84a; }
+    button:disabled { opacity: 0.5; cursor: not-allowed; }
+    .message {
+      text-align: center;
+      padding: 16px;
+      font-size: 1.1rem;
+      margin-bottom: 12px;
+      background: rgba(0,0,0,0.3);
+      border-radius: 8px;
+    }
+    .contract-selector {
+      display: flex;
+      gap: 8px;
+      flex-wrap: wrap;
+      justify-content: center;
+      margin: 16px 0;
+    }
+    .contract-btn {
+      padding: 10px 16px;
+      background: #2d5a3d;
+      color: #f0e6d2;
+      border: 2px solid #4a7c59;
+    }
+    .contract-btn:hover { background: #4a7c59; }
+    .contract-btn.chosen { border-color: #c9b037; background: #3d6b4a; }
+    .doubling-panel {
+      margin: 12px 0;
+      text-align: center;
+    }
+    .doubling-panel button { margin: 0 8px; }
+  </style>
+</head>
+<body>
+  <div class="game-container">
+    <h1>تركس - لعبة الورق</h1>
+    <div class="game-info">
+      <span id="gamePhase">جاري الإعداد...</span>
+      <span id="contractInfo"></span>
+      <span id="trickInfo"></span>
+    </div>
+    <div class="scores-panel" id="scoresPanel"></div>
+    <div class="message" id="message"></div>
+    <div id="contractSelector" class="contract-selector" style="display:none;"></div>
+    <div id="doublingPanel" class="doubling-panel" style="display:none;"></div>
+    <div class="table-center">
+      <div class="opponent-hands">
+        <div class="opponent-hand" id="oppNorth"></div>
+        <div class="opponent-hand" id="oppEast"></div>
+        <div class="opponent-hand" id="oppWest"></div>
+      </div>
+      <div class="trick-area" id="trickArea"></div>
+      <div class="player-area">
+        <div class="player-hand" id="playerHand"></div>
+      </div>
+    </div>
+    <div class="controls">
+      <button id="btnDeal">توزيع جديد</button>
+      <button id="btnPlay" style="display:none;">لعب الورقة</button>
+      <button id="btnPass" style="display:none;">باس</button>
+    </div>
+  </div>
+  <script>
+    const SUITS = { h: '♥', d: '♦', c: '♣', s: '♠' };
+    const SUIT_NAMES = { h: 'hearts', d: 'diamonds', c: 'clubs', s: 'spades' };
+    const RANKS = ['2','3','4','5','6','7','8','9','T','J','Q','K','A'];
+    const RANK_VAL = { '2':2,'3':3,'4':4,'5':5,'6':6,'7':7,'8':8,'9':9,'T':10,'J':11,'Q':12,'K':13,'A':14 };
+
+    const CONTRACTS = [
+      { id: 'sheikh', name: 'شيخ الكبة', points: -75 },
+      { id: 'banat', name: 'بنات', points: -25 },
+      { id: 'dinari', name: 'ديناري', points: -10 },
+      { id: 'latoush', name: 'لطوش', points: -15 },
+      { id: 'trix', name: 'تركس', points: [200,150,100,50] }
+    ];
+
+    function newDeck() {
+      const deck = [];
+      for (const r of RANKS) {
+        for (const s of Object.keys(SUITS)) deck.push(r + s);
+      }
+      return deck;
+    }
+
+    function shuffle(arr) {
+      for (let i = arr.length - 1; i > 0; i--) {
+        const j = Math.floor(Math.random() * (i + 1));
+        [arr[i], arr[j]] = [arr[j], arr[i]];
+      }
+      return arr;
+    }
+
+    function parseCard(c) {
+      return { rank: c[0], suit: c[1], val: RANK_VAL[c[0]], full: c };
+    }
+
+    function cardEl(card, small = false) {
+      const p = parseCard(card);
+      const suitClass = SUIT_NAMES[p.suit] || '';
+      const div = document.createElement('div');
+      div.className = `card ${suitClass} ${small ? 'card-small' : ''}`;
+      div.dataset.card = card;
+      div.innerHTML = `<span class="rank">${p.rank === 'T' ? '10' : p.rank}</span><span class="suit">${SUITS[p.suit]}</span>`;
+      return div;
+    }
+
+    function canFollow(hand, ledSuit) {
+      const has = hand.some(c => c[1] === ledSuit);
+      return has ? hand.filter(c => c[1] === ledSuit) : hand;
+    }
+
+    function winningCard(cards, ledSuit) {
+      const ofSuit = cards.filter(c => c[1] === ledSuit);
+      if (ofSuit.length === 0) return cards[0];
+      let best = ofSuit[0];
+      for (const c of ofSuit) {
+        if (RANK_VAL[c[0]] > RANK_VAL[best[0]]) best = c;
+      }
+      return best;
+    }
+
+    class TrixGame {
+      constructor() {
+        this.players = [
+          { id: 0, name: 'أنت', score: 0 },
+          { id: 1, name: 'الخصم 1', score: 0 },
+          { id: 2, name: 'الخصم 2', score: 0 },
+          { id: 3, name: 'الخصم 3', score: 0 }
+        ];
+        this.kingdomOwner = 0;
+        this.kingdomIndex = 0;
+        this.roundIndex = 0;
+        this.contractOrder = [];
+        this.currentContract = null;
+        this.dealer = 0;
+        this.leader = 0;
+        this.hands = [[],[],[],[]];
+        this.trick = [];
+        this.trickLeader = 0;
+        this.playedCount = 0;
+        this.doubled = { sheikh: false, banat: false };
+        this.trixPlayed = [false, false, false, false];
+        this.trixFinishOrder = [];
+      }
+
+      startNewGame() {
+        this.players.forEach(p => p.score = 0);
+        this.kingdomIndex = 0;
+        this.kingdomOwner = 0;
+        this.dealer = 0;
+        this.dealAndSetup();
+      }
+
+      dealAndSetup(needPickOrder = true) {
+        const deck = shuffle(newDeck());
+        this.hands = [[],[],[],[]];
+        for (let i = 0; i < 52; i++) {
+          this.hands[i % 4].push(deck[i]);
+        }
+        this.hands.forEach(h => h.sort((a, b) => {
+          if (a[1] !== b[1]) return a[1].localeCompare(b[1]);
+          return RANK_VAL[b[0]] - RANK_VAL[a[0]];
+        }));
+
+        if (needPickOrder) {
+          const sevenHeartsHolder = this.hands.findIndex(h => h.includes('7h'));
+          this.kingdomOwner = sevenHeartsHolder;
+          this.dealer = sevenHeartsHolder;
+          this.contractOrder = [...CONTRACTS];
+          this.roundIndex = 0;
+          this.pickContractOrder();
+        } else {
+          this.dealer = (this.dealer + 1) % 4;
+          this.playRound();
+        }
+      }
+
+      pickContractOrder() {
+        this.phase = 'choosing_contract';
+        this.currentContract = null;
+        this.render();
+        this.showContractChooser();
+      }
+
+      setContractOrder(order) {
+        this.contractOrder = order;
+        this.roundIndex = 0;
+        this.playRound();
+      }
+
+      playRound() {
+        this.currentContract = this.contractOrder[this.roundIndex];
+        this.phase = this.currentContract.id === 'trix' ? 'trix_play' : 'trick_play';
+        this.leader = this.dealer;
+        this.trick = [];
+        this.playedCount = 0;
+        this.trickLeader = this.dealer;
+        this.trixPlayed = [false, false, false, false];
+        this.trixFinishOrder = [];
+        this.lastTrixPlayer = this.dealer;
+        this.render();
+        if (this.currentContract.id === 'sheikh' || this.currentContract.id === 'banat') {
+          this.showDoublingOption();
+        } else {
+          this.startTrickOrTrix();
+        }
+      }
+
+      showDoublingOption() {
+        const panel = document.getElementById('doublingPanel');
+        panel.style.display = 'block';
+        const hasK = this.hands[0].some(c => c === 'Kh');
+        const hasQ = this.hands[0].some(c => c[0] === 'Q');
+        const canDouble = (this.currentContract.id === 'sheikh' && hasK) || (this.currentContract.id === 'banat' && hasQ);
+        panel.innerHTML = canDouble
+          ? '<span>هل تريد المضاعفة؟</span> <button id="btnDouble">نعم، مضاعفة</button> <button id="btnNoDouble">لا</button>'
+          : '<span>لا يمكنك المضاعفة</span> <button id="btnNoDouble">متابعة</button>';
+        document.getElementById('btnDouble')?.addEventListener('click', () => { this.doubled[this.currentContract.id] = true; this.hideDoubling(); this.startTrickOrTrix(); });
+        document.getElementById('btnNoDouble')?.addEventListener('click', () => { this.hideDoubling(); this.startTrickOrTrix(); });
+      }
+
+      hideDoubling() {
+        document.getElementById('doublingPanel').style.display = 'none';
+      }
+
+      startTrickOrTrix() {
+        if (this.currentContract.id === 'trix') {
+          this.playTrixTurn();
+        } else {
+          this.playTrickTurn();
+        }
+      }
+
+      playTrickTurn() {
+        this.render();
+        if (this.leader === 0) {
+          this.enablePlayerCards();
+        } else {
+          setTimeout(() => this.aiPlayTrick(), 600);
+        }
+      }
+
+      enablePlayerCards() {
+        const valid = this.trick.length === 0 ? this.hands[0] : canFollow(this.hands[0], this.trick[0][1]);
+        document.querySelectorAll('#playerHand .card').forEach(el => {
+          const c = el.dataset.card;
+          el.classList.toggle('disabled', !valid.includes(c));
+          el.onclick = () => valid.includes(c) && this.playerPlay(c);
+        });
+        document.getElementById('btnPlay').style.display = 'none';
+      }
+
+      playerPlay(card) {
+        this.playCard(0, card);
+      }
+
+      playCard(pid, card) {
+        const idx = this.hands[pid].indexOf(card);
+        if (idx === -1) return;
+        this.hands[pid].splice(idx, 1);
+        this.trick.push({ player: pid, card });
+        this.playedCount++;
+        this.render();
+
+        if (this.playedCount === 4) {
+          const led = this.trick[0].card[1];
+          const winCard = winningCard(this.trick.map(t => t.card), led);
+          const winner = this.trick.find(t => t.card === winCard).player;
+          this.awardTrick(winner);
+        } else {
+          this.leader = (this.leader + 1) % 4;
+          this.playTrickTurn();
+        }
+      }
+
+      aiPlayTrick() {
+        const pid = this.leader;
+        const hand = this.hands[pid];
+        const valid = this.trick.length === 0 ? hand : canFollow(hand, this.trick[0].card[1]);
+        const card = valid[Math.floor(Math.random() * valid.length)];
+        this.playCard(pid, card);
+      }
+
+      awardTrick(winner) {
+        const pts = this.getTrickPenalty(this.trick.map(t => ({ player: t.player, card: t.card })));
+        this.players[winner].score += pts;
+        this.trick = [];
+        this.playedCount = 0;
+        this.leader = winner;
+        this.render();
+
+        if (this.hands[0].length === 0) {
+          this.endRound();
+        } else {
+          this.trickLeader = winner;
+          setTimeout(() => this.playTrickTurn(), 800);
+        }
+      }
+
+      getTrickPenalty(trickData) {
+        const c = this.currentContract;
+        let sum = 0;
+        const mult = (c.id === 'sheikh' && this.doubled.sheikh) || (c.id === 'banat' && this.doubled.banat) ? 2 : 1;
+
+        if (c.id === 'sheikh') {
+          if (trickData.some(t => t.card === 'Kh')) {
+            const taker = trickData.find(t => t.card === 'Kh')?.player;
+            if (taker === 0) sum = c.points * mult;
+            else sum = c.points * mult;
+          }
+        } else if (c.id === 'banat') {
+          trickData.filter(t => t.card[0] === 'Q').forEach(() => sum += c.points * mult);
+        } else if (c.id === 'dinari') {
+          trickData.filter(t => t.card[1] === 'd').forEach(() => sum += c.points);
+        } else if (c.id === 'latoush') {
+          sum = c.points;
+        }
+        return sum;
+      }
+
+      playTrixTurn() {
+        while (this.hands[this.leader].length === 0 && this.trixFinishOrder.length < 4) {
+          this.leader = (this.leader + 1) % 4;
+        }
+        this.render();
+        if (this.leader === 0) {
+          this.enableTrixCards();
+        } else {
+          setTimeout(() => this.aiPlayTrix(), 500);
+        }
+      }
+
+      enableTrixCards() {
+        const canPlay = this.getTrixValidCards(0);
+        document.querySelectorAll('#playerHand .card').forEach(el => {
+          const c = el.dataset.card;
+          const ok = canPlay.length === 0 || canPlay.includes(c);
+          el.classList.toggle('disabled', !ok);
+          el.onclick = () => (ok ? this.playerPlayTrix(c) : null);
+        });
+        document.getElementById('btnPass').style.display = canPlay.length === 0 ? 'inline-block' : 'none';
+        document.getElementById('btnPass').onclick = () => canPlay.length === 0 && this.playerPassTrix();
+      }
+
+      getTrixValidCards(pid) {
+        const hand = this.hands[pid];
+        if (this.trick.length === 0) return hand.filter(c => c[0] === 'J');
+        const led = this.trick[0].card;
+        if (led[0] === 'J') {
+          const sameSuit = hand.filter(c => c[1] === led[1]);
+          if (sameSuit.length) return sameSuit;
+          return hand.filter(c => c[0] === 'J');
+        }
+        const seq = led[0] === 'J' ? 'JQKA' : 'JT98765432';
+        const idx = seq.indexOf(led[0]);
+        const nextUp = seq[idx + 1];
+        const nextDown = seq[idx - 1];
+        const canAttach = hand.filter(c => c[0] === nextUp || c[0] === nextDown);
+        if (canAttach.length) return canAttach;
+        const js = hand.filter(c => c[0] === 'J');
+        if (js.length) return js;
+        return [];
+      }
+
+      playerPlayTrix(card) {
+        this.playTrixCard(0, card);
+      }
+
+      playerPassTrix() {
+        this.trixPlayed[0] = true;
+        this.leader = (this.leader + 1) % 4;
+        this.checkTrixEnd();
+      }
+
+      playTrixCard(pid, card) {
+        const idx = this.hands[pid].indexOf(card);
+        if (idx === -1) return;
+        this.hands[pid].splice(idx, 1);
+        this.trick.push({ player: pid, card });
+        this.trixPlayed[pid] = true;
+        this.lastTrixPlayer = pid;
+
+        if (this.hands[pid].length === 0) {
+          this.trixFinishOrder.push(pid);
+        }
+        this.render();
+
+        const stillPlaying = this.trixPlayed.filter(p => !p).length;
+        if (this.trixFinishOrder.length === 4) {
+          [200, 150, 100, 50].forEach((pts, i) => {
+            this.players[this.trixFinishOrder[i]].score += pts;
+          });
+          this.endRound();
+        } else if (stillPlaying === 0) {
+          this.trick = [];
+          this.trixPlayed = [false, false, false, false];
+          this.leader = this.lastTrixPlayer;
+          setTimeout(() => this.playTrixTurn(), 600);
+        } else {
+          this.leader = (this.leader + 1) % 4;
+          setTimeout(() => this.playTrixTurn(), 400);
+        }
+      }
+
+      aiPlayTrix() {
+        const pid = this.leader;
+        const valid = this.getTrixValidCards(pid);
+        if (valid.length === 0) {
+          this.trixPlayed[pid] = true;
+          this.leader = (this.leader + 1) % 4;
+          this.checkTrixEnd();
+        } else {
+          const card = valid[Math.floor(Math.random() * valid.length)];
+          this.playTrixCard(pid, card);
+        }
+      }
+
+      checkTrixEnd() {
+        const stillPlaying = this.trixPlayed.filter(p => !p).length;
+        if (stillPlaying === 0) {
+          this.trick = [];
+          this.trixPlayed = [false, false, false, false];
+          this.leader = this.lastTrixPlayer;
+          setTimeout(() => this.playTrixTurn(), 600);
+        } else {
+          this.leader = (this.leader + 1) % 4;
+          setTimeout(() => this.playTrixTurn(), 400);
+        }
+      }
+
+      endRound() {
+        this.roundIndex++;
+        this.doubled = { sheikh: false, banat: false };
+        if (this.roundIndex >= 5) {
+          this.kingdomIndex++;
+          if (this.kingdomIndex >= 4) {
+            this.endGame();
+            return;
+          }
+          this.kingdomOwner = (this.kingdomOwner + 1) % 4;
+          this.dealer = this.kingdomOwner;
+          this.contractOrder = [...CONTRACTS];
+          this.roundIndex = 0;
+          this.dealAndSetup();
+        } else {
+          this.dealAndSetup(false);
+        }
+      }
+
+      endGame() {
+        this.phase = 'ended';
+        this.render();
+        const best = this.players.reduce((a, b) => a.score > b.score ? a : b);
+        document.getElementById('message').textContent = `انتهت اللعبة! الفائز: ${best.name} برصيد ${best.score}`;
+      }
+
+      showContractChooser() {
+        const sel = document.getElementById('contractSelector');
+        sel.style.display = 'flex';
+        sel.innerHTML = this.contractOrder.map((c, i) => {
+          const btn = document.createElement('button');
+          btn.className = 'contract-btn';
+          btn.textContent = `${i + 1}. ${c.name}`;
+          btn.onclick = () => {
+            const order = [...this.contractOrder];
+            const [rem] = order.splice(i, 1);
+            this.setContractOrder([rem, ...order]);
+            sel.style.display = 'none';
+          };
+          return btn;
+        });
+      }
+
+      render() {
+        document.getElementById('gamePhase').textContent =
+          this.phase === 'choosing_contract' ? 'اختر ترتيب الطلبات' :
+          this.phase === 'trick_play' ? `جولة: ${this.currentContract?.name}` :
+          this.phase === 'trix_play' ? 'تركس' :
+          this.phase === 'ended' ? 'انتهت اللعبة' : 'جاري اللعب';
+
+        document.getElementById('contractInfo').textContent =
+          this.currentContract ? `المملكة ${this.kingdomIndex + 1}/4 | الطلب ${this.roundIndex + 1}/5` : '';
+
+        document.getElementById('trickInfo').textContent =
+          this.trick.length ? `أكلة (${this.playedCount}/4)` : '';
+
+        document.getElementById('scoresPanel').innerHTML = this.players.map((p, i) =>
+          `<div class="score-box ${i === 0 ? 'player' : ''}"><div class="name">${p.name}</div><div class="value">${p.score}</div></div>`
+        ).join('');
+
+        ['oppNorth','oppEast','oppWest'].forEach((id, i) => {
+          const pid = [1, 2, 3][i];
+          const cnt = this.hands[pid]?.length || 0;
+          const el = document.getElementById(id);
+          el.innerHTML = '';
+          for (let j = 0; j < cnt; j++) {
+            const d = document.createElement('div');
+            d.className = 'card card-back card-small';
+            el.appendChild(d);
+          }
+        });
+
+        const trickArea = document.getElementById('trickArea');
+        trickArea.innerHTML = '';
+        this.trick.forEach(t => trickArea.appendChild(cardEl(t.card, true)));
+
+        const playerHand = document.getElementById('playerHand');
+        playerHand.innerHTML = '';
+        (this.hands[0] || []).forEach(c => playerHand.appendChild(cardEl(c)));
+      }
+    }
+
+    const game = new TrixGame();
+    document.getElementById('btnDeal').onclick = () => game.startNewGame();
+    game.render();
+  </script>
+</body>
+</html>

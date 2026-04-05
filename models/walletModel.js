@@ -1,4 +1,5 @@
 const mongoose = require("mongoose");
+const WalletTransaction = require("./walletTransactionModel");
 
 const walletSchema = new mongoose.Schema(
   {
@@ -12,6 +13,11 @@ const walletSchema = new mongoose.Schema(
       type: Number,
       default: 0,
       min: [0, "Wallet balance cannot be negative"],
+    },
+    lockedBalance: {
+      type: Number,
+      default: 0,
+      min: [0, "Wallet locked balance cannot be negative"],
     },
     currency: {
       type: String,
@@ -68,26 +74,53 @@ walletSchema.methods.addTransaction = async function (
   orderId = null,
   rechargeCode = null
 ) {
+  const amt = Number(amount || 0);
+  const beforeBalance = Number(this.balance || 0);
+  const beforeLocked = Number(this.lockedBalance || 0);
+
   this.transactions.push({
     type,
-    amount,
+    amount: amt,
     description,
     orderId,
     rechargeCode,
   });
 
   if (type === "credit" || type === "recharge") {
-    this.balance += amount;
+    this.balance += amt;
   } else if (type === "debit") {
-    this.balance -= amount;
+    this.balance -= amt;
+  } else if (type === "refund") {
+    this.balance += amt;
   }
 
   await this.save();
+
+  // Ledger record for backward-compatible paths still using addTransaction.
+  await WalletTransaction.create({
+    userId: this.user,
+    type,
+    amount: Math.floor(Math.abs(amt)),
+    balanceBefore: Math.floor(beforeBalance),
+    balanceAfter: Math.floor(this.balance || 0),
+    lockedBalanceBefore: Math.floor(beforeLocked),
+    lockedBalanceAfter: Math.floor(this.lockedBalance || 0),
+    meta: {
+      source: "wallet.addTransaction",
+      description,
+      orderId: orderId || null,
+      rechargeCode: rechargeCode || null,
+    },
+  });
   return this;
 };
 
 // Check if user has sufficient balance
 walletSchema.methods.hasSufficientBalance = function (amount) {
+  return this.balance >= amount;
+};
+
+walletSchema.methods.hasSufficientAvailable = function (amount) {
   return this.balance >= amount;
 };
 

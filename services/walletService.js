@@ -1,8 +1,18 @@
 const asyncHandler = require("express-async-handler");
 const ApiError = require("../utils/apiError");
 const Wallet = require("../models/walletModel");
+const WalletTransaction = require("../models/walletTransactionModel");
 const User = require("../models/userModel");
+const crypto = require("crypto");
+const {
+  withMongoTransaction,
+  ledgerDeposit,
+  ledgerWithdraw,
+  appendBalancesUnchanged,
+} = require("./walletLedgerService");
 const RechargeCode = require("../models/rechargeCodeModel");
+const AgentProfile = require("../models/agentProfileModel");
+const SystemSettings = require("../models/systemSettingsModel");
 
 // @desc    Get user wallet
 // @route   GET /api/v1/wallet
@@ -105,6 +115,28 @@ exports.rechargeWallet = asyncHandler(async (req, res, next) => {
     rechargeCode._id
   );
 
+  // Referral commission to referrer (promoter/agent) if applicable
+  try {
+    const user = await User.findById(req.user._id).select("referredBy");
+    if (user && user.referredBy) {
+      const profile = await AgentProfile.findOne({ user: user.referredBy, status: "approved" });
+      if (profile) {
+        const defaults = await SystemSettings.getDefaults();
+        const percent = (profile.referralCommissionPercent != null ? profile.referralCommissionPercent : defaults.defaultReferralCommissionPercent) || 0;
+        const commission = Math.floor(rechargeCode.amount * percent);
+        if (commission > 0) {
+          let refWallet = await Wallet.findOne({ user: user.referredBy });
+          if (!refWallet) refWallet = await Wallet.create({ user: user.referredBy });
+          await refWallet.addTransaction("credit", commission, `Referral commission from ${req.user.email || req.user._id}`);
+          profile.stats.totalCommission += commission;
+          await profile.save();
+        }
+      }
+    }
+  } catch (e) {
+    // do not block recharge on referral errors
+  }
+
   res.status(200).json({
     status: "success",
     message: `Wallet recharged successfully with ${rechargeCode.amount} USD`,
@@ -115,26 +147,23 @@ exports.rechargeWallet = asyncHandler(async (req, res, next) => {
   });
 });
 
-// @desc    Get wallet transaction history
+// @desc    Get wallet ledger transaction history (immutable collection)
 // @route   GET /api/v1/wallet/transactions
 // @access  Protected/User
 exports.getWalletTransactions = asyncHandler(async (req, res, next) => {
   const page = req.query.page * 1 || 1;
-  const limit = req.query.limit * 1 || 10;
+  const limit = Math.min(100, req.query.limit * 1 || 20);
   const skip = (page - 1) * limit;
 
-  const wallet = await Wallet.findOne({ user: req.user._id });
-
-  if (!wallet) {
-    return next(new ApiError("Wallet not found", 404));
-  }
-
-  // Get transactions with pagination
-  const transactions = wallet.transactions
-    .sort((a, b) => new Date(b.createdAt) - new Date(a.createdAt))
-    .slice(skip, skip + limit);
-
-  const totalTransactions = wallet.transactions.length;
+  const userId = req.user._id;
+  const [transactions, totalTransactions] = await Promise.all([
+    WalletTransaction.find({ userId })
+      .sort({ createdAt: -1 })
+      .skip(skip)
+      .limit(limit)
+      .lean(),
+    WalletTransaction.countDocuments({ userId }),
+  ]);
 
   res.status(200).json({
     status: "success",
@@ -142,10 +171,110 @@ exports.getWalletTransactions = asyncHandler(async (req, res, next) => {
     paginationResult: {
       currentPage: page,
       limit,
-      numberOfPages: Math.ceil(totalTransactions / limit),
+      numberOfPages: Math.ceil(totalTransactions / limit) || 1,
       next: page * limit < totalTransactions ? page + 1 : null,
     },
     data: transactions,
+  });
+});
+
+function parseSimulatedAmount(body) {
+  const raw = body?.amount;
+  const n = typeof raw === "string" ? parseInt(raw, 10) : Math.floor(Number(raw));
+  if (!Number.isFinite(n) || n <= 0 || n > 1_000_000_000) {
+    return null;
+  }
+  return n;
+}
+
+// @desc    One-shot simulated deposit (pending + confirm in one atomic txn — compat shortcut)
+// @route   POST /api/v1/wallet/deposit
+// @access  Protected/User
+exports.simulatedDeposit = asyncHandler(async (req, res, next) => {
+  const amount = parseSimulatedAmount(req.body);
+  if (amount == null) {
+    return next(new ApiError("Invalid amount", 400));
+  }
+  const userId = req.user._id;
+  const intentId = `legacy_dep_${crypto.randomBytes(8).toString("hex")}`;
+  try {
+    await withMongoTransaction(async (session) => {
+      await appendBalancesUnchanged({
+        session,
+        userId,
+        type: "pending_deposit",
+        amount,
+        meta: { intentId, source: "api_simulated_deposit_shortcut" },
+      });
+      await ledgerDeposit({
+        session,
+        userId,
+        amount,
+        meta: { intentId, source: "api_simulated_deposit_shortcut" },
+        ledgerType: "confirmed_deposit",
+      });
+    });
+  } catch (e) {
+    if (String(e.message) === "INVALID_AMOUNT") {
+      return next(new ApiError("Invalid amount", 400));
+    }
+    throw e;
+  }
+  const wallet = await Wallet.findOne({ user: userId });
+  res.status(200).json({
+    status: "success",
+    data: {
+      balance: wallet.balance,
+      lockedBalance: wallet.lockedBalance || 0,
+      currency: wallet.currency,
+    },
+  });
+});
+
+// @desc    One-shot simulated withdraw (pending + completed in one atomic txn — no delay)
+// @route   POST /api/v1/wallet/withdraw
+// @access  Protected/User
+exports.simulatedWithdraw = asyncHandler(async (req, res, next) => {
+  const amount = parseSimulatedAmount(req.body);
+  if (amount == null) {
+    return next(new ApiError("Invalid amount", 400));
+  }
+  const userId = req.user._id;
+  const intentId = `legacy_wd_${crypto.randomBytes(8).toString("hex")}`;
+  try {
+    await withMongoTransaction(async (session) => {
+      await appendBalancesUnchanged({
+        session,
+        userId,
+        type: "pending_withdraw",
+        amount,
+        meta: { intentId, source: "api_simulated_withdraw_shortcut" },
+      });
+      await ledgerWithdraw({
+        session,
+        userId,
+        amount,
+        meta: { intentId, source: "api_simulated_withdraw_shortcut" },
+        ledgerType: "completed_withdraw",
+      });
+    });
+  } catch (e) {
+    if (String(e.message) === "INSUFFICIENT_BALANCE") {
+      return next(new ApiError("Insufficient balance", 400));
+    }
+    if (String(e.message) === "INVALID_AMOUNT") {
+      return next(new ApiError("Invalid amount", 400));
+    }
+    throw e;
+  }
+  const wallet = await Wallet.findOne({ user: userId });
+  res.status(200).json({
+    status: "success",
+    data: {
+      balance: wallet.balance,
+      lockedBalance: wallet.lockedBalance || 0,
+      currency: wallet.currency,
+    },
   });
 });
 
@@ -206,7 +335,7 @@ exports.getWalletByUserId = asyncHandler(async (req, res, next) => {
   const wallet = await Wallet.findOne({ user: req.params.userId })
     .populate("user", "name email phone")
     .populate("transactions.rechargeCode")
-    .populate("transactions.orderId");
+    
 
   if (!wallet) {
     return next(new ApiError("Wallet not found", 404));

@@ -1,0 +1,2712 @@
+const jwt = require("jsonwebtoken");
+const mongoose = require("mongoose");
+const crypto = require("crypto");
+const Table = require("../models/tableModel");
+const HandHistory = require("../models/handHistoryModel");
+const { newDeck, shuffleDeterministic, draw, sha256Hex, randomInt: secureRandomInt } = require("../utils/poker/deck");
+const { bestOf7, compareHands7 } = require("../utils/poker/handEval");
+const Jackpot = require("../models/jackpotModel");
+const Wallet = require("../models/walletModel");
+const User = require("../models/userModel");
+const { RedisTableStateStore } = require("../utils/tableStateStore");
+const { applyLockedDelta } = require("../services/walletLedgerService");
+const logger = require("../utils/logger");
+const { metrics } = require("../utils/metrics");
+const { sendAlert } = require("../utils/alert");
+const { trackEventServerFireAndForget } = require("../services/analyticsService");
+const { evaluateHandChipDumpSuspect } = require("../services/fraudService");
+const cosmeticsService = require("../services/cosmeticsService");
+const { attachRedisClient: attachCosmeticsEquippedCache } = require("../utils/cosmeticsEquippedCache");
+
+function getTokenFromHandshake(socket) {
+  const auth = socket.handshake.auth || {};
+  if (auth.token) return auth.token.replace(/^Bearer\s+/i, "");
+  const header = socket.handshake.headers && socket.handshake.headers.authorization;
+  if (header && header.startsWith("Bearer ")) return header.split(" ")[1];
+  const query = socket.handshake.query || {};
+  if (query.token) return String(query.token).replace(/^Bearer\s+/i, "");
+  return null;
+}
+
+function toSafeInt(value, fallback = 0) {
+  const n = Number(value);
+  if (!Number.isFinite(n)) return fallback;
+  return Math.floor(n);
+}
+
+function clampInt(value, min, max) {
+  return Math.max(min, Math.min(max, toSafeInt(value, min)));
+}
+
+function isBotUserId(userId) {
+  return typeof userId === "string" && userId.startsWith("bot:");
+}
+
+/**
+ * Hole cards visible to a socket — server is the source of truth (handEval / showdown only on backend).
+ * - Spectators & opponents: hidden until showdown reveal step includes their seat (showdownRevealedSeats).
+ * - Hero: always receives own hole cards when dealt (so play is possible); never ranked on the client.
+ * - Idle: last-hand showdown holes replayed from lastHand.seats when present.
+ */
+function mapHoleForClientView({ round, lastHand, seat, seatIndex, forUserId, showdownRevealedSeats }) {
+  const hole = Array.isArray(seat.hole) ? seat.hole : [];
+  const pair = () => {
+    if (hole.length >= 2) return [hole[0], hole[1]];
+    return [hole[0] ?? null, hole[1] ?? null];
+  };
+
+  const r = String(round || "");
+  const srs = showdownRevealedSeats instanceof Set ? showdownRevealedSeats : null;
+
+  // Local player always sees their own board (incl. during staged showdown before their reveal step).
+  if (forUserId != null && String(forUserId) === String(seat.userId)) {
+    return pair();
+  }
+
+  if (r === "showdown" && srs) {
+    if (!srs.has(seatIndex)) return [null, null];
+    return pair();
+  }
+
+  // Strict: never reveal opponent holes during showdown without an explicit reveal Set
+  // (avoids leaks if showdownRevealedSeats is missing from a bad snapshot).
+  if (r === "showdown") {
+    return [null, null];
+  }
+  if (r === "idle" && lastHand && lastHand.reason === "showdown" && Array.isArray(lastHand.seats)) {
+    const row = lastHand.seats.find(
+      (x) => toSafeInt(x.seatIndex, -1) === seatIndex || String(x.userId) === String(seat.userId)
+    );
+    if (row && Array.isArray(row.hole) && row.hole.some((c) => c != null && String(c).length > 0)) {
+      return [row.hole[0] ?? null, row.hole[1] ?? null];
+    }
+  }
+  return [null, null];
+}
+
+function emptyClientActionSpec() {
+  return {
+    allowedActions: [],
+    callAmount: 0,
+    minRaise: 0,
+    maxRaise: 0,
+    canCheck: false,
+    isAllInOnly: false,
+  };
+}
+
+/** Normalize engine spec (allowed) to strict client contract (allowedActions). */
+function normalizeClientActionSpec(raw, isActor) {
+  if (!isActor || !raw) return emptyClientActionSpec();
+  const allowedRaw = raw.allowedActions || raw.allowed;
+  const list = Array.isArray(allowedRaw)
+    ? allowedRaw.map((x) => String(x).toLowerCase())
+    : [];
+  return {
+    allowedActions: list,
+    callAmount: toSafeInt(raw.callAmount, 0),
+    minRaise: toSafeInt(raw.minRaise, 0),
+    maxRaise: toSafeInt(raw.maxRaise, 0),
+    canCheck: raw.canCheck === true,
+    isAllInOnly: raw.isAllInOnly === true,
+  };
+}
+
+function handCategoryName(rank) {
+  if (!rank || !Number.isFinite(rank.cat)) return null;
+  if (rank.cat === 8 && Array.isArray(rank.tiebreak) && rank.tiebreak[0] === 14) {
+    return "Royal Flush";
+  }
+  const names = [
+    "High Card",
+    "One Pair",
+    "Two Pair",
+    "Three of a Kind",
+    "Straight",
+    "Flush",
+    "Full House",
+    "Four of a Kind",
+    "Straight Flush",
+  ];
+  return names[rank.cat] || null;
+}
+
+class InMemoryTableLockManager {
+  constructor() {
+    this.locks = new Set();
+  }
+
+  async acquire(tableId) {
+    if (!tableId) return false;
+    if (this.locks.has(tableId)) return false;
+    this.locks.add(tableId);
+    return true;
+  }
+
+  async release(tableId) {
+    if (!tableId) return;
+    this.locks.delete(tableId);
+  }
+}
+
+class RedisTableLockManager {
+  constructor(redis) {
+    this.redis = redis;
+    this.tokens = new Map();
+    this.instanceId = process.env.INSTANCE_ID || `pid:${process.pid}`;
+    this.ttlMs = toSafeInt(process.env.POKER_ACTION_LOCK_TTL_MS, 8000);
+  }
+
+  lockKey(tableId) {
+    return `poker:lock:table:${tableId}`;
+  }
+
+  async acquire(tableId) {
+    if (!tableId || !this.redis) return false;
+    const token = `${this.instanceId}:${Date.now()}:${crypto.randomBytes(12).toString("hex")}`;
+    const ok = await this.redis.set(this.lockKey(tableId), token, {
+      NX: true,
+      PX: this.ttlMs,
+    });
+    if (ok !== "OK") return false;
+    this.tokens.set(tableId, token);
+    return true;
+  }
+
+  async release(tableId) {
+    if (!tableId || !this.redis) return;
+    const token = this.tokens.get(tableId);
+    if (!token) return;
+    const lua = `
+      if redis.call("GET", KEYS[1]) == ARGV[1] then
+        return redis.call("DEL", KEYS[1])
+      else
+        return 0
+      end
+    `;
+    try {
+      await this.redis.eval(lua, {
+        keys: [this.lockKey(tableId)],
+        arguments: [token],
+      });
+    } finally {
+      this.tokens.delete(tableId);
+    }
+  }
+}
+
+class SocketSecurityGuard {
+  constructor() {
+    this.actionWindowMs = Math.max(1000, toSafeInt(process.env.POKER_ACTION_WINDOW_MS, 1000));
+    this.actionPerWindow = Math.max(2, toSafeInt(process.env.POKER_ACTION_RATE_LIMIT, 6));
+    this.connectWindowMs = Math.max(1000, toSafeInt(process.env.POKER_CONNECT_WINDOW_MS, 10000));
+    this.connectPerWindow = Math.max(2, toSafeInt(process.env.POKER_CONNECT_RATE_LIMIT, 12));
+    this.banBaseMs = Math.max(5000, toSafeInt(process.env.POKER_BAN_BASE_MS, 30000));
+    this.banMaxMs = Math.max(this.banBaseMs, toSafeInt(process.env.POKER_BAN_MAX_MS, 10 * 60 * 1000));
+    this.buckets = new Map();
+    this.violations = new Map();
+    this.bans = new Map();
+    this.socketSeen = new Set();
+  }
+
+  getIp(socket) {
+    return (
+      socket?.handshake?.headers?.["x-forwarded-for"]?.split(",")[0]?.trim() ||
+      socket?.handshake?.address ||
+      "unknown"
+    );
+  }
+
+  _bucketKey(type, key) {
+    return `${type}:${key || "na"}`;
+  }
+
+  _take(type, key, limit, windowMs) {
+    const now = Date.now();
+    const k = this._bucketKey(type, key);
+    const row = this.buckets.get(k);
+    if (!row || row.resetAt <= now) {
+      this.buckets.set(k, { count: 1, resetAt: now + windowMs });
+      return true;
+    }
+    row.count += 1;
+    return row.count <= limit;
+  }
+
+  _banKey(userId, ip) {
+    return `${userId || "na"}|${ip || "na"}`;
+  }
+
+  _isBanned(userId, ip) {
+    const key = this._banKey(userId, ip);
+    const until = this.bans.get(key) || 0;
+    return until > Date.now();
+  }
+
+  _registerViolation(kind, userId, ip, details = {}) {
+    const key = this._banKey(userId, ip);
+    const count = (this.violations.get(key) || 0) + 1;
+    this.violations.set(key, count);
+    const banMs = Math.min(this.banMaxMs, this.banBaseMs * (2 ** Math.max(0, count - 1)));
+    this.bans.set(key, Date.now() + banMs);
+    logger.warn("security_violation", { kind, userId, ip, count, banMs, ...details });
+    metrics.suspiciousTotal.inc({ event: kind });
+    if (kind === "action_spam" || kind === "duplicate_action_flood") {
+      void sendAlert("security_action_flood", { kind, userId, ip, count, ...details });
+    }
+    return { blocked: true, reason: "TEMP_BANNED", retryAfterMs: banMs };
+  }
+
+  onConnection(socket, userId) {
+    const ip = this.getIp(socket);
+    if (this._isBanned(userId, ip)) {
+      return { blocked: true, reason: "TEMP_BANNED" };
+    }
+    const socketKey = `${socket.id}:${userId}:${ip}`;
+    if (this.socketSeen.has(socketKey)) {
+      return this._registerViolation("duplicate_socket_flood", userId, ip, { socketId: socket.id });
+    }
+    this.socketSeen.add(socketKey);
+    const userOk = this._take("connect_user", userId, this.connectPerWindow, this.connectWindowMs);
+    const ipOk = this._take("connect_ip", ip, this.connectPerWindow * 2, this.connectWindowMs);
+    if (!userOk || !ipOk) {
+      return this._registerViolation("rapid_reconnect_abuse", userId, ip);
+    }
+    return { blocked: false };
+  }
+
+  onDisconnect(socket, userId) {
+    const ip = this.getIp(socket);
+    this.socketSeen.delete(`${socket.id}:${userId}:${ip}`);
+  }
+
+  onAction(userId, ip, actionId) {
+    if (this._isBanned(userId, ip)) return { blocked: true, reason: "TEMP_BANNED" };
+    const userOk = this._take("action_user", userId, this.actionPerWindow, this.actionWindowMs);
+    const ipOk = this._take("action_ip", ip, this.actionPerWindow * 2, this.actionWindowMs);
+    if (!userOk || !ipOk) {
+      return this._registerViolation("action_spam", userId, ip, { actionId });
+    }
+    if (actionId) {
+      const dupKey = `${userId}:${actionId}`;
+      const unique = this._take("dup_action", dupKey, 1, 60000);
+      if (!unique) {
+        return this._registerViolation("duplicate_action_flood", userId, ip, { actionId });
+      }
+    }
+    return { blocked: false };
+  }
+}
+
+class PokerTable {
+  constructor(nsp, table, options = null) {
+    this.nsp = nsp;
+    this.tableId = String(table._id);
+    this.smallBlind = toSafeInt(table.smallBlind, 0);
+    this.bigBlind = toSafeInt(table.bigBlind, 0);
+    this.minBuyIn = toSafeInt(table.minBuyIn, this.bigBlind * 100);
+    this.maxBuyIn = toSafeInt(table.maxBuyIn, this.minBuyIn);
+    this.capacity = toSafeInt(table.capacity, 9);
+    this.dealerIndex = 0;
+    this.running = false;
+    this.starting = false;
+
+    this.turnTimer = null;
+    this.botThinkTimer = null;
+    this.botFillTimer = null;
+    this.actionDeadline = null;
+    this.botFillDeadline = null;
+    this.resetStateFromTable(table);
+    this.turnSeconds = 25;
+
+    this.botFillDelayMs = Math.max(
+      5000,
+      toSafeInt(process.env.POKER_BOT_FILL_DELAY_MS, 50000)
+    );
+    this.botFillTarget = clampInt(
+      process.env.POKER_BOT_FILL_TARGET || 7,
+      2,
+      Math.max(2, this.capacity)
+    );
+    const defaultBotBuyIn = Math.max(this.minBuyIn, this.bigBlind * 120);
+    this.botBuyIn = clampInt(
+      process.env.POKER_BOT_BUY_IN || defaultBotBuyIn,
+      Math.max(1, this.minBuyIn),
+      Math.max(Math.max(1, this.minBuyIn), this.maxBuyIn || defaultBotBuyIn)
+    );
+    this.botSerial = 0;
+    this.handCounter = 0;
+    /** Monotonic id for showdown_end dedupe on clients. */
+    this.showdownEndSeq = 0;
+    this.lastHand = null;
+    this.currentHandId = null;
+    this.currentHandActions = [];
+    this.lastRaiseAmount = this.bigBlind;
+    this.processedActionIds = new Set();
+    /** Monotonic: bumps on each snapshot persist; clients drop stale packets. */
+    this.stateRevision = 0;
+    this.serverSeed = null;
+    this.serverSeedHash = null;
+    this.clientSeedDigest = null;
+    this.sbSeatIndex = -1;
+    this.bbSeatIndex = -1;
+
+    // Backward compatibility: allow passing lockManager directly.
+    const lockArg = options && typeof options.acquire === "function"
+      ? options
+      : options?.lockManager;
+    this.redis = options?.redis || null;
+    // Pluggable lock manager; Redis-backed when available, in-memory otherwise.
+    this.lockManager =
+      lockArg ||
+      (this.redis ? new RedisTableLockManager(this.redis) : new InMemoryTableLockManager());
+    this.stateStore = options?.stateStore || new RedisTableStateStore(this.redis);
+  }
+
+  static get ROUND_TRANSITIONS() {
+    return {
+      idle: new Set(["preflop"]),
+      preflop: new Set(["flop"]),
+      flop: new Set(["turn"]),
+      turn: new Set(["river"]),
+      river: new Set(["showdown"]),
+      showdown: new Set(["idle"]),
+    };
+  }
+
+  setRound(nextRound) {
+    const curr = this.round;
+    if (curr === nextRound) return true;
+    const allowed = PokerTable.ROUND_TRANSITIONS[curr] || new Set();
+    if (!allowed.has(nextRound)) {
+      console.warn(
+        `[PokerTable:${this.tableId}] Illegal state transition blocked: ${curr} -> ${nextRound}`
+      );
+      return false;
+    }
+    this.round = nextRound;
+    return true;
+  }
+
+  logSuspicious(event, details = {}) {
+    metrics.suspiciousTotal.inc({ event });
+    logger.warn("poker_suspicious", { tableId: this.tableId, event, ...details });
+  }
+
+  appendHandAction(entry) {
+    if (!this.currentHandId) return;
+    this.currentHandActions.push({
+      ts: Date.now(),
+      round: this.round,
+      ...entry,
+    });
+  }
+
+  recordSeatAction(seatIndex, type, amount = null) {
+    const s = this.seats[seatIndex];
+    if (!s) return;
+    if (amount != null && Number.isFinite(amount)) {
+      s.lastAction = { type: String(type), amount: toSafeInt(amount, 0) };
+    } else {
+      s.lastAction = { type: String(type) };
+    }
+  }
+
+  /** Voluntary action this betting street (not blind post) — used with short-all-in no-reopen. */
+  markVoluntaryAction(seatIndex) {
+    const s = this.seats[seatIndex];
+    if (s) s.actedThisStreet = true;
+  }
+
+  /**
+   * Per-table action serialization (in-memory or Redis via lockManager).
+   * Replace lockManager implementation for distributed locks without touching engine rules.
+   */
+  async acquireTableActionLock() {
+    return this.acquireActionLock();
+  }
+
+  computeLastTableAction() {
+    for (let i = this.currentHandActions.length - 1; i >= 0; i--) {
+      const a = this.currentHandActions[i];
+      if (!a || typeof a !== "object") continue;
+      const t = String(a.type || "");
+      if (t === "fold" || t === "call" || t === "check" || t === "raise") {
+        return {
+          type: t,
+          seatIndex: toSafeInt(a.seatIndex, -1),
+          playerId: a.playerId || null,
+          amount: a.amount != null ? toSafeInt(a.amount, 0) : undefined,
+          ts: a.ts,
+          round: a.round,
+        };
+      }
+    }
+    return null;
+  }
+
+  async acquireActionLock() {
+    return this.lockManager.acquire(this.tableId);
+  }
+
+  async releaseActionLock() {
+    await this.lockManager.release(this.tableId);
+  }
+
+  actionIdempotencyKey(actionId) {
+    return `poker:idem:table:${this.tableId}:hand:${this.currentHandId}:action:${actionId}`;
+  }
+
+  async claimActionId(actionId) {
+    if (!actionId || String(actionId).trim().length === 0) return false;
+
+    // Shared idempotency across instances when Redis exists.
+    if (this.redis && this.currentHandId) {
+      const ttlSec = toSafeInt(process.env.POKER_ACTION_IDEMPOTENCY_TTL_SEC, 7200);
+      const ok = await this.redis.set(this.actionIdempotencyKey(actionId), "1", {
+        NX: true,
+        EX: ttlSec,
+      });
+      return ok === "OK";
+    }
+
+    // Fallback in-memory idempotency for single-instance mode.
+    if (this.processedActionIds.has(actionId)) return false;
+    this.processedActionIds.add(actionId);
+    return true;
+  }
+
+  serializeSnapshot() {
+    return {
+      v: 1,
+      tableId: this.tableId,
+      stateRevision: toSafeInt(this.stateRevision, 0),
+      savedAt: Date.now(),
+      running: !!this.running,
+      starting: !!this.starting,
+      round: this.round,
+      pot: this.pot,
+      currentBet: this.currentBet,
+      minRaise: this.minRaise,
+      lastRaiseAmount: this.lastRaiseAmount,
+      dealerIndex: this.dealerIndex,
+      currentIndex: this.currentIndex,
+      actionDeadline: this.actionDeadline,
+      botFillDeadline: this.botFillDeadline,
+      turnSeconds: this.turnSeconds,
+      smallBlind: this.smallBlind,
+      bigBlind: this.bigBlind,
+      sbSeatIndex: this.sbSeatIndex,
+      bbSeatIndex: this.bbSeatIndex,
+      community: [...this.community],
+      deck: Array.isArray(this.deck) ? [...this.deck] : [],
+      currentHandId: this.currentHandId,
+      serverSeedHash: this.serverSeedHash,
+      clientSeedDigest: this.clientSeedDigest,
+      currentHandActions: [...this.currentHandActions],
+      processedActionIds: [...this.processedActionIds],
+      lastHand: this.lastHand,
+      shortAllInNoReopen: !!this.shortAllInNoReopen,
+      showdownRevealedSeats: [...this.showdownRevealedSeats],
+      seats: this.seats.map((s) => ({
+        userId: s.userId,
+        name: s.name,
+        avatar: s.avatar,
+        chips: s.chips,
+        inHand: s.inHand,
+        hole: Array.isArray(s.hole) ? [...s.hole] : [],
+        folded: s.folded,
+        allIn: s.allIn,
+        bet: s.bet,
+        invested: s.invested,
+        isBot: !!s.isBot,
+        handStartChips: toSafeInt(s.handStartChips, s.chips),
+        lastAction: s.lastAction && typeof s.lastAction === "object" ? { ...s.lastAction } : null,
+        actedThisStreet: !!s.actedThisStreet,
+        cosmetics:
+          s.cosmetics && typeof s.cosmetics === "object"
+            ? { ...s.cosmetics }
+            : { tableTheme: null, cardSkin: null },
+      })),
+      actionSpec: this.computeTurnActionSpec(this.currentIndex),
+      lastAction: this.computeLastTableAction(),
+    };
+  }
+
+  restoreFromSnapshot(snapshot) {
+    if (!snapshot || String(snapshot.tableId) !== String(this.tableId)) return false;
+
+    this.running = !!snapshot.running;
+    this.starting = false;
+    this.round = String(snapshot.round || "idle");
+    this.pot = toSafeInt(snapshot.pot, 0);
+    this.currentBet = toSafeInt(snapshot.currentBet, 0);
+    this.minRaise = toSafeInt(snapshot.minRaise, this.bigBlind);
+    this.lastRaiseAmount = toSafeInt(snapshot.lastRaiseAmount, this.bigBlind);
+    this.dealerIndex = toSafeInt(snapshot.dealerIndex, 0);
+    this.currentIndex = toSafeInt(snapshot.currentIndex, 0);
+    this.actionDeadline = snapshot.actionDeadline || null;
+    this.botFillDeadline = snapshot.botFillDeadline || null;
+    this.turnSeconds = toSafeInt(snapshot.turnSeconds, this.turnSeconds);
+    this.smallBlind = toSafeInt(snapshot.smallBlind, this.smallBlind);
+    this.bigBlind = toSafeInt(snapshot.bigBlind, this.bigBlind);
+    this.sbSeatIndex = toSafeInt(snapshot.sbSeatIndex, -1);
+    this.bbSeatIndex = toSafeInt(snapshot.bbSeatIndex, -1);
+    this.community = Array.isArray(snapshot.community) ? [...snapshot.community] : [];
+    this.deck = Array.isArray(snapshot.deck) ? [...snapshot.deck] : [];
+    this.currentHandId = snapshot.currentHandId || null;
+    this.serverSeedHash = snapshot.serverSeedHash || null;
+    this.clientSeedDigest = snapshot.clientSeedDigest || null;
+    this.currentHandActions = Array.isArray(snapshot.currentHandActions)
+      ? [...snapshot.currentHandActions]
+      : [];
+    this.processedActionIds = new Set(
+      Array.isArray(snapshot.processedActionIds) ? snapshot.processedActionIds : []
+    );
+    this.stateRevision = toSafeInt(snapshot.stateRevision, 0);
+    this.lastHand = snapshot.lastHand || null;
+    this.shortAllInNoReopen = !!snapshot.shortAllInNoReopen;
+    this.showdownRevealedSeats = new Set(
+      Array.isArray(snapshot.showdownRevealedSeats) ? snapshot.showdownRevealedSeats : []
+    );
+    // actionSpec / lastAction in snapshot are for subscribers; live table recomputes each tick.
+
+    const restoredSeats = Array.isArray(snapshot.seats) ? snapshot.seats : [];
+    if (restoredSeats.length > 0) {
+      this.seats = restoredSeats.map((s) => ({
+        userId: String(s.userId),
+        name: s.name || "Player",
+        avatar: s.avatar || null,
+        chips: toSafeInt(s.chips, 0),
+        inHand: !!s.inHand,
+        hole: Array.isArray(s.hole) ? [...s.hole] : [],
+        folded: !!s.folded,
+        allIn: !!s.allIn,
+        bet: toSafeInt(s.bet, 0),
+        invested: toSafeInt(s.invested, 0),
+        isBot: !!s.isBot,
+        handStartChips: toSafeInt(s.handStartChips, toSafeInt(s.chips, 0)),
+        lastAction: s.lastAction && typeof s.lastAction === "object" ? { ...s.lastAction } : null,
+        actedThisStreet: !!s.actedThisStreet,
+        cosmetics:
+          s.cosmetics && typeof s.cosmetics === "object"
+            ? { tableTheme: s.cosmetics.tableTheme || null, cardSkin: s.cosmetics.cardSkin || null }
+            : { tableTheme: null, cardSkin: null },
+      }));
+      if (this.seats.length > 0) {
+        this.dealerIndex =
+          ((this.dealerIndex % this.seats.length) + this.seats.length) % this.seats.length;
+        this.currentIndex =
+          ((this.currentIndex % this.seats.length) + this.seats.length) % this.seats.length;
+      }
+    }
+
+    this.clearActionScheduling();
+    if (this.running) {
+      this.scheduleCurrentTurn();
+    }
+    return true;
+  }
+
+  static publicStateFromSnapshot(snapshot, forUserId) {
+    if (!snapshot || !Array.isArray(snapshot.seats)) return null;
+    const seats = snapshot.seats;
+    const currentIndex = toSafeInt(snapshot.currentIndex, 0);
+    const turnUserId = seats[currentIndex]?.userId || null;
+    const isActor =
+      forUserId != null && turnUserId != null && String(forUserId) === String(turnUserId);
+    const rawSpec = isActor ? snapshot.actionSpec || null : null;
+    const actionSpec = normalizeClientActionSpec(rawSpec, isActor);
+
+    return {
+      tableId: String(snapshot.tableId),
+      stateRevision: toSafeInt(snapshot.stateRevision, 0),
+      round: String(snapshot.round || "idle"),
+      community: Array.isArray(snapshot.community) ? snapshot.community : [],
+      pot: toSafeInt(snapshot.pot, 0),
+      currentBet: toSafeInt(snapshot.currentBet, 0),
+      minRaise: toSafeInt(snapshot.minRaise, 0),
+      lastRaiseAmount: toSafeInt(snapshot.lastRaiseAmount, 0),
+      smallBlind: toSafeInt(snapshot.smallBlind, 0),
+      bigBlind: toSafeInt(snapshot.bigBlind, 0),
+      sbSeatIndex: toSafeInt(snapshot.sbSeatIndex, -1),
+      bbSeatIndex: toSafeInt(snapshot.bbSeatIndex, -1),
+      dealerSeatIndex: toSafeInt(snapshot.dealerIndex, 0),
+      turnUserId,
+      actionDeadline: snapshot.actionDeadline || null,
+      botFillDeadline: snapshot.botFillDeadline || null,
+      lastHand: snapshot.lastHand || null,
+      actionSpec,
+      lastAction:
+        snapshot.lastAction && typeof snapshot.lastAction === "object"
+          ? { ...snapshot.lastAction }
+          : null,
+      seats: seats.map((s, i) => ({
+        seatIndex: i,
+        userId: s.userId,
+        name: s.name,
+        avatar: s.avatar,
+        isBot: !!s.isBot,
+        chips: toSafeInt(s.chips, 0),
+        inHand: !!s.inHand,
+        folded: !!s.folded,
+        allIn: !!s.allIn,
+        hole: mapHoleForClientView({
+          round: snapshot.round,
+          lastHand: snapshot.lastHand,
+          seat: s,
+          seatIndex: i,
+          forUserId,
+          showdownRevealedSeats: new Set(
+            Array.isArray(snapshot.showdownRevealedSeats) ? snapshot.showdownRevealedSeats : []
+          ),
+        }),
+        bet: toSafeInt(s.bet, 0),
+        lastAction: s.lastAction && typeof s.lastAction === "object" ? { ...s.lastAction } : null,
+        cosmetics:
+          s.cosmetics && typeof s.cosmetics === "object"
+            ? {
+                tableTheme: s.cosmetics.tableTheme || null,
+                cardSkin: s.cosmetics.cardSkin || null,
+              }
+            : { tableTheme: null, cardSkin: null },
+      })),
+    };
+  }
+
+  async saveSnapshot({ finished = false } = {}) {
+    this.stateRevision = toSafeInt(this.stateRevision, 0) + 1;
+    if (!this.stateStore || !this.stateStore.isEnabled()) return;
+    const snapshot = this.serializeSnapshot();
+    await this.stateStore.save(this.tableId, snapshot, { finished });
+  }
+
+  clearTurnTimer() {
+    if (this.turnTimer) {
+      clearTimeout(this.turnTimer);
+      this.turnTimer = null;
+    }
+  }
+
+  clearBotThinkTimer() {
+    if (this.botThinkTimer) {
+      clearTimeout(this.botThinkTimer);
+      this.botThinkTimer = null;
+    }
+  }
+
+  clearBotFillTimer() {
+    if (this.botFillTimer) {
+      clearTimeout(this.botFillTimer);
+      this.botFillTimer = null;
+    }
+    this.botFillDeadline = null;
+  }
+
+  clearActionScheduling() {
+    this.clearTurnTimer();
+    this.clearBotThinkTimer();
+    this.actionDeadline = null;
+  }
+
+  compareRank(a, b) {
+    if (!a && !b) return 0;
+    if (!a) return -1;
+    if (!b) return 1;
+    if (a.cat !== b.cat) return a.cat - b.cat;
+    const at = Array.isArray(a.tiebreak) ? a.tiebreak : [];
+    const bt = Array.isArray(b.tiebreak) ? b.tiebreak : [];
+    for (let i = 0; i < Math.max(at.length, bt.length); i++) {
+      const av = at[i] || 0;
+      const bv = bt[i] || 0;
+      if (av !== bv) return av - bv;
+    }
+    return 0;
+  }
+
+  async applyJackpotPayout(winnerIdxs) {
+    if (!winnerIdxs || winnerIdxs.length === 0) return;
+    try {
+      const j = await Jackpot.getSingleton();
+      if (!j || (j.pot || 0) <= 0) return;
+      // Determine highest qualifying hand type among winners
+      let type = null; // 'royalFlush' | 'straightFlush' | 'fullHouse'
+      const qualified = [];
+      for (const i of winnerIdxs) {
+        if (this.seats[i]?.isBot) continue;
+        const rank = bestOf7([...this.seats[i].hole, ...this.community]);
+        if (rank.cat === 8) {
+          // Straight flush; royal if high is Ace (14)
+          const isRoyal = (rank.tiebreak && rank.tiebreak[0] === 14);
+          const t = isRoyal ? 'royalFlush' : 'straightFlush';
+          // Prefer higher category
+          if (type !== 'royalFlush') {
+            type = t;
+          }
+          qualified.push({ i, type: t });
+        } else if (rank.cat === 6) {
+          if (!type) type = 'fullHouse';
+          qualified.push({ i, type: 'fullHouse' });
+        }
+      }
+
+      if (!type) return; // no qualifying hand
+
+      const factor = type === 'royalFlush' ? (j.payouts?.royalFlush || 1.0)
+        : type === 'straightFlush' ? (j.payouts?.straightFlush || 0.8)
+        : (j.payouts?.fullHouse || 0.3);
+
+      let amount = Math.floor((j.pot || 0) * factor);
+      if (amount <= 0) return;
+
+      // Winners that match the selected highest type
+      const winners = qualified.filter((q) => q.type === type).map((q) => q.i);
+      const share = Math.max(0, Math.floor(amount / winners.length));
+      if (share <= 0) return;
+
+      for (const wi of winners) {
+        const userId = this.seats[wi].userId;
+        if (!userId || isBotUserId(userId)) continue;
+        let wallet = await Wallet.findOne({ user: userId });
+        if (!wallet) wallet = await Wallet.create({ user: userId });
+        await wallet.addTransaction('credit', share, `Golden Island jackpot (${type})`);
+      }
+
+      j.pot = Math.max(0, (j.pot || 0) - (share * winners.length));
+      await j.save();
+    } catch (e) {
+      // ignore jackpot payout errors to not block gameplay
+    }
+  }
+
+  resetStateFromTable(table) {
+    this.smallBlind = toSafeInt(table.smallBlind, this.smallBlind);
+    this.bigBlind = toSafeInt(table.bigBlind, this.bigBlind);
+    this.capacity = toSafeInt(table.capacity, this.capacity || 9);
+    this.minBuyIn = toSafeInt(table.minBuyIn, this.minBuyIn || this.bigBlind * 100);
+    this.maxBuyIn = toSafeInt(table.maxBuyIn, this.maxBuyIn || this.minBuyIn);
+    this.botFillTarget = clampInt(this.botFillTarget || 2, 2, Math.max(2, this.capacity));
+
+    // seats array as ordered in DB
+    this.seats = table.seats
+      .filter((s) => toSafeInt(s.chips, 0) > 0)
+      .map((s) => ({
+        userId: String(s.user?._id || s.user),
+        name: s.user?.name || "Player",
+        avatar: s.user?.profileImg || null,
+        chips: toSafeInt(s.chips, 0),
+        inHand: false,
+        hole: [],
+        folded: false,
+        allIn: false,
+        bet: 0,
+        invested: 0,
+        isBot: false,
+        lastAction: null,
+        actedThisStreet: false,
+        cosmetics: { tableTheme: null, cardSkin: null },
+      }));
+
+    if (this.seats.length > 0) {
+      this.dealerIndex = ((this.dealerIndex % this.seats.length) + this.seats.length) % this.seats.length;
+    } else {
+      this.dealerIndex = 0;
+    }
+
+    this.community = [];
+    this.pot = 0;
+    this.round = "idle"; // idle|preflop|flop|turn|river|showdown
+    this.currentBet = 0;
+    this.minRaise = this.bigBlind;
+    this.lastRaiseAmount = this.bigBlind;
+    this.currentIndex = 0;
+    this.sbSeatIndex = -1;
+    this.bbSeatIndex = -1;
+    this.shortAllInNoReopen = false;
+    this.showdownRevealedSeats = new Set();
+  }
+
+  async refreshSeatsFromDb() {
+    const previousBots = this.seats
+      .filter((s) => s.isBot && s.chips > 0)
+      .map((b) => ({
+        ...b,
+        inHand: false,
+        hole: [],
+        folded: false,
+        allIn: false,
+        bet: 0,
+        invested: 0,
+        actedThisStreet: false,
+      }));
+
+    const table = await Table.findById(this.tableId).populate({
+      path: "seats.user",
+      select: "name profileImg",
+    });
+    if (!table) return false;
+    this.resetStateFromTable(table);
+    await this.applyCosmeticsToSeats();
+
+    if (this.humanSeatCount() > 0 && this.activeSeatCount() < 2 && previousBots.length > 0) {
+      const target = Math.min(this.capacity, Math.max(2, this.botFillTarget));
+      const missing = Math.max(0, target - this.activeSeatCount());
+      const freeSlots = Math.max(0, this.capacity - this.seats.length);
+      const toRestore = Math.min(missing, freeSlots, previousBots.length);
+      if (toRestore > 0) {
+        this.seats.push(...previousBots.slice(0, toRestore));
+      }
+    }
+
+    return true;
+  }
+
+  async applyCosmeticsToSeats() {
+    const humanIds = this.seats
+      .filter((s) => s.userId && !s.isBot && !isBotUserId(String(s.userId)))
+      .map((s) => String(s.userId));
+    if (humanIds.length === 0) {
+      for (const s of this.seats) {
+        if (!s.cosmetics) s.cosmetics = { tableTheme: null, cardSkin: null };
+      }
+      return;
+    }
+    const map = await cosmeticsService.resolveEquippedPayloadForUsers(humanIds);
+    for (const s of this.seats) {
+      if (s.isBot || isBotUserId(String(s.userId))) {
+        s.cosmetics = { tableTheme: null, cardSkin: null };
+        continue;
+      }
+      const c = map.get(String(s.userId));
+      s.cosmetics = c ? { ...c } : { tableTheme: null, cardSkin: null };
+    }
+  }
+
+  findSeatIndexByUser(userId) {
+    return this.seats.findIndex((s) => String(s.userId) === String(userId));
+  }
+
+  activeSeatCount() {
+    return this.seats.filter((s) => s.chips > 0).length;
+  }
+
+  humanSeatCount() {
+    return this.seats.filter((s) => !s.isBot && s.chips > 0).length;
+  }
+
+  createBotSeat() {
+    this.botSerial += 1;
+    const userId = `bot:${this.tableId}:${Date.now()}:${this.botSerial}`;
+    return {
+      userId,
+      name: `Bot ${this.botSerial}`,
+      avatar: null,
+      chips: this.botBuyIn,
+      inHand: false,
+      hole: [],
+      folded: false,
+      allIn: false,
+      bet: 0,
+      invested: 0,
+      isBot: true,
+      lastAction: null,
+      actedThisStreet: false,
+      cosmetics: { tableTheme: null, cardSkin: null },
+    };
+  }
+
+  addBotsForMissingSeats() {
+    this.seats = this.seats.filter((s) => s.chips > 0);
+    if (this.seats.length > 0) {
+      this.dealerIndex = ((this.dealerIndex % this.seats.length) + this.seats.length) % this.seats.length;
+    } else {
+      this.dealerIndex = 0;
+    }
+
+    const humans = this.humanSeatCount();
+    if (humans <= 0) return 0;
+
+    const target = Math.min(this.capacity, Math.max(2, this.botFillTarget));
+    const active = this.activeSeatCount();
+    const missing = Math.max(0, target - active);
+    const freeSlots = Math.max(0, this.capacity - this.seats.length);
+    const toAdd = Math.min(missing, freeSlots);
+    if (toAdd === 0) return 0;
+
+    for (let i = 0; i < toAdd; i++) {
+      this.seats.push(this.createBotSeat());
+    }
+    return toAdd;
+  }
+
+  scheduleBotFillIfNeeded() {
+    if (this.running) return;
+    if (this.humanSeatCount() <= 0) return;
+    if (this.activeSeatCount() >= 2) {
+      this.clearBotFillTimer();
+      return;
+    }
+    if (this.botFillTimer) return;
+
+    this.botFillDeadline = Date.now() + this.botFillDelayMs;
+    this.botFillTimer = setTimeout(async () => {
+      this.botFillTimer = null;
+      this.botFillDeadline = null;
+      if (this.running || this.starting) return;
+      if (this.activeSeatCount() >= 2) return;
+
+      this.addBotsForMissingSeats();
+      await this.broadcastState();
+      await this.startIfReady({ refreshFromDb: false });
+    }, this.botFillDelayMs);
+  }
+
+  async startIfReady({ refreshFromDb = true } = {}) {
+    if (this.running || this.starting) return;
+    if (this.round !== "idle") {
+      this.logSuspicious("start_if_ready_non_idle_round", { round: this.round });
+      return;
+    }
+    this.starting = true;
+    try {
+      if (refreshFromDb) {
+        await this.refreshSeatsFromDb();
+      }
+
+      if (this.activeSeatCount() < 2) {
+        this.clearActionScheduling();
+        this.scheduleBotFillIfNeeded();
+        await this.broadcastState();
+        return;
+      }
+
+      this.clearBotFillTimer();
+      this.running = true;
+      await this.startHand();
+    } finally {
+      this.starting = false;
+    }
+  }
+
+  seatOrderFrom(dealerIndex) {
+    const n = this.seats.length;
+    const order = [];
+    for (let i = 1; i <= n; i++) {
+      order.push((dealerIndex + i) % n);
+    }
+    return order;
+  }
+
+  dealHoleCards(deck) {
+    for (const s of this.seats) {
+      if (s.chips > 0) {
+        s.inHand = true;
+        s.folded = false;
+        s.allIn = false;
+        s.bet = 0;
+        s.invested = 0;
+        s.hole = draw(deck, 2);
+      } else {
+        s.inHand = false;
+        s.folded = true;
+        s.allIn = false;
+        s.bet = 0;
+        s.invested = 0;
+        s.hole = [];
+      }
+    }
+  }
+
+  postBlind(seat, amount) {
+    const pay = Math.min(seat.chips, amount);
+    seat.chips -= pay;
+    seat.bet += pay;
+    seat.invested += pay;
+    this.pot += pay;
+    if (seat.chips === 0) seat.allIn = true;
+    return pay;
+  }
+
+  nextToActIndex(startIdx) {
+    const n = this.seats.length;
+    for (let k = 0; k < n; k++) {
+      const i = (startIdx + k) % n;
+      const s = this.seats[i];
+      if (s.inHand && !s.folded && !s.allIn) {
+        return i;
+      }
+    }
+    return -1;
+  }
+
+  everyoneSettled() {
+    // Everyone either folded or matched currentBet or all-in
+    return this.seats.every((s) => {
+      if (!s.inHand || s.folded) return true;
+      if (s.allIn) return true;
+      return s.bet === this.currentBet;
+    });
+  }
+
+  aliveCount() {
+    return this.seats.filter((s) => s.inHand && !s.folded).length;
+  }
+
+  /**
+   * Returns the turn-player-only action spec for the architecture contract.
+   * minRaise/maxRaise are EXTRA amount above callAmount.
+   */
+  computeTurnActionSpec(seatIndex) {
+    const seat = this.seats[seatIndex];
+    if (!seat || !seat.inHand || seat.folded || seat.allIn) return null;
+
+    const callAmount = Math.max(0, this.currentBet - seat.bet);
+    const canCheck = callAmount === 0;
+    const isAllInOnly = callAmount > 0 && seat.chips < callAmount;
+
+    // Real-poker rule: minimum next raise equals last full raise amount.
+    const minRaise = toSafeInt(this.lastRaiseAmount, this.bigBlind);
+    const maxRaise = Math.max(0, seat.chips - callAmount); // extra above call
+
+    const allowed = ["fold", "call"];
+
+    // Remove raise if it can't satisfy the minimum extra raise.
+    if (maxRaise < minRaise || maxRaise <= 0) {
+      return {
+        allowed,
+        callAmount,
+        minRaise,
+        maxRaise,
+        canCheck,
+        isAllInOnly,
+      };
+    }
+
+    allowed.push("raise");
+    if (this.shortAllInNoReopen && seat.actedThisStreet) {
+      const ri = allowed.indexOf("raise");
+      if (ri >= 0) allowed.splice(ri, 1);
+    }
+    return {
+      allowed,
+      callAmount,
+      minRaise,
+      maxRaise,
+      canCheck,
+      isAllInOnly,
+    };
+  }
+
+  async startHand() {
+    this.clearActionScheduling();
+
+    // Reset
+    this.community = [];
+    this.pot = 0;
+    if (!this.setRound("preflop")) return;
+    this.currentBet = 0;
+    this.minRaise = this.bigBlind;
+    this.lastRaiseAmount = this.bigBlind;
+    this.currentHandId = `${this.tableId}-${Date.now()}-${this.handCounter + 1}`;
+    this.currentHandActions = [];
+    this.processedActionIds = new Set();
+    this.shortAllInNoReopen = false;
+    this.serverSeed = crypto.randomBytes(32).toString("hex");
+    this.serverSeedHash = sha256Hex(this.serverSeed);
+    const clientSeedMaterial = this.seats
+      .map((s) => `${s.userId}:${s.clientSeed || "default"}`)
+      .sort()
+      .join("|");
+    this.clientSeedDigest = sha256Hex(clientSeedMaterial);
+
+    // Prepare deck
+    const shuffleSeed = `${this.serverSeed}:${this.clientSeedDigest}:${this.currentHandId}`;
+    const deck = shuffleDeterministic(newDeck(), shuffleSeed);
+
+    for (const s of this.seats) {
+      s.handStartChips = s.chips;
+      s.lastAction = null;
+      s.actedThisStreet = false;
+    }
+
+    // Deal hole cards
+    this.dealHoleCards(deck);
+
+    // Post blinds
+    const order = this.seatOrderFrom(this.dealerIndex);
+    const inHandIdxs = this.seats
+      .map((s, i) => (s.inHand ? i : -1))
+      .filter((i) => i >= 0);
+
+    let sbIndex = order.find((i) => this.seats[i].inHand) ?? -1;
+    let bbIndex = order.find((i) => i !== sbIndex && this.seats[i].inHand) ?? -1;
+
+    // Heads-up rule: dealer posts SB and acts first preflop.
+    if (inHandIdxs.length === 2) {
+      const dealerInHand = this.seats[this.dealerIndex]?.inHand === true;
+      const dealerSeat = dealerInHand ? this.dealerIndex : inHandIdxs[0];
+      const otherSeat = inHandIdxs.find((i) => i !== dealerSeat) ?? -1;
+      if (otherSeat >= 0) {
+        sbIndex = dealerSeat;
+        bbIndex = otherSeat;
+      }
+    }
+
+    if (sbIndex === -1 || bbIndex === -1) {
+      // Not enough players
+      this.sbSeatIndex = -1;
+      this.bbSeatIndex = -1;
+      this.running = false;
+      this.scheduleBotFillIfNeeded();
+      await this.broadcastState();
+      return;
+    }
+    this.sbSeatIndex = sbIndex;
+    this.bbSeatIndex = bbIndex;
+    const sbPaid = this.postBlind(this.seats[sbIndex], this.smallBlind);
+    const bbPaid = this.postBlind(this.seats[bbIndex], this.bigBlind);
+    this.currentBet = Math.max(sbPaid, bbPaid);
+    this.lastRaiseAmount = Math.max(this.bigBlind, this.currentBet);
+    this.appendHandAction({
+      type: "blind",
+      seatIndex: sbIndex,
+      playerId: this.seats[sbIndex]?.userId,
+      amount: sbPaid,
+      blind: "SB",
+    });
+    this.recordSeatAction(sbIndex, "blind", sbPaid);
+    this.appendHandAction({
+      type: "blind",
+      seatIndex: bbIndex,
+      playerId: this.seats[bbIndex]?.userId,
+      amount: bbPaid,
+      blind: "BB",
+    });
+    this.recordSeatAction(bbIndex, "blind", bbPaid);
+
+    // First to act preflop: in heads-up it's SB(dealer), otherwise next after BB.
+    const start = inHandIdxs.length === 2
+      ? sbIndex
+      : (order.find((i) => i !== sbIndex && i !== bbIndex && this.seats[i].inHand) ?? bbIndex);
+    this.currentIndex = this.nextToActIndex(start);
+
+    // Burn+flop/turn/river deferred until rounds advance
+    this.deck = deck;
+
+    // Jackpot contribution per hand (Golden Island)
+    await this.applyJackpotContribution();
+
+    await this.broadcastState();
+    this.scheduleCurrentTurn();
+  }
+
+  scheduleCurrentTurn() {
+    this.clearActionScheduling();
+    if (!this.running) return;
+
+    const seat = this.seats[this.currentIndex];
+    if (!seat || !seat.inHand || seat.folded || seat.allIn) {
+      this.actionDeadline = null;
+      setTimeout(() => this.advance(), 0);
+      return;
+    }
+
+    if (seat.isBot) {
+      this.actionDeadline = null;
+      const thinkMs = 900 + secureRandomInt(1500);
+      this.botThinkTimer = setTimeout(() => {
+        this.playBotTurn(this.currentIndex);
+      }, thinkMs);
+      return;
+    }
+
+    this.actionDeadline = Date.now() + this.turnSeconds * 1000;
+    this.turnTimer = setTimeout(() => {
+      this.handleTimeout();
+    }, this.turnSeconds * 1000 + 100);
+  }
+
+  async handleTimeout() {
+    const lockAcquired = await this.acquireActionLock();
+    if (!lockAcquired) return;
+
+    try {
+      const s = this.seats[this.currentIndex];
+      if (!s || !s.inHand || s.folded || s.allIn || s.chips <= 0) {
+        await this.advance();
+        return;
+      }
+
+      const callAmount = Math.max(0, this.currentBet - s.bet);
+      // Architecture timeout rule
+      if (callAmount === 0) {
+        // Acts as "call/check"
+        this.applyCall(this.currentIndex);
+        this.recordSeatAction(this.currentIndex, "check", 0);
+        this.appendHandAction({
+          type: "timeout_call",
+          seatIndex: this.currentIndex,
+          playerId: this.seats[this.currentIndex]?.userId,
+          amount: 0,
+        });
+      } else {
+        this.applyFold(this.currentIndex);
+        this.recordSeatAction(this.currentIndex, "fold");
+        this.appendHandAction({
+          type: "timeout_fold",
+          seatIndex: this.currentIndex,
+          playerId: this.seats[this.currentIndex]?.userId,
+        });
+      }
+      this.markVoluntaryAction(this.currentIndex);
+      await this.advance();
+    } finally {
+      await this.releaseActionLock();
+    }
+  }
+
+  botRaiseSize(i) {
+    const seat = this.seats[i];
+    if (!seat) return 0;
+    const need = Math.max(0, this.currentBet - seat.bet);
+    const minExtra = this.currentBet > 0 ? this.minRaise : this.bigBlind;
+    const maxExtra = Math.max(0, seat.chips - need);
+    if (maxExtra < minExtra) return 0;
+    const cap = Math.max(minExtra, Math.min(maxExtra, this.bigBlind * 6));
+    if (cap <= minExtra) return minExtra;
+    return minExtra + secureRandomInt(cap - minExtra + 1);
+  }
+
+  async playBotTurn(seatIndex) {
+    if (!this.running) return;
+    if (seatIndex !== this.currentIndex) return;
+    const seat = this.seats[seatIndex];
+    if (!seat || !seat.isBot || !seat.inHand || seat.folded || seat.allIn) return;
+
+    const need = Math.max(0, this.currentBet - seat.bet);
+    const stack = seat.chips;
+    const canRaise = this.botRaiseSize(seatIndex) > 0;
+    const roll = secureRandomInt(1_000_000_000) / 1_000_000_000;
+
+    if (need === 0) {
+      if (canRaise && stack > this.bigBlind * 2 && roll < 0.22) {
+        const raise = this.botRaiseSize(seatIndex);
+        if (raise > 0) {
+          this.applyBetOrRaise(seatIndex, raise);
+          this.recordSeatAction(seatIndex, "raise", raise);
+        }
+      } else {
+        const beforeChips = this.seats[seatIndex].chips;
+        this.applyCall(seatIndex);
+        const paid = Math.max(0, beforeChips - this.seats[seatIndex].chips);
+        this.recordSeatAction(seatIndex, "check", paid);
+      }
+    } else if (need >= stack) {
+      if (roll < 0.72) {
+        const beforeChips = this.seats[seatIndex].chips;
+        this.applyCall(seatIndex);
+        const paid = Math.max(0, beforeChips - this.seats[seatIndex].chips);
+        this.recordSeatAction(seatIndex, "call", paid);
+      } else {
+        this.applyFold(seatIndex);
+        this.recordSeatAction(seatIndex, "fold");
+      }
+    } else if (need <= this.bigBlind) {
+      if (canRaise && roll < 0.16) {
+        const raise = this.botRaiseSize(seatIndex);
+        if (raise > 0) {
+          this.applyBetOrRaise(seatIndex, raise);
+          this.recordSeatAction(seatIndex, "raise", raise);
+        }
+      } else if (roll < 0.82) {
+        const beforeChips = this.seats[seatIndex].chips;
+        this.applyCall(seatIndex);
+        const paid = Math.max(0, beforeChips - this.seats[seatIndex].chips);
+        this.recordSeatAction(seatIndex, "call", paid);
+      } else {
+        this.applyFold(seatIndex);
+        this.recordSeatAction(seatIndex, "fold");
+      }
+    } else {
+      if (canRaise && roll < 0.1) {
+        const raise = this.botRaiseSize(seatIndex);
+        if (raise > 0) {
+          this.applyBetOrRaise(seatIndex, raise);
+          this.recordSeatAction(seatIndex, "raise", raise);
+        }
+      } else if (roll < 0.63) {
+        const beforeChips = this.seats[seatIndex].chips;
+        this.applyCall(seatIndex);
+        const paid = Math.max(0, beforeChips - this.seats[seatIndex].chips);
+        this.recordSeatAction(seatIndex, "call", paid);
+      } else {
+        this.applyFold(seatIndex);
+        this.recordSeatAction(seatIndex, "fold");
+      }
+    }
+
+    this.markVoluntaryAction(seatIndex);
+    await this.advance();
+  }
+
+  applyFold(i) {
+    this.seats[i].folded = true;
+  }
+
+  applyCall(i) {
+    const need = Math.max(0, this.currentBet - this.seats[i].bet);
+    const pay = Math.min(need, this.seats[i].chips);
+    this.seats[i].chips -= pay;
+    this.seats[i].bet += pay;
+    this.seats[i].invested += pay;
+    this.pot += pay;
+    if (this.seats[i].chips === 0) this.seats[i].allIn = true;
+  }
+
+  applyBetOrRaise(i, amount) {
+    const need = Math.max(0, this.currentBet - this.seats[i].bet);
+    const toPut = need + amount; // amount is raise size (for bet, currentBet==0, need is 0)
+    const pay = Math.min(toPut, this.seats[i].chips);
+    const prevCurrentBet = this.currentBet;
+    const prevLastRaise = this.lastRaiseAmount;
+
+    this.seats[i].chips -= pay;
+    this.seats[i].bet += pay;
+    this.seats[i].invested += pay;
+    this.pot += pay;
+
+    const contributed = this.seats[i].bet;
+    if (contributed > this.currentBet) {
+      const diff = contributed - this.currentBet;
+      this.currentBet = contributed;
+
+      // Real-money rule: short all-in raise does NOT reopen action and does
+      // NOT change lastRaiseAmount/minRaise. Only full raises do.
+      const wasAllIn = this.seats[i].chips === 0;
+      const isFullRaise = diff >= prevLastRaise;
+      if (!wasAllIn || isFullRaise) {
+        this.lastRaiseAmount = diff;
+        this.minRaise = this.lastRaiseAmount;
+        this.shortAllInNoReopen = false;
+      } else {
+        this.lastRaiseAmount = prevLastRaise;
+        this.minRaise = prevLastRaise;
+        this.shortAllInNoReopen = true;
+      }
+
+      this.appendHandAction({
+        type: "bet_level_update",
+        seatIndex: i,
+        playerId: this.seats[i]?.userId,
+        previousBet: prevCurrentBet,
+        newBet: this.currentBet,
+        raiseDelta: diff,
+        prevLastRaise,
+        updatedLastRaise: this.lastRaiseAmount,
+        fullRaise: !wasAllIn || isFullRaise,
+        shortAllIn: wasAllIn && !isFullRaise,
+      });
+    }
+    if (this.seats[i].chips === 0) this.seats[i].allIn = true;
+  }
+
+  buildSidePots() {
+    const invested = this.seats
+      .map((s, i) => ({
+        i,
+        amount: Number(s.invested || 0),
+        eligible: s.inHand && !s.folded,
+      }))
+      .filter((x) => x.amount > 0);
+
+    if (invested.length === 0) return [];
+
+    const thresholds = [...new Set(invested.map((x) => x.amount))].sort((a, b) => a - b);
+    const sidePots = [];
+    let prev = 0;
+
+    for (const t of thresholds) {
+      const contributors = invested.filter((x) => x.amount >= t).map((x) => x.i);
+      const eligible = invested
+        .filter((x) => x.amount >= t && x.eligible)
+        .map((x) => x.i);
+      const amount = (t - prev) * contributors.length;
+      if (amount > 0) {
+        sidePots.push({ amount, contributors, eligible });
+      }
+      prev = t;
+    }
+
+    return sidePots;
+  }
+
+  resolveSidePotPayouts(rankByIndex) {
+    const payouts = new Map();
+    const seatOrder = this.seatOrderFrom(this.dealerIndex);
+    const sidePots = this.buildSidePots();
+
+    for (const pot of sidePots) {
+      if (!pot.eligible || pot.eligible.length === 0 || pot.amount <= 0) continue;
+
+      let winners = [pot.eligible[0]];
+      for (const idx of pot.eligible.slice(1)) {
+        const cmp = this.compareRank(rankByIndex.get(idx), rankByIndex.get(winners[0]));
+        if (cmp > 0) {
+          winners = [idx];
+        } else if (cmp === 0) {
+          winners.push(idx);
+        }
+      }
+
+      const share = Math.floor(pot.amount / winners.length);
+      let remainder = pot.amount - share * winners.length;
+      const orderedWinners = seatOrder.filter((i) => winners.includes(i));
+
+      for (const idx of orderedWinners) {
+        const extra = remainder > 0 ? 1 : 0;
+        if (remainder > 0) remainder -= 1;
+        payouts.set(idx, (payouts.get(idx) || 0) + share + extra);
+      }
+    }
+
+    return payouts;
+  }
+
+  resolveSidePotPayoutsWithDistribution(rankByIndex) {
+    const payouts = new Map();
+    const seatOrder = this.seatOrderFrom(this.dealerIndex);
+    const sidePots = this.buildSidePots();
+
+    let potId = 0;
+    const potDistribution = [];
+
+    for (const pot of sidePots) {
+      if (!pot.eligible || pot.eligible.length === 0 || pot.amount <= 0) continue;
+
+      potId += 1;
+
+      let winners = [pot.eligible[0]];
+      for (const idx of pot.eligible.slice(1)) {
+        const cmp = this.compareRank(rankByIndex.get(idx), rankByIndex.get(winners[0]));
+        if (cmp > 0) {
+          winners = [idx];
+        } else if (cmp === 0) {
+          winners.push(idx);
+        }
+      }
+
+      const share = Math.floor(pot.amount / winners.length);
+      let remainder = pot.amount - share * winners.length;
+      const orderedWinners = seatOrder.filter((i) => winners.includes(i));
+
+      const winnersDistribution = [];
+      for (const idx of orderedWinners) {
+        const extra = remainder > 0 ? 1 : 0;
+        if (remainder > 0) remainder -= 1;
+
+        const amountWon = share + extra;
+        payouts.set(idx, (payouts.get(idx) || 0) + amountWon);
+        winnersDistribution.push({ seatIndex: idx, amountWon });
+      }
+
+      potDistribution.push({
+        potId,
+        amount: pot.amount, // gross (before rake)
+        eligibleSeatIndices: pot.eligible,
+        winners: winnersDistribution,
+      });
+    }
+
+    return { payouts, potDistribution };
+  }
+
+  applyRakeToPayouts(payouts, rake) {
+    const cutsBySeat = new Map();
+    if (!rake || rake <= 0) return cutsBySeat;
+    let remaining = rake;
+    const ordered = [...payouts.entries()].sort((a, b) => b[1] - a[1]);
+    for (const [idx, amount] of ordered) {
+      if (remaining <= 0) break;
+      const cut = Math.min(amount, remaining);
+      payouts.set(idx, amount - cut);
+      if (cut > 0) cutsBySeat.set(idx, cut);
+      remaining -= cut;
+    }
+    return cutsBySeat;
+  }
+
+  burn(n = 1) {
+    draw(this.deck, n);
+  }
+
+  dealCommunity(n) {
+    this.community.push(...draw(this.deck, n));
+  }
+
+  endBettingRound() {
+    for (const s of this.seats) {
+      s.bet = 0;
+      s.actedThisStreet = false;
+    }
+    this.currentBet = 0;
+    this.lastRaiseAmount = this.bigBlind;
+    this.minRaise = this.lastRaiseAmount;
+    this.shortAllInNoReopen = false;
+  }
+
+  async advance() {
+    // If one alive -> award
+    if (this.aliveCount() <= 1) {
+      await this.finishHandByFold();
+      return;
+    }
+
+    // If betting round settled, advance street or showdown
+    if (this.everyoneSettled()) {
+      if (this.round === "preflop") {
+        this.endBettingRound();
+        this.burn(1);
+        this.dealCommunity(3); // flop
+        this.setRound("flop");
+        this.appendHandAction({ type: "street", street: "flop" });
+      } else if (this.round === "flop") {
+        this.endBettingRound();
+        this.burn(1);
+        this.dealCommunity(1); // turn
+        this.setRound("turn");
+        this.appendHandAction({ type: "street", street: "turn" });
+      } else if (this.round === "turn") {
+        this.endBettingRound();
+        this.burn(1);
+        this.dealCommunity(1); // river
+        this.setRound("river");
+        this.appendHandAction({ type: "street", street: "river" });
+      } else if (this.round === "river") {
+        await this.showdown();
+        return;
+      }
+      // Set next player to first alive from dealer+1
+      const order = this.seatOrderFrom(this.dealerIndex);
+      const start = order[0];
+      this.currentIndex = this.nextToActIndex(start);
+      await this.broadcastState();
+      this.scheduleCurrentTurn();
+      return;
+    }
+
+    // Otherwise move to next player
+    this.currentIndex = this.nextToActIndex(this.currentIndex + 1);
+    await this.broadcastState();
+    this.scheduleCurrentTurn();
+  }
+
+  async finishHandByFold() {
+    // Award whole pot to the only alive player
+    const winnerIdx = this.seats.findIndex((s) => s.inHand && !s.folded);
+    const payouts = new Map();
+    if (winnerIdx >= 0 && this.pot > 0) {
+      payouts.set(winnerIdx, this.pot);
+    }
+    await this.persistAndPrepareNext(
+      [],
+      payouts,
+      winnerIdx >= 0 ? [winnerIdx] : [],
+      { reason: "fold" }
+    );
+  }
+
+  /**
+   * Last raise on river (then turn, flop, preflop). Used for TV-style show order.
+   */
+  findLastAggressiveSeatIndexBeforeShowdown() {
+    const streets = ["river", "turn", "flop", "preflop"];
+    for (const r of streets) {
+      for (let i = this.currentHandActions.length - 1; i >= 0; i--) {
+        const a = this.currentHandActions[i];
+        if (!a || typeof a !== "object") continue;
+        const t = String(a.type || "");
+        if (t === "street") continue;
+        if (String(a.round || "") !== r) continue;
+        if (t === "raise") {
+          const si = toSafeInt(a.seatIndex, -1);
+          if (si >= 0 && si < this.seats.length) return si;
+        }
+      }
+    }
+    return -1;
+  }
+
+  /**
+   * Losers first: seat order from last aggressor (if a contender), else dealer order.
+   * Winners last: weaker hands first, strongest last (dramatic nuts reveal).
+   */
+  buildShowdownRevealOrder(contenderSeatIndices, winnerSeatIndices, options = {}) {
+    const win = new Set(winnerSeatIndices || []);
+    const contenders = new Set(contenderSeatIndices || []);
+    const order = this.seatOrderFrom(this.dealerIndex).filter((i) => contenders.has(i));
+
+    const loserOrderBase = order.filter((i) => !win.has(i));
+    const lastAgg = toSafeInt(options.lastAggressorSeat, -1);
+    let losers = loserOrderBase;
+    if (lastAgg >= 0 && loserOrderBase.includes(lastAgg)) {
+      const k = loserOrderBase.indexOf(lastAgg);
+      losers = [...loserOrderBase.slice(k), ...loserOrderBase.slice(0, k)];
+    }
+
+    const winners = order.filter((i) => win.has(i));
+    const rankByIndex = options.rankByIndex;
+    const byTable = (a, b) => order.indexOf(a) - order.indexOf(b);
+    let orderedWinners = [...winners];
+    if (rankByIndex instanceof Map) {
+      orderedWinners.sort((a, b) => {
+        const cmp = this.compareRank(rankByIndex.get(a), rankByIndex.get(b));
+        if (cmp !== 0) return cmp;
+        return byTable(a, b);
+      });
+    } else {
+      orderedWinners.sort(byTable);
+    }
+
+    return [...losers, ...orderedWinners];
+  }
+
+  async showdown() {
+    if (!this.setRound("showdown")) return;
+    this.appendHandAction({ type: "street", street: "showdown" });
+    this.showdownRevealedSeats = new Set();
+
+    const contenders = this.seats
+      .map((s, i) => ({ i, s }))
+      .filter(({ s }) => s.inHand && !s.folded);
+
+    const rankByIndex = new Map();
+    const showdownRanks = new Map();
+    let bestIdxs = [];
+    let bestRank = null;
+    for (const { i, s } of contenders) {
+      const rank = bestOf7([...s.hole, ...this.community]);
+      rankByIndex.set(i, rank);
+      showdownRanks.set(i, {
+        cat: rank.cat,
+        tiebreak: rank.tiebreak,
+        name: handCategoryName(rank),
+      });
+      if (!bestRank) {
+        bestRank = rank;
+        bestIdxs = [i];
+      } else {
+        const cmp = this.compareRank(rank, bestRank);
+        if (cmp > 0) {
+          bestRank = rank;
+          bestIdxs = [i];
+        } else if (cmp === 0) {
+          bestIdxs.push(i);
+        }
+      }
+    }
+
+    try {
+      await this.applyJackpotPayout(bestIdxs);
+    } catch (e) {}
+
+    const { payouts, potDistribution } = this.resolveSidePotPayoutsWithDistribution(rankByIndex);
+    const handCategory =
+      bestIdxs.length > 0 ? showdownRanks.get(bestIdxs[0])?.name || null : null;
+
+    const pauseMs = toSafeInt(process.env.POKER_SHOWDOWN_PAUSE_MS, 720);
+    const gapMs = toSafeInt(process.env.POKER_SHOWDOWN_REVEAL_GAP_MS, 520);
+    const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+    const room = `tg:${this.tableId}`;
+
+    const lastAggSeat = this.findLastAggressiveSeatIndexBeforeShowdown();
+    const revealOrder = this.buildShowdownRevealOrder(
+      contenders.map((c) => c.i),
+      bestIdxs,
+      { lastAggressorSeat: lastAggSeat, rankByIndex }
+    );
+
+    const winnerUserIds = bestIdxs.map((i) => String(this.seats[i]?.userId || ""));
+    this.nsp.to(room).emit("showdown_start", {
+      players: contenders.map(({ i, s }) => ({ userId: String(s.userId), seatIndex: i })),
+      winnerUserIds,
+      winnerSeatIndices: bestIdxs,
+      pauseMs,
+      revealGapMs: gapMs,
+      lastAggressorSeatIndex: lastAggSeat >= 0 ? lastAggSeat : null,
+      revealStrategy: "last_aggressor_then_strength",
+      stateRevision: toSafeInt(this.stateRevision, 0),
+    });
+    await this.broadcastState(false);
+
+    await sleep(pauseMs);
+
+    // Only seats with two hole cards participate in reveal steps; using the raw
+    // contender order for `step`/`total`/`dramatic` breaks clients when any seat
+    // is skipped (wrong counts, missing dramatic reveal).
+    const revealSteps = [];
+    for (const seatIndex of revealOrder) {
+      const s = this.seats[seatIndex];
+      if (!s || !Array.isArray(s.hole) || s.hole.length < 2) continue;
+      revealSteps.push({ seatIndex, s });
+    }
+    const total = revealSteps.length;
+    for (let step = 0; step < total; step++) {
+      const { seatIndex, s } = revealSteps[step];
+      this.showdownRevealedSeats.add(seatIndex);
+      const dramatic = step === total - 1;
+      const cat = showdownRanks.get(seatIndex)?.name || null;
+      this.nsp.to(room).emit("reveal_card", {
+        userId: String(s.userId),
+        seatIndex,
+        cards: [String(s.hole[0] || ""), String(s.hole[1] || "")],
+        isWinner: bestIdxs.includes(seatIndex),
+        dramatic,
+        step: step + 1,
+        total,
+        handCategory: cat,
+      });
+      await this.broadcastState(false);
+      await sleep(dramatic ? Math.floor(gapMs * 1.35) : gapMs);
+    }
+
+    await this.broadcastState(true);
+
+    const potBeforeSettlement = toSafeInt(this.pot, 0);
+    const contributions = [];
+    for (let i = 0; i < this.seats.length; i++) {
+      const s = this.seats[i];
+      const uid = String(s?.userId || "");
+      const amt = toSafeInt(s?.invested, 0);
+      if (uid && amt > 0) contributions.push({ userId: uid, amount: amt });
+    }
+    const closingHandId = this.currentHandId;
+
+    const potsPayload = potDistribution.map((p) => ({
+      amount: toSafeInt(p.amount, 0),
+      eligibleUserIds: (Array.isArray(p.eligibleSeatIndices) ? p.eligibleSeatIndices : [])
+        .map((si) => String(this.seats[toSafeInt(si, -1)]?.userId || ""))
+        .filter(Boolean),
+      winnerUserIds: (Array.isArray(p.winners) ? p.winners : [])
+        .map((w) => String(this.seats[toSafeInt(w.seatIndex, -1)]?.userId || ""))
+        .filter(Boolean),
+    }));
+
+    let winnerBadge = "WINNER";
+    if (bestIdxs.length > 1) {
+      winnerBadge = "SPLIT_POT";
+    } else if (bestIdxs.length === 1) {
+      const ws = this.seats[bestIdxs[0]];
+      if (ws && ws.allIn) winnerBadge = "ALL_IN_WIN";
+    }
+
+    this.showdownEndSeq = toSafeInt(this.showdownEndSeq, 0) + 1;
+
+    await this.persistAndPrepareNext(this.community, payouts, bestIdxs, {
+      reason: "showdown",
+      showdownRanks,
+      potDistribution,
+      handCategory,
+    }, { manageLifecycle: false });
+
+    this.showdownRevealedSeats = new Set();
+    this.nsp.to(room).emit("showdown_end", {
+      handId: closingHandId,
+      showdownSeq: this.showdownEndSeq,
+      winnerUserIds,
+      winners: winnerUserIds.slice(),
+      pot: potBeforeSettlement,
+      contributions,
+      pots: potsPayload,
+      winnerBadge,
+      stateRevision: toSafeInt(this.stateRevision, 0),
+    });
+
+    this.setRound("idle");
+    await this.broadcastState();
+    this.currentHandId = null;
+    this.currentHandActions = [];
+    this.processedActionIds = new Set();
+  }
+
+  async applyJackpotContribution() {
+    try {
+      const j = await Jackpot.getSingleton();
+      const fee = Math.max(0, Number(process.env.JACKPOT_FEE_PER_HAND || j.contributionPerHand || 0));
+      if (fee <= 0) return;
+      let total = 0;
+      for (const s of this.seats) {
+        if (!s.isBot && s.inHand && s.chips > 0) {
+          const d = Math.min(s.chips, fee);
+          s.chips -= d;
+          total += d;
+          if (s.chips === 0) s.allIn = true;
+        }
+      }
+      if (total > 0) {
+        j.pot += total;
+        await j.save();
+      }
+    } catch (e) {
+      // ignore jackpot errors to not block gameplay
+    }
+  }
+
+  async persistAndPrepareNext(community, payoutBySeat, winnerIdxs, meta = {}, opts = {}) {
+    const manageLifecycle = opts.manageLifecycle !== false;
+    // Rake simple percentage
+    const rakePct = Math.max(
+      0,
+      Math.min(0.2, parseFloat(process.env.RAKE_PERCENT || "0.05"))
+    );
+    const rake = Math.floor(this.pot * rakePct);
+    const payouts = payoutBySeat instanceof Map ? new Map(payoutBySeat) : new Map();
+    const cutsBySeat = this.applyRakeToPayouts(payouts, rake);
+
+    const showdownRanks = meta.showdownRanks instanceof Map ? meta.showdownRanks : null;
+    const handCategory =
+      meta.handCategory ??
+      (showdownRanks && winnerIdxs && winnerIdxs.length > 0 ? showdownRanks.get(winnerIdxs[0])?.name || null : null);
+
+    const potDistributionGross = Array.isArray(meta.potDistribution) ? meta.potDistribution : null;
+    const potDistributionWork = potDistributionGross
+      ? potDistributionGross.map((p) => ({
+        potId: p.potId,
+        eligibleSeatIndices: Array.isArray(p.eligibleSeatIndices) ? [...p.eligibleSeatIndices] : [],
+        winners: Array.isArray(p.winners) ? p.winners.map((w) => ({
+          seatIndex: w.seatIndex,
+          amountWon: Number(w.amountWon || 0),
+        })) : [],
+      }))
+      : null;
+
+    // Apply rake cuts to potDistribution winners as well (seat-level cuts).
+    if (potDistributionWork && cutsBySeat && cutsBySeat.size > 0) {
+      const remainingCuts = new Map(cutsBySeat);
+      for (const pot of potDistributionWork) {
+        for (const winner of pot.winners) {
+          const seatIdx = winner.seatIndex;
+          const cutLeft = remainingCuts.get(seatIdx) || 0;
+          if (cutLeft <= 0) continue;
+          const reduction = Math.min(cutLeft, winner.amountWon);
+          winner.amountWon -= reduction;
+          const newLeft = cutLeft - reduction;
+          if (newLeft <= 0) remainingCuts.delete(seatIdx);
+          else remainingCuts.set(seatIdx, newLeft);
+        }
+      }
+    }
+    const winners = [];
+    for (const [idx, share] of payouts.entries()) {
+      if (!Number.isFinite(share) || share <= 0) continue;
+      this.seats[idx].chips += share;
+      if (!this.seats[idx].isBot && !isBotUserId(this.seats[idx].userId)) {
+        winners.push({ user: this.seats[idx].userId, share });
+      }
+    }
+
+    const winnerSummaries = [];
+    for (const [idx, share] of payouts.entries()) {
+      if (!Number.isFinite(share) || share <= 0) continue;
+      const rankInfo = showdownRanks ? showdownRanks.get(idx) : null;
+      const playerId = this.seats[idx]?.userId;
+      winnerSummaries.push({
+        userId: this.seats[idx].userId,
+        playerId: playerId,
+        name: this.seats[idx].name,
+        isBot: !!this.seats[idx].isBot,
+        share,
+        amountWon: share,
+        handCategory: rankInfo?.name || null,
+      });
+    }
+
+    const seatSummaries = this.seats.map((s, idx) => {
+      const chipsBefore = toSafeInt(s.handStartChips, s.chips);
+      const chipsAfter = toSafeInt(s.chips, 0);
+      const rankInfo = showdownRanks ? showdownRanks.get(idx) : null;
+      const atShowdown = meta.reason === "showdown" && s.inHand && !s.folded;
+      return {
+        seatIndex: idx,
+        userId: s.userId,
+        name: s.name,
+        isBot: !!s.isBot,
+        chipsBefore,
+        chipsAfter,
+        net: chipsAfter - chipsBefore,
+        folded: !!s.folded,
+        allIn: !!s.allIn,
+        won: (payouts.get(idx) || 0) > 0,
+        handCategory: rankInfo?.name || null,
+        ...(atShowdown && Array.isArray(s.hole) && s.hole.length
+          ? { hole: [...s.hole] }
+          : {}),
+      };
+    });
+
+    const potDistributionFinal = potDistributionWork
+      ? potDistributionWork
+        .map((p) => {
+          const eligiblePlayers = p.eligibleSeatIndices
+            .map((seatIdx) => this.seats[seatIdx]?.userId)
+            .filter(Boolean);
+
+          const winners = p.winners
+            .filter((w) => w.amountWon > 0)
+            .map((w) => ({
+              playerId: this.seats[w.seatIndex]?.userId,
+              amountWon: w.amountWon,
+            }))
+            .filter((w) => w.playerId);
+
+          const amount = winners.reduce((sum, w) => sum + (w.amountWon || 0), 0);
+
+          return {
+            potId: p.potId,
+            amount,
+            eligiblePlayers,
+            winners,
+          };
+        })
+        .filter((p) => p.amount > 0)
+      : null;
+
+    this.handCounter += 1;
+    this.lastHand = {
+      id: this.handCounter,
+      handId: this.currentHandId,
+      reason: meta.reason || (showdownRanks ? "showdown" : "fold"),
+      endedAt: Date.now(),
+      pot: this.pot,
+      rake,
+      community: [...community],
+      winners: winnerSummaries,
+      seats: seatSummaries,
+      handCategory: handCategory || null,
+      potDistribution: potDistributionFinal,
+      actions: [...this.currentHandActions],
+      provablyFair: {
+        serverSeed: this.serverSeed,
+        serverSeedHash: this.serverSeedHash,
+        clientSeedDigest: this.clientSeedDigest,
+        handId: this.currentHandId,
+      },
+    };
+
+    // Atomic financial + history settlement
+    try {
+      const session = await mongoose.startSession();
+      await session.withTransaction(async () => {
+        await HandHistory.create(
+          [
+            {
+              handId: this.currentHandId,
+              table: this.tableId,
+              players: this.seats
+                .filter((s) => !s.isBot)
+                .map((s) => ({
+                  user: s.userId,
+                  seatIndex: this.seats.findIndex((x) => String(x.userId) === String(s.userId)),
+                  chipsBefore: toSafeInt(s.handStartChips, s.chips),
+                  chipsAfter: s.chips,
+                })),
+              actions: this.currentHandActions.map((a) => ({
+                ts: a.ts,
+                round: a.round,
+                type: a.type,
+                playerId: a.playerId,
+                seatIndex: a.seatIndex,
+                amount: toSafeInt(a.amount, 0),
+                callAmount: toSafeInt(a.callAmount, 0),
+              })),
+              community,
+              pot: this.pot,
+              rake,
+              winners,
+              potDistribution: potDistributionFinal || [],
+              handCategory: handCategory || null,
+              seats: this.seats.map((s) => ({
+                user: s.isBot ? undefined : s.userId,
+                chipsBefore: toSafeInt(s.handStartChips, s.chips),
+                chipsAfter: s.chips,
+                hole: s.hole,
+              })),
+              endedAt: new Date(),
+              provablyFair: {
+                serverSeed: this.serverSeed,
+                serverSeedHash: this.serverSeedHash,
+                clientSeedDigest: this.clientSeedDigest,
+                handId: this.currentHandId,
+              },
+            },
+          ],
+          { session }
+        );
+
+        // Persist seat chips and write ledger entries for each human player delta.
+        const table = await Table.findById(this.tableId).session(session);
+        if (table) {
+          for (const tSeat of table.seats) {
+            const s = this.seats.find((x) => String(x.userId) === String(tSeat.user));
+            if (!s) continue;
+
+            const seatIdx = this.seats.findIndex(
+              (x) => String(x.userId) === String(tSeat.user)
+            );
+            const chipsBefore = toSafeInt(s.handStartChips, s.chips);
+            const chipsAfter = toSafeInt(s.chips, 0);
+            const delta = chipsAfter - chipsBefore;
+            const rakeCut = toSafeInt(cutsBySeat.get(seatIdx) || 0, 0);
+
+            // Wallet/ledger uses lockedBalance for in-game chips.
+            await applyLockedDelta({
+              session,
+              userId: s.userId,
+              delta,
+              rakeAmount: rakeCut,
+              tableId: this.tableId,
+              handId: this.currentHandId,
+              meta: {
+                reason: "hand_settlement",
+                round: this.round,
+                chipsBefore,
+                chipsAfter,
+              },
+            });
+
+            tSeat.chips = chipsAfter;
+          }
+          await table.save({ session });
+        }
+      });
+      await session.endSession();
+
+      try {
+        const humanIds = this.seats
+          .filter((s) => !s.isBot && !isBotUserId(s.userId))
+          .map((s) => s.userId);
+        const wonIds = winners.map((w) => w.user).filter(Boolean);
+        const wonSet = new Set(wonIds.map((id) => String(id)));
+
+        if (humanIds.length) {
+          const ops = humanIds.map((uid) => {
+            const isWon = wonSet.has(String(uid));
+            if (isWon) {
+              return {
+                updateOne: {
+                  filter: { _id: uid },
+                  update: { $inc: { pokerHandsPlayed: 1, pokerHandsWon: 1, pokerWinStreak: 1 } },
+                },
+              };
+            }
+            return {
+              updateOne: {
+                filter: { _id: uid },
+                update: { $inc: { pokerHandsPlayed: 1 }, $set: { pokerWinStreak: 0 } },
+              },
+            };
+          });
+          await User.bulkWrite(ops);
+        }
+
+        const tid = String(this.tableId);
+        const hid = this.currentHandId;
+        for (const uid of humanIds) {
+          trackEventServerFireAndForget("hand_played", uid, { tableId: tid, handId: hid }, "server");
+        }
+        for (const wid of wonIds) {
+          trackEventServerFireAndForget("hand_won", wid, { tableId: tid, handId: hid }, "server");
+        }
+        void evaluateHandChipDumpSuspect({ tableId: this.tableId, seatSummaries });
+      } catch (statErr) {
+        logger.warn("poker_stats_increment_failed", {
+          tableId: this.tableId,
+          reason: statErr?.message || "unknown",
+        });
+      }
+    } catch (e) {
+      // financial settlement is critical: log and keep table state for retry/manual recovery
+      this.logSuspicious("financial_settlement_failed", {
+        tableId: this.tableId,
+        handId: this.currentHandId,
+        reason: e?.message || "unknown",
+      });
+      this.running = false;
+      this.clearActionScheduling();
+      await this.broadcastState();
+      return;
+    }
+
+    // Prepare next hand: move dealer to next alive seat
+    const order = this.seatOrderFrom(this.dealerIndex);
+    const nextDealer = order.find((i) => this.seats[i].chips > 0) ?? this.dealerIndex;
+    this.dealerIndex = nextDealer;
+
+    this.running = false;
+    this.clearActionScheduling();
+    if (manageLifecycle) {
+      await this.broadcastState(true); // reveal at end while round is showdown
+      this.setRound("idle");
+      this.currentHandId = null;
+      this.currentHandActions = [];
+      this.processedActionIds = new Set();
+    }
+
+    // Small delay then attempt next hand if still enough players
+    setTimeout(() => this.startIfReady(), 1500);
+  }
+
+  getPublicState(forUserId) {
+    const turnSeatIndex = this.currentIndex;
+    const turnSeat = this.seats[turnSeatIndex];
+    const turnUserId = turnSeat?.userId || null;
+    const isActor =
+      forUserId != null && turnUserId != null && String(forUserId) === String(turnUserId);
+    const rawSpec = isActor ? this.computeTurnActionSpec(turnSeatIndex) : null;
+    const actionSpec = normalizeClientActionSpec(rawSpec, isActor);
+
+    return {
+      tableId: this.tableId,
+      stateRevision: toSafeInt(this.stateRevision, 0),
+      round: this.round,
+      community: this.community,
+      pot: this.pot,
+      currentBet: this.currentBet,
+      minRaise: this.minRaise,
+      lastRaiseAmount: this.lastRaiseAmount,
+      smallBlind: this.smallBlind,
+      bigBlind: this.bigBlind,
+      sbSeatIndex: this.sbSeatIndex,
+      bbSeatIndex: this.bbSeatIndex,
+      dealerSeatIndex: this.dealerIndex,
+      turnUserId,
+      actionDeadline: this.actionDeadline,
+      botFillDeadline: this.botFillDeadline,
+      lastHand: this.lastHand,
+      actionSpec,
+      lastAction: this.computeLastTableAction(),
+      seats: this.seats.map((s, i) => ({
+        seatIndex: i,
+        userId: s.userId,
+        name: s.name,
+        avatar: s.avatar,
+        isBot: !!s.isBot,
+        chips: s.chips,
+        inHand: s.inHand,
+        folded: s.folded,
+        allIn: s.allIn,
+        hole: mapHoleForClientView({
+          round: this.round,
+          lastHand: this.lastHand,
+          seat: s,
+          seatIndex: i,
+          forUserId,
+          showdownRevealedSeats: this.showdownRevealedSeats,
+        }),
+        bet: s.bet,
+        lastAction: s.lastAction && typeof s.lastAction === "object" ? { ...s.lastAction } : null,
+        cosmetics:
+          s.cosmetics && typeof s.cosmetics === "object"
+            ? {
+                tableTheme: s.cosmetics.tableTheme || null,
+                cardSkin: s.cosmetics.cardSkin || null,
+              }
+            : { tableTheme: null, cardSkin: null },
+      })),
+    };
+  }
+
+  async broadcastState(showdown = false) {
+    // Persist snapshot first, then derive outgoing events from state.
+    await this.saveSnapshot({
+      finished: !this.running && (this.round === "idle" || this.round === "showdown"),
+    });
+
+    const room = `tg:${this.tableId}`;
+    const pub = this.getPublicState(null);
+    this.nsp.to(room).emit("table_state", pub);
+    this.nsp.to(room).emit("state", pub);
+    try {
+      const sockets = await this.nsp.in(room).fetchSockets();
+      for (const sock of sockets) {
+        const uid = sock.userId;
+        if (!uid) continue;
+        const me = this.getPublicState(uid);
+        sock.emit("table_state_me", me);
+        sock.emit("reconnect_state", me);
+        sock.emit("state:me", me);
+      }
+    } catch (e) {
+      metrics.errorsTotal.inc({ type: "broadcast_state_failed" });
+      logger.error("broadcast_state_failed", {
+        tableId: this.tableId,
+        reason: e?.message || "unknown",
+      });
+    }
+  }
+
+  /**
+   * Admin: end the current hand and settle. Uses same settlement path as normal endings.
+   * @returns {Promise<{ ok: boolean, path?: string, skipped?: boolean, reason?: string }>}
+   */
+  async adminForceEndHand() {
+    const lockAcquired = await this.acquireActionLock();
+    if (!lockAcquired) {
+      return { ok: false, reason: "LOCK_BUSY" };
+    }
+    try {
+      if (!this.running) {
+        return { ok: true, skipped: true, reason: "not_running" };
+      }
+
+      this.clearTurnTimer();
+      this.clearBotThinkTimer();
+      this.appendHandAction({ type: "admin_force_end", playerId: null, seatIndex: -1 });
+
+      if (this.aliveCount() <= 1) {
+        await this.finishHandByFold();
+        return { ok: true, path: "fold_win" };
+      }
+
+      if (this.community.length >= 3) {
+        await this.showdown();
+        return { ok: true, path: "showdown" };
+      }
+
+      const aliveIdxs = [];
+      for (let i = 0; i < this.seats.length; i++) {
+        if (this.seats[i].inHand && !this.seats[i].folded) aliveIdxs.push(i);
+      }
+      const potTotal = this.pot;
+      const payouts = new Map();
+      if (potTotal > 0 && aliveIdxs.length > 0) {
+        const share = Math.floor(potTotal / aliveIdxs.length);
+        let remainder = potTotal - share * aliveIdxs.length;
+        for (const idx of aliveIdxs) {
+          let add = share;
+          if (remainder > 0) {
+            add += 1;
+            remainder -= 1;
+          }
+          if (add > 0) payouts.set(idx, add);
+        }
+      }
+
+      await this.persistAndPrepareNext(this.community, payouts, aliveIdxs, {
+        reason: "admin_force_split",
+      });
+      return { ok: true, path: "admin_split" };
+    } catch (e) {
+      logger.error("admin_force_end_failed", {
+        tableId: this.tableId,
+        reason: e?.message || "unknown",
+      });
+      return { ok: false, reason: e?.message || "unknown" };
+    } finally {
+      await this.releaseActionLock();
+    }
+  }
+
+  async handleAction(userId, payload) {
+    const lockAcquired = await this.acquireActionLock();
+    if (!lockAcquired) {
+      this.logSuspicious("duplicate_action_while_locked", { userId, payload });
+      return { status: "rejected", reason: "INVALID_ACTION" };
+    }
+
+    try {
+      if (!this.running) {
+        this.logSuspicious("action_while_not_running", { userId, payload, round: this.round });
+        return { status: "rejected", reason: "INVALID_ACTION" };
+      }
+
+      if (!["preflop", "flop", "turn", "river"].includes(this.round)) {
+        this.logSuspicious("action_in_illegal_round", { userId, payload, round: this.round });
+        return { status: "rejected", reason: "INVALID_ACTION" };
+      }
+
+      const idx = this.findSeatIndexByUser(userId);
+      if (idx !== this.currentIndex) {
+        this.logSuspicious("not_turn_player_action", {
+          userId,
+          actorSeatIndex: idx,
+          turnSeatIndex: this.currentIndex,
+        });
+        return { status: "rejected", reason: "INVALID_ACTION" }; // not your turn
+      }
+      if (this.seats[idx]?.isBot) {
+        this.logSuspicious("human_action_on_bot_seat", { userId, idx });
+        return { status: "rejected", reason: "INVALID_ACTION" };
+      }
+
+      const { action, amount, actionId } = payload || {};
+      const normalizedAction = String(action || "").toLowerCase();
+      const normalizedActionId =
+        typeof actionId === "string" && actionId.trim().length > 0
+          ? actionId.trim()
+          : null;
+
+      if (!normalizedActionId) {
+        this.logSuspicious("missing_action_id", { userId });
+        return { status: "rejected", reason: "MISSING_ACTION_ID" };
+      }
+
+      const spec = this.computeTurnActionSpec(idx);
+      if (!spec || !spec.allowed || !spec.allowed.includes(normalizedAction)) {
+        this.logSuspicious("action_not_allowed", {
+          userId,
+          normalizedAction,
+          allowed: spec?.allowed || [],
+        });
+        return { status: "rejected", reason: "INVALID_ACTION" };
+      }
+
+      let raiseExtra = null;
+      if (normalizedAction === "raise") {
+        const parsed = Number(amount);
+        if (!Number.isFinite(parsed) || Math.trunc(parsed) !== parsed) {
+          this.logSuspicious("raise_non_integer_amount", { userId, amount });
+          return { status: "rejected", reason: "INVALID_ACTION" };
+        }
+        const v = toSafeInt(parsed, 0);
+        if (v < spec.minRaise || v > spec.maxRaise) {
+          this.logSuspicious("raise_amount_out_of_bounds", {
+            userId,
+            amount: v,
+            minRaise: spec.minRaise,
+            maxRaise: spec.maxRaise,
+          });
+          return { status: "rejected", reason: "INVALID_ACTION" };
+        }
+        raiseExtra = v;
+      }
+
+      const claimedActionId = await this.claimActionId(normalizedActionId);
+      if (!claimedActionId) {
+        this.logSuspicious("duplicate_action_id", { userId, actionId: normalizedActionId });
+        // Reject so clients clear in-flight UI; no broadcast occurs for duplicates.
+        return { status: "rejected", reason: "DUPLICATE_ACTION" };
+      }
+
+      if (normalizedAction === "fold") {
+        this.applyFold(idx);
+        this.recordSeatAction(idx, "fold");
+        this.appendHandAction({
+          type: "fold",
+          seatIndex: idx,
+          playerId: this.seats[idx]?.userId,
+        });
+      } else if (normalizedAction === "call") {
+        // "call" acts as check when callAmount == 0
+        const beforeBet = this.seats[idx].bet;
+        const beforeChips = this.seats[idx].chips;
+        this.applyCall(idx);
+        const paid = Math.max(0, beforeChips - this.seats[idx].chips);
+        const wasCheck = spec.callAmount === 0 || this.seats[idx].bet === beforeBet;
+        this.recordSeatAction(idx, wasCheck ? "check" : "call", paid);
+        this.appendHandAction({
+          type: wasCheck ? "check" : "call",
+          seatIndex: idx,
+          playerId: this.seats[idx]?.userId,
+          amount: paid,
+        });
+      } else if (normalizedAction === "raise" && raiseExtra != null) {
+        const v = raiseExtra;
+        this.applyBetOrRaise(idx, v);
+        this.recordSeatAction(idx, "raise", v);
+        this.appendHandAction({
+          type: "raise",
+          seatIndex: idx,
+          playerId: this.seats[idx]?.userId,
+          amount: v,
+          callAmount: spec.callAmount,
+          lastRaiseAmount: this.lastRaiseAmount,
+        });
+      } else {
+        return { status: "rejected", reason: "INVALID_ACTION" };
+      }
+
+      this.markVoluntaryAction(idx);
+      this.clearTurnTimer();
+      metrics.actionsTotal.inc({ status: "accepted", action: normalizedAction || "unknown" });
+      logger.info("poker_action", {
+        tableId: this.tableId,
+        userId,
+        action: normalizedAction,
+        actionId: normalizedActionId,
+      });
+      await this.advance();
+      return { status: "accepted" };
+    } finally {
+      await this.releaseActionLock();
+    }
+  }
+}
+
+class GameRegistry {
+  constructor(nsp, options = {}) {
+    this.nsp = nsp;
+    this.redis = options.redis || null;
+    this.map = new Map();
+    this.maxTables = Math.max(100, toSafeInt(process.env.POKER_REGISTRY_MAX_TABLES, 2000));
+    this.idleEvictMs = Math.max(60000, toSafeInt(process.env.POKER_REGISTRY_IDLE_EVICT_MS, 20 * 60 * 1000));
+    this.lockManager = this.redis
+      ? new RedisTableLockManager(this.redis)
+      : new InMemoryTableLockManager();
+    this.stateStore = new RedisTableStateStore(this.redis);
+  }
+
+  markAccess(tableId) {
+    const entry = this.map.get(tableId);
+    if (!entry) return;
+    entry.lastAccessAt = Date.now();
+  }
+
+  prune() {
+    const now = Date.now();
+    if (this.map.size <= this.maxTables) return;
+    for (const [tableId, entry] of this.map.entries()) {
+      const idleFor = now - (entry.lastAccessAt || 0);
+      if (idleFor >= this.idleEvictMs && !entry.game.running && !entry.game.starting) {
+        this.map.delete(tableId);
+      }
+      if (this.map.size <= this.maxTables) break;
+    }
+    metrics.activeTables.set(this.map.size);
+  }
+
+  async get(tableId) {
+    if (this.map.has(tableId)) {
+      this.markAccess(tableId);
+      return this.map.get(tableId).game;
+    }
+    const table = await Table.findById(tableId).populate({
+      path: "seats.user",
+      select: "name profileImg",
+    });
+    if (!table) return null;
+    const gt = new PokerTable(this.nsp, table, {
+      lockManager: this.lockManager,
+      redis: this.redis,
+      stateStore: this.stateStore,
+    });
+
+    // Crash/restart recovery: restore from Redis snapshot if exists.
+    const snapshot = await this.stateStore.load(tableId);
+    if (snapshot) {
+      gt.restoreFromSnapshot(snapshot);
+    }
+
+    await gt.applyCosmeticsToSeats();
+
+    this.map.set(tableId, { game: gt, lastAccessAt: Date.now() });
+    this.prune();
+    metrics.activeTables.set(this.map.size);
+    return gt;
+  }
+
+  async getSnapshotPublicState(tableId, forUserId) {
+    const snapshot = await this.stateStore.load(tableId);
+    if (!snapshot) return null;
+    const state = PokerTable.publicStateFromSnapshot(snapshot, forUserId);
+    await cosmeticsService.mergeCosmeticsIntoPublicState(state);
+    return state;
+  }
+}
+
+function initTableGame(io, options = {}) {
+  attachCosmeticsEquippedCache(options.redis || null);
+  const nsp = io.of("/table-game");
+  const registry = new GameRegistry(nsp, options);
+  const security = new SocketSecurityGuard();
+  activeRegistry = registry;
+
+  // Auth
+  nsp.use((socket, next) => {
+    try {
+      const token = getTokenFromHandshake(socket);
+      if (!token) return next(new Error("Authentication token missing"));
+      const decoded = jwt.verify(token, process.env.JWT_SECRET_KEY || "dev-secret");
+      socket.userId = decoded.userId;
+      socket.userIp = security.getIp(socket);
+      const sec = security.onConnection(socket, socket.userId);
+      if (sec.blocked) return next(new Error(sec.reason || "Rate limited"));
+      metrics.activePlayers.inc();
+      next();
+    } catch (err) {
+      next(new Error("Invalid token"));
+    }
+  });
+
+  nsp.on("connection", (socket) => {
+    async function handleJoinTable({ tableId, clientSeed }) {
+      try {
+        if (!tableId) return;
+        const table = await Table.findById(tableId).select("seats");
+        if (!table) return;
+        const ok = table.seats.some((s) => String(s.user) === String(socket.userId));
+        if (!ok) return;
+        socket.join(`tg:${tableId}`);
+        const pub = await registry.getSnapshotPublicState(String(tableId), null);
+        const me = await registry.getSnapshotPublicState(String(tableId), socket.userId);
+        if (pub && me) {
+          socket.emit("table_state", pub);
+          socket.emit("state", pub);
+          socket.emit("table_state_me", me);
+          socket.emit("reconnect_state", me);
+          socket.emit("state:me", me);
+        } else {
+          const game = await registry.get(String(tableId));
+          if (game) {
+            const p = game.getPublicState(null);
+            const m = game.getPublicState(socket.userId);
+            socket.emit("table_state", p);
+            socket.emit("state", p);
+            socket.emit("table_state_me", m);
+            socket.emit("reconnect_state", m);
+            socket.emit("state:me", m);
+          }
+        }
+
+        socket.emit("table_event", { type: "joined", tableId: String(tableId) });
+
+        const game = await registry.get(String(tableId));
+        if (game) {
+          const idx = game.findSeatIndexByUser(socket.userId);
+          if (idx >= 0 && typeof clientSeed === "string" && clientSeed.trim()) {
+            game.seats[idx].clientSeed = clientSeed.trim().slice(0, 128);
+          }
+          game.startIfReady();
+        }
+      } catch (e) {
+        metrics.errorsTotal.inc({ type: "subscribe_table_failed" });
+        logger.error("subscribe_table_failed", {
+          userId: socket.userId,
+          tableId,
+          reason: e?.message || "unknown",
+        });
+      }
+    }
+
+    socket.on("join_table", handleJoinTable);
+    socket.on("subscribe-table", handleJoinTable);
+
+    socket.on("leave_table", async ({ tableId }) => {
+      if (!tableId) return;
+      socket.leave(`tg:${tableId}`);
+      socket.emit("table_event", { type: "left", tableId: String(tableId) });
+    });
+
+    socket.on("start-if-ready", async ({ tableId }) => {
+      if (!tableId) return;
+      const game = await registry.get(String(tableId));
+      if (game) {
+        game.startIfReady();
+      }
+    });
+
+    socket.on("action", async ({ tableId, action, amount, actionId }) => {
+      const sec = security.onAction(socket.userId, socket.userIp, actionId);
+      if (sec.blocked) {
+        metrics.actionsTotal.inc({ status: "blocked", action: String(action || "unknown") });
+        socket.emit("invalid_move", { status: "rejected", reason: sec.reason, retryAfterMs: sec.retryAfterMs });
+        return;
+      }
+      const game = await registry.get(String(tableId));
+      if (!game) return;
+      const res = await game.handleAction(socket.userId, { action, amount, actionId });
+      if (res && res.status === "rejected") {
+        metrics.actionsTotal.inc({ status: "rejected", action: String(action || "unknown") });
+        socket.emit("invalid_move", res);
+        socket.emit("action_result", res);
+      } else {
+        socket.emit("action_result", { status: "accepted" });
+      }
+    });
+
+    socket.on("disconnect", () => {
+      security.onDisconnect(socket, socket.userId);
+      metrics.activePlayers.dec();
+    });
+  });
+}
+
+let activeRegistry = null;
+
+async function refreshCosmeticsForUserOnTables(userId) {
+  if (!activeRegistry || !userId) return;
+  const map = await cosmeticsService.resolveEquippedPayloadForUsers([userId]);
+  const c = map.get(String(userId)) || { tableTheme: null, cardSkin: null };
+  const uidStr = String(userId);
+  for (const { game } of activeRegistry.map.values()) {
+    const idx = game.findSeatIndexByUser(userId);
+    if (idx >= 0) {
+      game.seats[idx].cosmetics = { ...c };
+      const room = `tg:${game.tableId}`;
+      // Persist seat cosmetics (bumps stateRevision), then targeted emit — snapshot stays source of truth.
+      try {
+        await game.saveSnapshot({ finished: false });
+        game.nsp.to(room).emit("cosmetics_updated", {
+          tableId: String(game.tableId),
+          userId: uidStr,
+          cosmetics: { tableTheme: c.tableTheme, cardSkin: c.cardSkin },
+          stateRevision: toSafeInt(game.stateRevision, 0),
+        });
+      } catch (_) {
+        /* ignore emit / snapshot errors */
+      }
+    }
+  }
+}
+
+function getTableGameDebugSnapshot(tableId) {
+  if (!activeRegistry) return null;
+  const entry = activeRegistry.map.get(String(tableId));
+  if (!entry || !entry.game) return null;
+  const game = entry.game;
+  return {
+    tableId: game.tableId,
+    round: game.round,
+    running: game.running,
+    seated: game.seats.length,
+    pot: game.pot,
+    currentBet: game.currentBet,
+    turnUserId: game.seats[game.currentIndex]?.userId || null,
+    handId: game.currentHandId,
+  };
+}
+
+function buildAdminRealtimeTablePayload(game) {
+  if (!game) return null;
+  const pub = game.getPublicState(null);
+  return {
+    ...pub,
+    running: game.running,
+    starting: game.starting,
+    currentHandId: game.currentHandId,
+    processedActionIdsCount:
+      game.processedActionIds instanceof Set ? game.processedActionIds.size : 0,
+  };
+}
+
+async function getLiveTableGameForAdmin(tableId) {
+  if (!activeRegistry) return null;
+  return activeRegistry.get(String(tableId));
+}
+
+async function adminForceEndHandTable(tableId) {
+  const game = await getLiveTableGameForAdmin(tableId);
+  if (!game) return { ok: false, reason: "TABLE_NOT_IN_MEMORY" };
+  return game.adminForceEndHand();
+}
+
+module.exports = {
+  initTableGame,
+  PokerTable,
+  getTableGameDebugSnapshot,
+  buildAdminRealtimeTablePayload,
+  getLiveTableGameForAdmin,
+  adminForceEndHandTable,
+  refreshCosmeticsForUserOnTables,
+  /** @internal unit tests — hole visibility contract */
+  mapHoleForClientView,
+};

@@ -10,16 +10,26 @@ const createToken = require("../utils/createToken");
 
 const User = require("../models/userModel");
 const Wallet = require("../models/walletModel");
+const AgentProfile = require("../models/agentProfileModel");
 
 // @desc    Signup
 // @route   GET /api/v1/auth/signup
 // @access  Public
 exports.signup = asyncHandler(async (req, res, next) => {
+  // Optional referral code
+  let referredBy = undefined;
+  const rc = (req.body.referralCode || "").toString().trim().toUpperCase();
+  if (rc) {
+    const profile = await AgentProfile.findOne({ referralCode: rc, status: "approved" });
+    if (profile) referredBy = profile.user;
+  }
+
   // 1- Create user
   const user = await User.create({
     name: req.body.name,
     email: req.body.email,
     password: req.body.password,
+    referredBy,
   });
 
   // 2- Create wallet for the user

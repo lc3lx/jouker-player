@@ -8,7 +8,10 @@ const {
   getAllWallets,
   getWalletByUserId,
   adjustWalletBalance,
+  simulatedDeposit,
+  simulatedWithdraw,
 } = require("../services/walletService");
+const { createPaymentIntent, confirmPayment } = require("../services/paymentService");
 
 const authService = require("../services/authService");
 
@@ -25,6 +28,14 @@ router
   .route("/transactions")
   .get(authService.allowedTo("user"), getWalletTransactions);
 router.route("/balance").get(authService.allowedTo("user"), checkWalletBalance);
+router.route("/deposit").post(authService.allowedTo("user"), simulatedDeposit);
+router.route("/withdraw").post(authService.allowedTo("user"), simulatedWithdraw);
+router
+  .route("/payments/intent")
+  .post(authService.allowedTo("user"), createPaymentIntent);
+router
+  .route("/payments/confirm")
+  .post(authService.allowedTo("user"), confirmPayment);
 
 // Admin routes
 router

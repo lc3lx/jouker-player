@@ -18,6 +18,11 @@ const userSchema = new mongoose.Schema(
       unique: true,
       lowercase: true,
     },
+    country: {
+      type: String,
+      uppercase: true,
+      trim: true,
+    },
     phone: String,
     profileImg: String,
 
@@ -61,6 +66,24 @@ const userSchema = new mongoose.Schema(
       type: mongoose.Schema.ObjectId,
       ref: "Wallet",
     },
+    // Referred by (agent/promoter user)
+    referredBy: {
+      type: mongoose.Schema.ObjectId,
+      ref: "User",
+      index: true,
+    },
+    /** Poker retention / stats (authoritative increments on hand settlement). */
+    pokerHandsPlayed: { type: Number, default: 0, min: 0 },
+    pokerHandsWon: { type: Number, default: 0, min: 0 },
+    lastDailyBonusAt: { type: Date },
+    /** Consecutive UTC days daily bonus claimed (streak). */
+    dailyBonusStreak: { type: Number, default: 0, min: 0 },
+    lastDailyBonusDayUtc: { type: String },
+    /** Consecutive poker hands won (settled with share > 0). */
+    pokerWinStreak: { type: Number, default: 0, min: 0 },
+    /** Fraud / trust — payments & high-risk actions blocked when true. */
+    trustRestricted: { type: Boolean, default: false },
+    suspiciousFlag: { type: Boolean, default: false },
   },
   { timestamps: true }
 );
