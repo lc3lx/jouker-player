@@ -96,7 +96,12 @@ class GameManager {
     
     const winner = gameState.players[winnerIndex];
     winner.takenCards.push(...trickCards);
-    
+
+    gameState.lastTrick = gameState.tableCards.map((entry) => ({
+      playerIndex: entry.playerIndex,
+      card: { rank: entry.card.rank, suit: entry.card.suit },
+    }));
+
     gameState.tableCards = [];
     gameState.leadingSuit = null;
     gameState.turnPlayerIndex = winnerIndex;

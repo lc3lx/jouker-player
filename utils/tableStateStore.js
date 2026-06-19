@@ -44,6 +44,12 @@ class RedisTableStateStore {
     await tx.exec();
     return true;
   }
+
+  async delete(tableId) {
+    if (!this.redis || !tableId) return false;
+    await this.redis.del(this.key(tableId));
+    return true;
+  }
 }
 
 module.exports = { RedisTableStateStore };

@@ -13,6 +13,7 @@ const userCosmeticsSchema = new mongoose.Schema(
     equipped: {
       tableTheme: { type: mongoose.Schema.ObjectId, ref: "Cosmetic", default: null },
       cardSkin: { type: mongoose.Schema.ObjectId, ref: "Cosmetic", default: null },
+      avatarFrame: { type: mongoose.Schema.ObjectId, ref: "Cosmetic", default: null },
     },
   },
   { timestamps: true }

@@ -2,6 +2,9 @@ const asyncHandler = require("express-async-handler");
 const ApiError = require("../utils/apiError");
 const Table = require("../models/tableModel");
 const HandHistory = require("../models/handHistoryModel");
+const { buildHandAuditLog } = require("./handHistoryAuditService");
+
+exports.buildHandAuditLog = buildHandAuditLog;
 
 exports.authorizeTableAccess = asyncHandler(async (req, res, next) => {
   const tableId = req.params.id;
@@ -30,16 +33,25 @@ exports.getTableHistory = asyncHandler(async (req, res) => {
   const items = await HandHistory.find(filter)
     .sort({ createdAt: -1 })
     .skip(skip)
-    .limit(limit);
+    .limit(limit)
+    .select("-provablyFair.serverSeed");
+
+  const data = items.map((doc) => {
+    const o = doc.toObject ? doc.toObject() : doc;
+    if (!o.auditLog || o.auditLog.length === 0) {
+      o.auditLog = buildHandAuditLog(o.actions, o.seats || [], o.community || []);
+    }
+    return o;
+  });
 
   res.status(200).json({
-    results: items.length,
+    results: data.length,
     paginationResult: {
       currentPage: page,
       limit,
       numberOfPages: Math.ceil(total / limit),
       next: page * limit < total ? page + 1 : null,
     },
-    data: items,
+    data,
   });
 });

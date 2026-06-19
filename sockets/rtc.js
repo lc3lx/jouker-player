@@ -21,7 +21,7 @@ function initRTC(io) {
     try {
       const token = getTokenFromHandshake(socket);
       if (!token) return next(new Error("Authentication token missing"));
-      const decoded = jwt.verify(token, process.env.JWT_SECRET_KEY || "dev-secret");
+      const decoded = jwt.verify(token, process.env.JWT_SECRET_KEY);
       socket.userId = decoded.userId;
       next();
     } catch (err) {

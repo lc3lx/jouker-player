@@ -4,13 +4,15 @@ const cosmeticSchema = new mongoose.Schema(
   {
     type: {
       type: String,
-      enum: ["table_theme", "card_skin", "bundle"],
+      enum: ["table_theme", "card_skin", "avatar_frame", "bundle"],
       required: true,
       index: true,
     },
     name: { type: String, required: true, trim: true },
     /** Client asset pack id (folder name under assets). */
     assetKey: { type: String, required: true, trim: true, index: true },
+    /** Admin-uploaded store preview (filename under uploads/cosmetics). */
+    previewImage: { type: String, trim: true, default: null },
     price: { type: Number, required: true, min: 0, default: 0 },
     rarity: {
       type: String,

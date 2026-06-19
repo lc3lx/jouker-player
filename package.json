@@ -10,6 +10,7 @@
     "reconcile:wallets": "node scripts/reconcileWallets.js",
     "loadtest:table-game": "node scripts/loadTestTableGame.js",
     "validate:production-checks": "node scripts/validateProductionChecks.js",
+    "seed:house-wallet": "node scripts/seedHouseWallet.js",
     "test:unit": "node --test test"
   },
   "keywords": [],

@@ -13,17 +13,93 @@ const {
 const RechargeCode = require("../models/rechargeCodeModel");
 const AgentProfile = require("../models/agentProfileModel");
 const SystemSettings = require("../models/systemSettingsModel");
+const { getPublicCurrencySummary } = require("./currencySettingsService");
+const { getOrCreateWallet } = require("./walletLedgerService");
+
+const TX_LABELS = {
+  win: "فوز في طاولة",
+  bet: "خسارة في طاولة",
+  rake: "عمولة الطاولة",
+  deposit: "إيداع",
+  confirmed_deposit: "شحن الرصيد",
+  recharge: "شحن بكود",
+  withdraw: "سحب",
+  completed_withdraw: "سحب",
+  pending_deposit: "إيداع قيد المعالجة",
+  pending_withdraw: "سحب قيد المعالجة",
+  failed_deposit: "فشل إيداع",
+  cosmetic_purchase: "شراء من المتجر",
+  credit: "إضافة رصيد",
+  debit: "خصم",
+  refund: "استرداد",
+  transfer_to_locked: "حجز للطاولة",
+  transfer_to_balance: "إرجاع من الطاولة",
+  game_buyin: "دخول لعبة",
+  game_win: "فوز في لعبة",
+  game_loss: "خسارة في لعبة",
+  settlement: "تسوية لعبة",
+};
+
+const CREDIT_TYPES = new Set([
+  "win",
+  "game_win",
+  "deposit",
+  "confirmed_deposit",
+  "recharge",
+  "credit",
+  "refund",
+  "transfer_to_balance",
+]);
+
+function txLabel(type, meta = {}) {
+  if (meta?.source === "daily_bonus") return "مكافأة يومية";
+  if (meta?.source === "task_reward") return "مكافأة مهمة";
+  return TX_LABELS[type] || type;
+}
+
+function isCreditTx(type) {
+  return CREDIT_TYPES.has(type);
+}
+
+function relativeAgeLabel(date, now = new Date()) {
+  const ms = now.getTime() - new Date(date).getTime();
+  if (ms < 0) return "الآن";
+  const mins = Math.floor(ms / 60000);
+  if (mins < 1) return "الآن";
+  if (mins < 60) return mins === 1 ? "منذ دقيقة" : `منذ ${mins} دقيقة`;
+  const hours = Math.floor(mins / 60);
+  if (hours < 24) return hours === 1 ? "منذ ساعة" : `منذ ${hours} ساعة`;
+  const days = Math.floor(hours / 24);
+  if (days === 1) return "أمس";
+  if (days < 7) return `منذ ${days} أيام`;
+  return new Date(date).toLocaleDateString("ar-SA");
+}
+
+function formatTxRow(tx, now = new Date()) {
+  const amount = Math.floor(Number(tx.amount) || 0);
+  const credit = isCreditTx(tx.type);
+  return {
+    id: String(tx._id),
+    type: tx.type,
+    label: txLabel(tx.type, tx.meta),
+    subtitle: relativeAgeLabel(tx.createdAt, now),
+    amount,
+    amountDisplay: `${credit ? "+" : "-"}${amount.toLocaleString("en-US")}`,
+    isCredit: credit,
+    createdAt: tx.createdAt,
+    meta: tx.meta || {},
+  };
+}
 
 // @desc    Get user wallet
 // @route   GET /api/v1/wallet
 // @access  Protected/User
 exports.getUserWallet = asyncHandler(async (req, res, next) => {
-  const wallet = await Wallet.findOne({ user: req.user._id })
-    .populate("user", "name email")
-    .sort({ "transactions.createdAt": -1 });
-
+  let wallet = await Wallet.findOne({ user: req.user._id }).populate("user", "name email");
   if (!wallet) {
-    return next(new ApiError("Wallet not found", 404));
+    wallet = await Wallet.create({ user: req.user._id });
+    await User.findByIdAndUpdate(req.user._id, { wallet: wallet._id });
+    wallet = await Wallet.findById(wallet._id).populate("user", "name email");
   }
 
   res.status(200).json({
@@ -274,6 +350,43 @@ exports.simulatedWithdraw = asyncHandler(async (req, res, next) => {
       balance: wallet.balance,
       lockedBalance: wallet.lockedBalance || 0,
       currency: wallet.currency,
+    },
+  });
+});
+
+// @desc    Wallet screen summary — balance, packages, formatted history
+// @route   GET /api/v1/wallet/summary
+// @access  Protected/User
+exports.getWalletSummary = asyncHandler(async (req, res) => {
+  const userId = req.user._id;
+  const wallet = await getOrCreateWallet(userId);
+  const limit = Math.min(50, parseInt(req.query.limit || "30", 10));
+
+  const [txs, totalTx] = await Promise.all([
+    WalletTransaction.find({ userId }).sort({ createdAt: -1 }).limit(limit).lean(),
+    WalletTransaction.countDocuments({ userId }),
+  ]);
+
+  const now = new Date();
+  const currency = await getPublicCurrencySummary();
+  const balance = Math.floor(wallet.balance || 0);
+  const locked = Math.floor(wallet.lockedBalance || 0);
+
+  res.status(200).json({
+    status: "success",
+    data: {
+      balance,
+      lockedBalance: locked,
+      availableBalance: balance,
+      currency: currency.currencyCode,
+      currencyName: currency.currencyName,
+      packages: currency.packages,
+      transactions: txs.map((t) => formatTxRow(t, now)),
+      pagination: {
+        total: totalTx,
+        limit,
+        hasMore: totalTx > limit,
+      },
     },
   });
 });

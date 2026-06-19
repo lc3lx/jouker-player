@@ -17,19 +17,43 @@ dotenv.config();
 const ApiError = require("./utils/apiError");
 const globalError = require("./middlewares/errorMiddleware");
 const dbConnection = require("./config/database");
+const { runProductionChecks } = require("./scripts/validateProductionChecks");
 // Routes
 const mountRoutes = require("./routes");
 
-// Connect with db
-dbConnection();
+function parseCorsOrigins(raw) {
+  return String(raw || "")
+    .split(",")
+    .map((x) => x.trim())
+    .filter(Boolean);
+}
+
+function buildCorsConfig() {
+  const isProd = process.env.NODE_ENV === "production";
+  const origins = parseCorsOrigins(process.env.CORS_ORIGINS);
+  if (isProd) {
+    if (!origins.length) {
+      throw new Error("CORS_ORIGINS_MISSING");
+    }
+    if (origins.includes("*")) {
+      throw new Error("CORS_WILDCARD_FORBIDDEN_IN_PRODUCTION");
+    }
+  }
+  return {
+    origin: origins.length ? origins : true,
+    credentials: true,
+  };
+}
+
+const corsConfig = buildCorsConfig();
 
 // express app
 const app = express();
 
 // Enable other domains to access your application
 app.use(helmet());
-app.use(cors());
-app.options("*", cors());
+app.use(cors(corsConfig));
+app.options("*", cors(corsConfig));
 
 // compress all responses
 app.use(compression());
@@ -92,8 +116,12 @@ app.get("/metrics", async (req, res) => {
 // Favicon - تجنب رسالة 404
 app.get("/favicon.ico", (req, res) => res.status(204).end());
 
-// الصفحة الرئيسية توجه للعبة تركس
-app.get("/", (req, res) => res.redirect("/games/trix/"));
+// Landing page – صفحة تحميل التطبيق
+const landingDir = path.join(__dirname, "../landing");
+app.use(express.static(landingDir));
+app.get("/", (req, res) => {
+  res.sendFile(path.join(landingDir, "index.html"));
+});
 app.get("/games/trix", (req, res) => res.redirect("/games/trix/"));
 
 app.all("*", (req, res, next) => {
@@ -112,7 +140,7 @@ const { setupSocketIoRedis } = require("./utils/realtimeRedis");
 
 const httpServer = http.createServer(app);
 const io = new Server(httpServer, {
-  cors: { origin: "*" },
+  cors: corsConfig,
 });
 
 const { setMainIo } = require("./utils/lobbyRealtime");
@@ -122,14 +150,30 @@ let server;
 let realtimeRedis = null;
 
 async function startServer() {
+  await dbConnection();
+  await runProductionChecks({ skipSmoke: true });
+
   realtimeRedis = await setupSocketIoRedis(io);
   if (realtimeRedis.enabled) {
     logger.info("socketio_redis_enabled");
+    const pokerQueueRedis = require("./utils/redis/pokerQueueRedis");
+    const pokerCollusionGuard = require("./services/pokerCollusionGuard");
+    pokerQueueRedis.setRedisClient(realtimeRedis.commandClient);
+    pokerCollusionGuard.setRedisClient(realtimeRedis.commandClient);
   }
+
+  const { startPokerTableGc } = require("./services/pokerTableGcService");
+  const { runBootSanitizer, startTableGc } = require("./services/tableGcService");
+
+  await runBootSanitizer({ redis: realtimeRedis?.commandClient || null });
+
+  startPokerTableGc();
 
   initRTC(io);
   initTableGame(io, { redis: realtimeRedis.commandClient });
   initGameServer(io, { redis: realtimeRedis?.commandClient || null });
+
+  startTableGc(io, { redis: realtimeRedis?.commandClient || null });
 
   const PORT = process.env.PORT || 8000;
   server = httpServer.listen(PORT, () => {

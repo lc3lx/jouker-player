@@ -9,6 +9,7 @@ class GameState {
     this.roundNumber = 0; // 0..20
     this.turnPlayerIndex = 0;
     this.tableCards = []; // { playerIndex, card }
+    this.lastTrick = []; // previous completed trick — { playerIndex, card }
     this.leadingSuit = null;
     
     this.trixTable = {

@@ -4,6 +4,7 @@
  */
 const TarneebGame = require("../games/tarneeb/TarneebGame");
 const TrixGame = require("../games/trix/TrixGame");
+const { archiveTableDocument } = require("../services/tableLifecycleService");
 
 const GAME_CLASSES = {
   tarneeb: TarneebGame,
@@ -102,7 +103,155 @@ class RoomManager {
       const p = game.players.find((x) => String(x.userId) === String(userId));
       if (p) p.socketId = null;
     }
+    void this.evictTarneeb41IfAbandoned(tid);
+    this.tryClearTarneeb41GameIfReady(tid);
+    this.evictExpiredTarneeb41Games();
     return { tableId: tid, game };
+  }
+
+  getTarneeb41FinishTtlMs() {
+    const n = parseInt(process.env.GAME_TTL_AFTER_FINISH_MINUTES || "10", 10);
+    const minutes = Number.isFinite(n) && n >= 1 ? Math.min(n, 1440) : 10;
+    return minutes * 60 * 1000;
+  }
+
+  countHumansAtTarneeb41Table(mongoTableId) {
+    let n = 0;
+    const key = String(mongoTableId);
+    for (const [, tid] of this.userToTarneeb41TableId.entries()) {
+      if (tid === key) n += 1;
+    }
+    return n;
+  }
+
+  /** Humans with an active /game socket on this tarneeb41 table. */
+  countConnectedHumansAtTarneeb41Table(mongoTableId) {
+    const key = String(mongoTableId);
+    const game = this.tarneeb41GamesByTableId.get(key);
+    if (!game || !Array.isArray(game.players)) return 0;
+    let n = 0;
+    for (const p of game.players) {
+      if (p.isBot || !p.userId) continue;
+      if (this.tarneeb41UserSocket.has(String(p.userId))) n += 1;
+    }
+    return n;
+  }
+
+  markTarneeb41GameFinished(mongoTableId) {
+    const game = this.getTarneeb41GameForTable(mongoTableId);
+    if (game && game.state === "game_end" && !game._finishedAt) {
+      game._finishedAt = Date.now();
+    }
+  }
+
+  markTarneeb41SettlementComplete(mongoTableId) {
+    const game = this.getTarneeb41GameForTable(mongoTableId);
+    if (!game) return;
+    game._settlementCompleted = true;
+    if (!game._finishedAt) game._finishedAt = Date.now();
+  }
+
+  /**
+   * Evict when settlement is done and no humans remain mapped to the table.
+   * @returns {{ cleared: boolean, reason?: string }}
+   */
+  tryClearTarneeb41GameIfReady(mongoTableId) {
+    const key = String(mongoTableId);
+    const game = this.tarneeb41GamesByTableId.get(key);
+    if (!game) return { cleared: false, reason: "not_found" };
+    if (game.state !== "game_end") return { cleared: false, reason: "not_finished" };
+    if (!game._settlementCompleted) return { cleared: false, reason: "settlement_pending" };
+    if (this.countHumansAtTarneeb41Table(key) > 0) {
+      return { cleared: false, reason: "humans_present" };
+    }
+    return this.clearTarneeb41Game(key, { archiveReason: "game_complete" });
+  }
+
+  /** Evict immediately when all humans have left (socket + mapping). */
+  evictTarneeb41IfAbandoned(mongoTableId) {
+    const key = String(mongoTableId);
+    if (this.countHumansAtTarneeb41Table(key) > 0) {
+      return { cleared: false, reason: "humans_present" };
+    }
+    const game = this.tarneeb41GamesByTableId.get(key);
+    if (!game) return { cleared: false, reason: "not_found" };
+    if (game.state === "game_end" && !game._settlementCompleted) {
+      return { cleared: false, reason: "settlement_pending" };
+    }
+    return this.clearTarneeb41Game(key, { archiveReason: "abandoned" });
+  }
+
+  /**
+   * Idempotent teardown: destroy timers/listeners, remove in-memory refs, archive Mongo doc.
+   * @returns {{ cleared: boolean, reason?: string }}
+   */
+  clearTarneeb41Game(mongoTableId, { archiveReason = "game_complete" } = {}) {
+    const key = String(mongoTableId);
+    const game = this.tarneeb41GamesByTableId.get(key);
+    if (!game) return { cleared: false, reason: "already_cleared" };
+
+    try {
+      if (typeof game.destroy === "function") game.destroy();
+    } catch (_) {
+      // idempotent — ignore teardown errors on repeat calls
+    }
+
+    if (Array.isArray(game.players)) {
+      for (const p of game.players) {
+        if (!p.isBot && p.userId) {
+          const uid = String(p.userId);
+          if (this.userToTarneeb41TableId.get(uid) === key) {
+            this.userToTarneeb41TableId.delete(uid);
+          }
+          this.tarneeb41UserSocket.delete(uid);
+        }
+      }
+    }
+
+    for (const [uid, tid] of [...this.userToTarneeb41TableId.entries()]) {
+      if (tid === key) this.userToTarneeb41TableId.delete(uid);
+    }
+
+    this.tarneeb41GamesByTableId.delete(key);
+    void archiveTableDocument(key, { reason: archiveReason }).catch(() => {});
+
+    return { cleared: true };
+  }
+
+  /** TTL fallback for finished games that were not cleared by the primary path. */
+  evictExpiredTarneeb41Games() {
+    const ttlMs = this.getTarneeb41FinishTtlMs();
+    const now = Date.now();
+    let evicted = 0;
+    for (const [tableId, game] of [...this.tarneeb41GamesByTableId.entries()]) {
+      if (game.state !== "game_end") continue;
+      const finishedAt = game._finishedAt;
+      if (!finishedAt || now - finishedAt < ttlMs) continue;
+      void this.clearTarneeb41Game(tableId, { archiveReason: "game_complete" });
+      evicted += 1;
+    }
+    return evicted;
+  }
+
+  startTarneeb41TtlSweep(intervalMs = 60_000) {
+    if (this._tarneeb41TtlSweepInterval) return;
+    this._tarneeb41TtlSweepInterval = setInterval(() => {
+      try {
+        this.evictExpiredTarneeb41Games();
+      } catch (_) {
+        // ignore sweep errors
+      }
+    }, intervalMs);
+    if (typeof this._tarneeb41TtlSweepInterval.unref === "function") {
+      this._tarneeb41TtlSweepInterval.unref();
+    }
+  }
+
+  stopTarneeb41TtlSweep() {
+    if (this._tarneeb41TtlSweepInterval) {
+      clearInterval(this._tarneeb41TtlSweepInterval);
+      this._tarneeb41TtlSweepInterval = null;
+    }
   }
 
   setTrixUserSocket(userId, socketId) {
@@ -161,30 +310,143 @@ class RoomManager {
       const p = game.players.find((x) => String(x.userId) === String(userId));
       if (p) p.socketId = null;
     }
+    void this.evictTrixIfAbandoned(tid);
+    this.tryClearTrixGameIfReady(tid);
+    this.evictExpiredTrixGames();
     return { tableId: tid, game };
-  }
-
-  clearTrixGameIfAllHumansGone(mongoTableId) {
-    const game = this.getTrixGameForTable(mongoTableId);
-    if (!game) return;
-    const humans = game.players.filter((p) => !p.isBot);
-    const anyConnected = humans.some((p) => p.socketId);
-    if (!anyConnected && game.botInterval) {
-      clearInterval(game.botInterval);
-      game.botInterval = null;
-    }
-    const humansLeft = this.countHumansAtTrixTable(mongoTableId);
-    if (humansLeft === 0 && !anyConnected) {
-      this.trixGamesByTableId.delete(String(mongoTableId));
-    }
   }
 
   countHumansAtTrixTable(mongoTableId) {
     let n = 0;
-    for (const [uid, tid] of this.userToTrixTableId.entries()) {
-      if (tid === String(mongoTableId)) n++;
+    for (const [, tid] of this.userToTrixTableId.entries()) {
+      if (tid === String(mongoTableId)) n += 1;
     }
     return n;
+  }
+
+  /** Humans with an active /game socket on this trix table. */
+  countConnectedHumansAtTrixTable(mongoTableId) {
+    const key = String(mongoTableId);
+    const game = this.trixGamesByTableId.get(key);
+    if (!game || !Array.isArray(game.players)) return 0;
+    let n = 0;
+    for (const p of game.players) {
+      if (p.isBot || !p.userId) continue;
+      if (this.trixUserSocket.has(String(p.userId))) n += 1;
+    }
+    return n;
+  }
+
+  markTrixGameFinished(mongoTableId) {
+    const game = this.getTrixGameForTable(mongoTableId);
+    if (game && game.state === "game_end" && !game._finishedAt) {
+      game._finishedAt = Date.now();
+    }
+  }
+
+  markTrixSettlementComplete(mongoTableId) {
+    const game = this.getTrixGameForTable(mongoTableId);
+    if (!game) return;
+    game._settlementCompleted = true;
+    if (!game._finishedAt) game._finishedAt = Date.now();
+  }
+
+  tryClearTrixGameIfReady(mongoTableId) {
+    const key = String(mongoTableId);
+    const game = this.trixGamesByTableId.get(key);
+    if (!game) return { cleared: false, reason: "not_found" };
+    if (game.state !== "game_end") return { cleared: false, reason: "not_finished" };
+    if (!game._settlementCompleted) return { cleared: false, reason: "settlement_pending" };
+    if (this.countHumansAtTrixTable(key) > 0) {
+      return { cleared: false, reason: "humans_present" };
+    }
+    return this.clearTrixGame(key, { archiveReason: "game_complete" });
+  }
+
+  evictTrixIfAbandoned(mongoTableId) {
+    const key = String(mongoTableId);
+    if (this.countHumansAtTrixTable(key) > 0) {
+      return { cleared: false, reason: "humans_present" };
+    }
+    const game = this.trixGamesByTableId.get(key);
+    if (!game) return { cleared: false, reason: "not_found" };
+    if (game.state === "game_end" && !game._settlementCompleted) {
+      return { cleared: false, reason: "settlement_pending" };
+    }
+    return this.clearTrixGame(key, { archiveReason: "abandoned" });
+  }
+
+  clearTrixGame(mongoTableId, { archiveReason = "game_complete" } = {}) {
+    const key = String(mongoTableId);
+    const game = this.trixGamesByTableId.get(key);
+    if (!game) return { cleared: false, reason: "already_cleared" };
+
+    try {
+      if (typeof game.destroy === "function") game.destroy();
+    } catch (_) {
+      // idempotent
+    }
+
+    if (Array.isArray(game.players)) {
+      for (const p of game.players) {
+        if (!p.isBot && p.userId) {
+          const uid = String(p.userId);
+          if (this.userToTrixTableId.get(uid) === key) {
+            this.userToTrixTableId.delete(uid);
+          }
+          this.trixUserSocket.delete(uid);
+        }
+      }
+    }
+
+    for (const [uid, tid] of [...this.userToTrixTableId.entries()]) {
+      if (tid === key) this.userToTrixTableId.delete(uid);
+    }
+
+    this.trixGamesByTableId.delete(key);
+    void archiveTableDocument(key, { reason: archiveReason }).catch(() => {});
+
+    return { cleared: true };
+  }
+
+  evictExpiredTrixGames() {
+    const ttlMs = this.getTarneeb41FinishTtlMs();
+    const now = Date.now();
+    let evicted = 0;
+    for (const [tableId, game] of [...this.trixGamesByTableId.entries()]) {
+      if (game.state !== "game_end") continue;
+      const finishedAt = game._finishedAt;
+      if (!finishedAt || now - finishedAt < ttlMs) continue;
+      void this.clearTrixGame(tableId, { archiveReason: "game_complete" });
+      evicted += 1;
+    }
+    return evicted;
+  }
+
+  startTrixTtlSweep(intervalMs = 60_000) {
+    if (this._trixTtlSweepInterval) return;
+    this._trixTtlSweepInterval = setInterval(() => {
+      try {
+        this.evictExpiredTrixGames();
+      } catch (_) {
+        // ignore sweep errors
+      }
+    }, intervalMs);
+    if (typeof this._trixTtlSweepInterval.unref === "function") {
+      this._trixTtlSweepInterval.unref();
+    }
+  }
+
+  stopTrixTtlSweep() {
+    if (this._trixTtlSweepInterval) {
+      clearInterval(this._trixTtlSweepInterval);
+      this._trixTtlSweepInterval = null;
+    }
+  }
+
+  /** @deprecated use tryClearTrixGameIfReady */
+  clearTrixGameIfAllHumansGone(mongoTableId) {
+    return this.tryClearTrixGameIfReady(mongoTableId);
   }
 
   createRoom(gameType) {

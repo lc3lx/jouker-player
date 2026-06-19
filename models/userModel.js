@@ -26,6 +26,16 @@ const userSchema = new mongoose.Schema(
     phone: String,
     profileImg: String,
 
+    /** Invalidates JWTs on logout-all / password change (checked in auth protect). */
+    sessionVersion: { type: Number, default: 0, min: 0 },
+    preferences: {
+      language: { type: String, enum: ["ar", "en"], default: "ar" },
+      notifications: { type: Boolean, default: true },
+      soundEffects: { type: Boolean, default: true },
+      twoFactorEnabled: { type: Boolean, default: false },
+      hideProfile: { type: Boolean, default: false },
+      loginAlerts: { type: Boolean, default: true },
+    },
     password: {
       type: String,
       required: [true, "password required"],

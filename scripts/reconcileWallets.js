@@ -27,12 +27,17 @@ async function reconcileUser(userId) {
         balance += amt;
         break;
       case "bet":
+      case "game_loss":
       case "rake":
         locked -= amt;
         break;
       case "win":
+      case "game_win":
       case "refund":
         locked += amt;
+        break;
+      case "game_buyin":
+      case "settlement":
         break;
       default:
         break;

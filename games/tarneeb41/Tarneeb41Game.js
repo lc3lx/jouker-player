@@ -3,8 +3,18 @@
  * Play order between tricks: counter-clockwise (index + 3) % 4.
  */
 const BaseGame = require("../base/BaseGame");
+const crypto = require("crypto");
 const { newDeck, shuffle } = require("../utils/cards");
 const rules = require("./tarneeb41.rules");
+const { GAME_START_COUNTDOWN_SECONDS, TRICK_DISPLAY_MS } = require("./tarneeb41.constants");
+
+const ACTIVE_STATES = new Set(["bidding_syrian", "playing", "round_end", "game_end", "countdown"]);
+
+function parseTurnTimeoutSeconds() {
+  const n = parseInt(process.env.TURN_TIMEOUT_SECONDS || "30", 10);
+  if (!Number.isFinite(n) || n < 5) return 30;
+  return Math.min(n, 120);
+}
 
 class Tarneeb41Game extends BaseGame {
   constructor(roomId, options = {}) {
@@ -23,11 +33,71 @@ class Tarneeb41Game extends BaseGame {
     this.trickLeader = 0;
     this.roundNumber = 0;
     this.botInterval = null;
+    this.turnTimerInterval = null;
+    this.turnTimerSeconds = parseTurnTimeoutSeconds();
+    this.turnTimerEndsAt = null;
+    this.turnTimerPhase = null;
+    this.processedMoveIds = new Set();
+    this.onGameEvent = null;
+    this.onAfterMove = null;
     this.state = "waiting";
+    this.countdownSeconds = null;
+    this.countdownInterval = null;
+    this._countdownStartGate = null;
+    this.trickResolving = false;
+    this.pendingTrickWinner = null;
+    this.trickResolveTimer = null;
+    this.trickResolveEndsAt = null;
+  }
+
+  humanCount() {
+    return this.players.filter((p) => !p.isBot).length;
+  }
+
+  isReadyForCountdown() {
+    return (
+      this.state === "waiting" &&
+      this.players.length === 4 &&
+      this.humanCount() === 4
+    );
+  }
+
+  isCountdownActive() {
+    return this.state === "countdown" && this.countdownInterval != null;
   }
 
   getRequiredPlayers() {
     return 4;
+  }
+
+  needsInitialDeal() {
+    return this.state === "waiting";
+  }
+
+  setGameEventListener(listener) {
+    this.onGameEvent = typeof listener === "function" ? listener : null;
+  }
+
+  setAfterMoveListener(listener) {
+    this.onAfterMove = typeof listener === "function" ? listener : null;
+  }
+
+  _notifyAfterMove(result) {
+    if (!result?.success || !this.onAfterMove) return;
+    try {
+      this.onAfterMove(result);
+    } catch (_) {
+      // ignore listener errors
+    }
+  }
+
+  _emit(event, payload) {
+    if (!this.onGameEvent) return;
+    try {
+      this.onGameEvent(event, payload);
+    } catch (_) {
+      // ignore listener errors
+    }
   }
 
   nextSeatCCW(i) {
@@ -38,12 +108,33 @@ class Tarneeb41Game extends BaseGame {
     return (i + 1) % 4;
   }
 
+  setCountdownStartGate(gateFn) {
+    this._countdownStartGate = typeof gateFn === "function" ? gateFn : null;
+  }
+
+  humanCount() {
+    return this.players.filter((p) => !p.isBot).length;
+  }
+
+  convertHumanToBot(userId) {
+    const p = this.players.find(
+      (x) => !x.isBot && x.userId && String(x.userId) === String(userId)
+    );
+    if (!p) return false;
+    p.isBot = true;
+    p.userId = `bot_vacate_${Date.now()}_${p.seatIndex ?? 0}`;
+    p.socketId = null;
+    p.displayName = "بوت";
+    p.reconnectDeadline = null;
+    return true;
+  }
+
   syncLobbyFromTable(tableDoc, resolveSocket) {
-    if (this.hands[0] && this.hands[0].length > 0) {
+    if (ACTIVE_STATES.has(this.state) && this.players.length > 0) {
       for (const p of this.players) {
         if (!p.isBot) {
           const sid = resolveSocket(String(p.userId));
-          if (sid) p.socketId = sid;
+          p.socketId = sid || null;
         }
       }
       return;
@@ -67,33 +158,77 @@ class Tarneeb41Game extends BaseGame {
         chips: Number(seat.chips) || 0,
       });
     }
-    let bi = 0;
-    while (this.players.length < 4) {
-      const botId = `bot_${Date.now()}_${bi}_${Math.random().toString(36).substr(2, 9)}`;
-      bi += 1;
-      this.players.push({
-        userId: botId,
-        socketId: null,
-        seatIndex: this.players.length,
-        isBot: true,
-        displayName: "بوت",
-        chips: 0,
-      });
+  }
+
+  startGameCountdown() {
+    if (!this.isReadyForCountdown()) return false;
+    if (this.isCountdownActive()) return false;
+    this.clearCountdown();
+    this.state = "countdown";
+    this.countdownSeconds = GAME_START_COUNTDOWN_SECONDS;
+    this._emit("game_start_countdown", { remainingSeconds: this.countdownSeconds });
+    this.countdownInterval = setInterval(() => {
+      this.countdownSeconds -= 1;
+      if (this.countdownSeconds <= 0) {
+        void this._onCountdownElapsed();
+        return;
+      }
+      this._emit("game_start_countdown", { remainingSeconds: this.countdownSeconds });
+    }, 1000);
+    return true;
+  }
+
+  async _onCountdownElapsed() {
+    this.clearCountdown();
+    if (this._countdownStartGate) {
+      try {
+        const ok = await this._countdownStartGate();
+        if (!ok) {
+          this.state = "waiting";
+          this._emit("game_start_countdown_cancelled", { reason: "validation_failed" });
+          return;
+        }
+      } catch (_) {
+        this.state = "waiting";
+        this._emit("game_start_countdown_cancelled", { reason: "validation_error" });
+        return;
+      }
+    } else if (!this.isReadyForCountdown()) {
+      this.state = "waiting";
+      this._emit("game_start_countdown_cancelled", { reason: "not_ready" });
+      return;
+    }
+
+    const started = this.startGame();
+    if (started) {
+      this._notifyAfterMove({ success: true, gameStarted: true });
+    } else {
+      this.state = "waiting";
+      this._emit("game_start_countdown_cancelled", { reason: "start_failed" });
     }
   }
 
-  startGame() {
-    while (this.players.length < 4) {
-      const botId = `bot_${Date.now()}_${Math.random().toString(36).substr(2, 5)}`;
-      this.players.push({
-        userId: botId,
-        socketId: null,
-        seatIndex: this.players.length,
-        isBot: true,
-        displayName: "بوت",
-        chips: 0,
-      });
+  cancelGameCountdown(reason = "cancelled") {
+    if (this.state !== "countdown" && !this.countdownInterval) return false;
+    this.clearCountdown();
+    this.state = "waiting";
+    this._emit("game_start_countdown_cancelled", { reason });
+    return true;
+  }
+
+  clearCountdown() {
+    if (this.countdownInterval) {
+      clearInterval(this.countdownInterval);
+      this.countdownInterval = null;
     }
+    this.countdownSeconds = null;
+  }
+
+  startGame() {
+    if (this.state !== "waiting" && this.state !== "countdown") return false;
+    if (this.players.length !== 4 || this.humanCount() !== 4) return false;
+    this.clearCountdown();
+    this.sessionId = crypto.randomUUID();
     this.dealRound(true);
     this.startBotTimer();
     return true;
@@ -109,8 +244,6 @@ class Tarneeb41Game extends BaseGame {
     const deck = shuffle(newDeck());
     this.hands = [[], [], [], []];
 
-    // Deal starts from the player on the right of the dealer.
-    // This also makes the "last dealt card" (revealedCard) shift correctly when dealer rotates.
     const startSeat = (this.dealerIndex + 1) % 4;
     for (let i = 0; i < 52; i += 1) {
       this.hands[(startSeat + i) % 4].push(deck[i]);
@@ -127,6 +260,7 @@ class Tarneeb41Game extends BaseGame {
     this.state = "bidding_syrian";
     this.currentPlayerIndex = (this.dealerIndex + 1) % 4;
     this.trickLeader = this.currentPlayerIndex;
+    this.startTurnTimer();
   }
 
   startBotTimer() {
@@ -134,8 +268,135 @@ class Tarneeb41Game extends BaseGame {
     this.botInterval = setInterval(() => this.checkBotTurn(), 1500);
   }
 
+  clearBotTimer() {
+    if (this.botInterval) {
+      clearInterval(this.botInterval);
+      this.botInterval = null;
+    }
+  }
+
+  startTurnTimer() {
+    if (this.trickResolving) {
+      this.clearTurnTimer();
+      return;
+    }
+    if (this.state !== "bidding_syrian" && this.state !== "playing") {
+      this.clearTurnTimer();
+      return;
+    }
+    const p = this.players[this.currentPlayerIndex];
+    if (p && p.isBot) {
+      this.clearTurnTimer();
+      return;
+    }
+    this.turnTimerPhase = this.state === "bidding_syrian" ? "bidding" : "playing";
+    this.turnTimerEndsAt = Date.now() + this.turnTimerSeconds * 1000;
+    this._emitTurnTimerStarted();
+    if (this.turnTimerInterval) clearInterval(this.turnTimerInterval);
+    this.turnTimerInterval = setInterval(() => this._tickTurnTimer(), 1000);
+  }
+
+  clearTurnTimer() {
+    if (this.turnTimerInterval) {
+      clearInterval(this.turnTimerInterval);
+      this.turnTimerInterval = null;
+    }
+    this.turnTimerEndsAt = null;
+    this.turnTimerPhase = null;
+  }
+
+  destroy() {
+    this.clearBotTimer();
+    this.clearTurnTimer();
+    this.clearCountdown();
+    this.clearTrickResolveTimer();
+    this._countdownStartGate = null;
+    this.onGameEvent = null;
+    this.onAfterMove = null;
+  }
+
+  clearTrickResolveTimer() {
+    if (this.trickResolveTimer) {
+      clearTimeout(this.trickResolveTimer);
+      this.trickResolveTimer = null;
+    }
+    this.trickResolving = false;
+    this.pendingTrickWinner = null;
+    this.trickResolveEndsAt = null;
+  }
+
+  handleTurnTimeout() {
+    this._handleTurnTimeout();
+  }
+
+  _remainingTurnSeconds() {
+    if (!this.turnTimerEndsAt) return 0;
+    return Math.max(0, Math.ceil((this.turnTimerEndsAt - Date.now()) / 1000));
+  }
+
+  _turnTimerPayload(extra = {}) {
+    return {
+      phase: this.turnTimerPhase,
+      playerIndex: this.currentPlayerIndex,
+      remainingSeconds: this._remainingTurnSeconds(),
+      ...extra,
+    };
+  }
+
+  _emitTurnTimerStarted() {
+    this._emit("turn_timer_started", this._turnTimerPayload());
+  }
+
+  _emitTurnTimerUpdate() {
+    this._emit("turn_timer_update", this._turnTimerPayload());
+  }
+
+  _tickTurnTimer() {
+    if (this.state !== "bidding_syrian" && this.state !== "playing") {
+      this.clearTurnTimer();
+      return;
+    }
+    const remaining = this._remainingTurnSeconds();
+    this._emitTurnTimerUpdate();
+    if (remaining <= 0) {
+      this.clearTurnTimer();
+      this._handleTurnTimeout();
+    }
+  }
+
+  _pickAutoPlayCard(hand) {
+    const valid = rules.getValidCards(hand, this.ledSuit);
+    const pool = valid.length > 0 ? valid : [...hand];
+    if (pool.length === 0) return null;
+    pool.sort((a, b) => a.rank - b.rank);
+    return pool[0];
+  }
+
+  _handleTurnTimeout() {
+    const idx = this.currentPlayerIndex;
+    this._emit("turn_timer_expired", this._turnTimerPayload({ auto: true }));
+    if (this.state === "bidding_syrian") {
+      this.applyMove(idx, "tarneeb41_declare", { value: 0, fromTimeout: true });
+    } else if (this.state === "playing") {
+      const card = this._pickAutoPlayCard(this.hands[idx]);
+      if (!card) return;
+      this.applyMove(idx, "play_card", {
+        fromTimeout: true,
+        card: { suit: rules.toApiSuit(card.suit), rank: rules.toApiRank(card.rank) },
+      });
+    }
+  }
+
   checkBotTurn() {
-    if (this.state === "game_end" || this.state === "waiting") return;
+    if (
+      this.state === "game_end" ||
+      this.state === "waiting" ||
+      this.state === "round_end" ||
+      this.state === "countdown" ||
+      this.trickResolving
+    ) {
+      return;
+    }
     const idx = this.currentPlayerIndex;
     const p = this.players[idx];
     if (!p || !p.isBot) return;
@@ -144,14 +405,26 @@ class Tarneeb41Game extends BaseGame {
       const v = 3 + Math.floor(Math.random() * 5);
       this.applyMove(idx, "tarneeb41_declare", { value: v });
     } else if (this.state === "playing") {
-      const hand = this.hands[idx];
-      const valid = rules.getValidCards(hand, this.ledSuit);
-      if (valid.length === 0) return;
-      const card = valid[Math.floor(Math.random() * valid.length)];
+      const card = this._pickAutoPlayCard(this.hands[idx]);
+      if (!card) return;
       this.applyMove(idx, "play_card", {
         card: { suit: rules.toApiSuit(card.suit), rank: rules.toApiRank(card.rank) },
       });
     }
+  }
+
+  _checkDuplicateMove(playerIndex, action, payload) {
+    const moveId = payload && payload.moveId;
+    if (!moveId) return null;
+    const key = `${playerIndex}:${action}:${moveId}`;
+    if (this.processedMoveIds.has(key)) {
+      return { success: true, duplicate: true };
+    }
+    this.processedMoveIds.add(key);
+    if (this.processedMoveIds.size > 500) {
+      this.processedMoveIds = new Set(Array.from(this.processedMoveIds).slice(-250));
+    }
+    return null;
   }
 
   allDeclared() {
@@ -168,6 +441,15 @@ class Tarneeb41Game extends BaseGame {
   }
 
   applyMove(playerIndex, action, payload) {
+    const dup = this._checkDuplicateMove(playerIndex, action, payload);
+    if (dup) return dup;
+
+    const result = this._executeMove(playerIndex, action, payload);
+    this._notifyAfterMove(result);
+    return result;
+  }
+
+  _executeMove(playerIndex, action, payload) {
     if (action === "tarneeb41_declare") {
       if (this.state !== "bidding_syrian") return { success: false, reason: "not_bidding" };
       if (this.currentPlayerIndex !== playerIndex) return { success: false, reason: "not_your_turn" };
@@ -178,13 +460,14 @@ class Tarneeb41Game extends BaseGame {
 
       if (!this.allDeclared()) {
         this.currentPlayerIndex = this.findNextUndeclared(this.currentPlayerIndex);
+        this.startTurnTimer();
         return { success: true };
       }
 
       const sum = this.declaredBids.reduce((a, b) => a + b, 0);
       if (sum < rules.SUM_MIN_TO_PLAY) {
         this.dealRound(false);
-        return { success: true, redeal: true };
+        return { success: true, redeal: true, reason: "sum_below_min", minSum: rules.SUM_MIN_TO_PLAY };
       }
 
       this.state = "playing";
@@ -192,11 +475,13 @@ class Tarneeb41Game extends BaseGame {
       this.currentPlayerIndex = this.trickLeader;
       this.trick = [];
       this.ledSuit = null;
+      this.startTurnTimer();
       return { success: true };
     }
 
     if (action === "play_card") {
       if (this.state !== "playing") return { success: false, reason: "not_playing" };
+      if (this.trickResolving) return { success: false, reason: "trick_resolving" };
       if (this.currentPlayerIndex !== playerIndex) return { success: false, reason: "not_your_turn" };
       const { card } = payload || {};
       const vr = rules.validateCardPlay(this.hands[playerIndex], card, this.ledSuit, this.trump);
@@ -210,21 +495,28 @@ class Tarneeb41Game extends BaseGame {
 
       if (this.trick.length < 4) {
         this.currentPlayerIndex = this.nextSeatCCW(this.currentPlayerIndex);
+        this.startTurnTimer();
         return { success: true };
       }
 
       const winner = rules.winningCardInTrick(this.trick, this.ledSuit, this.trump);
       if (!winner) return { success: false, reason: "trick_error" };
-      this.tricksThisRound[winner.playerIndex] += 1;
-      this.trickLeader = winner.playerIndex;
-      this.currentPlayerIndex = winner.playerIndex;
-      this.trick = [];
-      this.ledSuit = null;
 
-      if (this.hands[0].length === 0) {
-        this.endRound();
-      }
-      return { success: true, trickWinner: winner.playerIndex };
+      this.trickResolving = true;
+      this.pendingTrickWinner = winner.playerIndex;
+      this.clearTurnTimer();
+      this.trickResolveEndsAt = Date.now() + TRICK_DISPLAY_MS;
+      if (this.trickResolveTimer) clearTimeout(this.trickResolveTimer);
+      this.trickResolveTimer = setTimeout(() => {
+        this._finalizePendingTrick();
+      }, TRICK_DISPLAY_MS);
+
+      return {
+        success: true,
+        trickComplete: true,
+        trickWinner: winner.playerIndex,
+        trickDisplayMs: TRICK_DISPLAY_MS,
+      };
     }
 
     if (action === "next_round") {
@@ -237,21 +529,57 @@ class Tarneeb41Game extends BaseGame {
     return { success: false, reason: "unknown_action" };
   }
 
-  /** Call from socket when any seated player confirms next deal. */
   advanceNextRound() {
     return this.applyMove(0, "next_round", {}).success;
+  }
+
+  _finalizePendingTrick() {
+    if (!this.trickResolving || this.pendingTrickWinner == null) return null;
+    const winnerIndex = this.pendingTrickWinner;
+    this.clearTrickResolveTimer();
+    this.tricksThisRound[winnerIndex] += 1;
+    this.trickLeader = winnerIndex;
+    this.currentPlayerIndex = winnerIndex;
+    this.trick = [];
+    this.ledSuit = null;
+
+    let roundEnded = false;
+    if (this.hands[0].length === 0) {
+      this.endRound();
+      roundEnded = true;
+    } else {
+      this.startTurnTimer();
+    }
+
+    const result = {
+      success: true,
+      trickWinner: winnerIndex,
+      roundEnded,
+      trickResolved: true,
+    };
+    this._notifyAfterMove(result);
+    return result;
+  }
+
+  /** Test helper — finalize trick without waiting. */
+  finalizePendingTrickNow() {
+    if (!this.trickResolving) return null;
+    if (this.trickResolveTimer) {
+      clearTimeout(this.trickResolveTimer);
+      this.trickResolveTimer = null;
+    }
+    return this._finalizePendingTrick();
   }
 
   endRound() {
     rules.applyRoundScores(this.declaredBids, this.tricksThisRound, this.playerScores);
     this.roundNumber += 1;
     const end = rules.checkGameEnd(this.playerScores);
+    this.clearTurnTimer();
     if (end.ended) {
       this.state = "game_end";
-      if (this.botInterval) {
-        clearInterval(this.botInterval);
-        this.botInterval = null;
-      }
+      this.clearBotTimer();
+      this._finishedAt = Date.now();
     } else {
       this.state = "round_end";
     }
@@ -266,6 +594,8 @@ class Tarneeb41Game extends BaseGame {
       declaredBids: [...this.declaredBids],
       tricksThisRound: [...this.tricksThisRound],
       playerScores: [...this.playerScores],
+      trump: this.trump ? rules.toApiSuit(this.trump) : null,
+      revealedCard: this._cardToApi(this.revealedCard),
     };
   }
 
@@ -292,10 +622,18 @@ class Tarneeb41Game extends BaseGame {
     );
     const handSizes = this.hands.map((h) => h.length);
     let validCards = [];
-    if (this.state === "playing" && forPlayerIndex >= 0) {
+    if (this.state === "playing" && forPlayerIndex >= 0 && !this.trickResolving) {
       validCards = rules
         .getValidCards(this.hands[forPlayerIndex], this.ledSuit)
         .map((c) => this._cardToApi(c));
+    }
+
+    let trickDisplayRemainingSeconds = 0;
+    if (this.trickResolving && this.trickResolveEndsAt) {
+      trickDisplayRemainingSeconds = Math.max(
+        0,
+        Math.ceil((this.trickResolveEndsAt - Date.now()) / 1000)
+      );
     }
 
     const seatsPublic = this.players.map((p, idx) => ({
@@ -326,6 +664,16 @@ class Tarneeb41Game extends BaseGame {
       roundNumber: this.roundNumber,
       validCards,
       seatsPublic,
+      trickResolving: this.trickResolving,
+      trickDisplayRemainingSeconds,
+      countdownSeconds: this.state === "countdown" ? this.countdownSeconds : null,
+      turnTimer: this.turnTimerPhase
+        ? {
+            phase: this.turnTimerPhase,
+            playerIndex: this.currentPlayerIndex,
+            remainingSeconds: this._remainingTurnSeconds(),
+          }
+        : null,
     };
   }
 }

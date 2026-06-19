@@ -8,6 +8,7 @@ const crypto = require("crypto");
 const LOCK_TTL_MS = 45_000;
 const FREE_SPIN_TTL_SEC = 7 * 24 * 3600;
 const MAX_BANKED_FREE_SPINS = 50;
+const FREE_SPINS_AWARD = 15;
 
 /** @type {import('redis').RedisClientType | null} */
 let redis = null;
@@ -159,6 +160,7 @@ async function setFreeSpinSession(userId, tableId, session) {
   const capped = {
     ...session,
     remaining: capFsRemaining(session.remaining),
+    totalMultiplier: Math.max(0, Number(session.totalMultiplier || 0)),
   };
   if (redis) {
     try {
@@ -186,20 +188,39 @@ async function deleteFreeSpinSession(userId, tableId) {
 /**
  * @returns {Promise<object|null>}
  */
-async function awardFreeSpins(userId, tableId, scatterCount, lockedBaseBet, lockedDoubleChance) {
-  if (scatterCount < 3) return getFreeSpinSession(userId, tableId);
-  const add =
-    scatterCount >= 6 ? 20 : scatterCount >= 5 ? 16 : scatterCount >= 4 ? 12 : 8;
+async function awardFreeSpins(
+  userId,
+  tableId,
+  scatterCount,
+  lockedBaseBet,
+  lockedDoubleChance,
+  totalMultiplier = 0
+) {
+  if (scatterCount < 4) return getFreeSpinSession(userId, tableId);
+  const add = FREE_SPINS_AWARD;
   let cur = await getFreeSpinSession(userId, tableId);
   if (!cur || cur.remaining <= 0) {
     cur = {
       remaining: capFsRemaining(add),
       lockedBaseBet,
       lockedDoubleChance: !!lockedDoubleChance,
+      totalMultiplier: Math.max(0, Number(totalMultiplier || 0)),
     };
   } else {
     cur.remaining = capFsRemaining(cur.remaining + add);
+    cur.totalMultiplier = Math.max(
+      0,
+      Number(cur.totalMultiplier || totalMultiplier || 0)
+    );
   }
+  await setFreeSpinSession(userId, tableId, cur);
+  return cur;
+}
+
+async function setFreeSpinTotalMultiplier(userId, tableId, totalMultiplier) {
+  const cur = await getFreeSpinSession(userId, tableId);
+  if (!cur || cur.remaining <= 0) return null;
+  cur.totalMultiplier = Math.max(0, Number(totalMultiplier || 0));
   await setFreeSpinSession(userId, tableId, cur);
   return cur;
 }
@@ -224,6 +245,7 @@ async function peekFreeSpinRemaining(userId, tableId) {
 module.exports = {
   LOCK_TTL_MS,
   MAX_BANKED_FREE_SPINS,
+  FREE_SPINS_AWARD,
   setRedisClient,
   tryAcquireLock,
   releaseLock,
@@ -231,6 +253,7 @@ module.exports = {
   clearLocksForUser,
   getFreeSpinSession,
   awardFreeSpins,
+  setFreeSpinTotalMultiplier,
   decrementFreeSpin,
   peekFreeSpinRemaining,
   deleteFreeSpinSession,

@@ -11,6 +11,19 @@ const seatSnapshotSchema = new mongoose.Schema(
   { _id: false }
 );
 
+const handAuditEntrySchema = new mongoose.Schema(
+  {
+    ts: Number,
+    round: String,
+    type: String,
+    playerId: String,
+    seatIndex: Number,
+    amount: Number,
+    message: { type: String, required: true },
+  },
+  { _id: false }
+);
+
 const handActionSchema = new mongoose.Schema(
   {
     ts: Number,
@@ -60,6 +73,8 @@ const handHistorySchema = new mongoose.Schema(
     endedAt: { type: Date },
     players: [handPlayerSchema],
     actions: [handActionSchema],
+    /** Human-readable chronological ledger for support / fraud analytics. */
+    auditLog: [handAuditEntrySchema],
     community: [String],
     pot: Number,
     rake: Number,

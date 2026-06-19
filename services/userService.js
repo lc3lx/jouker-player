@@ -127,13 +127,16 @@ exports.updateLoggedUserPassword = asyncHandler(async (req, res, next) => {
 // @route   PUT /api/v1/users/updateMe
 // @access  Private/Protect
 exports.updateLoggedUserData = asyncHandler(async (req, res, next) => {
+  const updates = {};
+  ["name", "email", "phone", "profileImg"].forEach((field) => {
+    if (req.body[field] !== undefined) {
+      updates[field] = req.body[field];
+    }
+  });
+
   const updatedUser = await User.findByIdAndUpdate(
     req.user._id,
-    {
-      name: req.body.name,
-      email: req.body.email,
-      phone: req.body.phone,
-    },
+    updates,
     { new: true }
   );
 

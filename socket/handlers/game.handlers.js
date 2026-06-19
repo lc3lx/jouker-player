@@ -3,10 +3,25 @@
  */
 const matchMaker = require("../../matchmaking/matchMaker");
 const roomManager = require("../../rooms/roomManager");
+const { registerParkourHandlers, resumeRestoredRaces } = require("./parkour.handlers");
+const parkourRoomManager = require("../../games/parkour/parkourRoomManager");
+const { recoverParkourSettlements, ensureDefaultTrack } = require("../../services/parkourService");
+const {
+  abandonTrixTableIfNoHumans,
+} = require("../../services/trixRecoveryService");
 const Table = require("../../models/tableModel");
 const User = require("../../models/userModel");
 const Wallet = require("../../models/walletModel");
 const MiniGamePlay = require("../../models/miniGamePlayModel");
+const { trackTrixWin } = require("../../services/taskService");
+const { settleGameOnFinish } = require("../../services/gameSettlementService");
+const { markTrixTablePlaying } = require("../../services/tableService");
+const { emitTablesUpdated } = require("../../utils/lobbyRealtime");
+const {
+  scheduleCardTableVacate,
+  onCardTableRejoin,
+} = require("../../services/cardTableVacateService");
+const logger = require("../../utils/logger");
 const DiceEngine = require("../../games/dice/DiceEngine");
 const kingArthRoundState = require("../../games/dice/kingArthRoundState");
 const kingArthSeedRotation = require("../../games/dice/kingArthSeedRotation");
@@ -105,6 +120,230 @@ function emitToTarneeb41Humans(nsp, mongoTableId, event, payload) {
   });
 }
 
+function wireTrixGame(nsp, tableId, game) {
+  if (!game || game._trixWired) return;
+  game._trixWired = true;
+  const tid = String(tableId);
+  game.setAfterMoveListener((result) => {
+    void handleTrixAfterMove(nsp, { type: "trix", tableId: tid, game }, result);
+  });
+  game.setGameEventListener((event, payload) => {
+    if (
+      event === "turn_timer_started" ||
+      event === "turn_timer_update" ||
+      event === "turn_timer_expired"
+    ) {
+      emitToTrixHumans(nsp, tid, event, payload);
+    }
+  });
+}
+
+function getOrCreateTrixGameWired(nsp, tableId) {
+  const game = roomManager.getOrCreateTrixGame(tableId);
+  wireTrixGame(nsp, tableId, game);
+  return game;
+}
+
+async function handleTrixAfterMove(nsp, ctx, result) {
+  if (!ctx?.game || ctx.type !== "trix") return;
+  const { tableId, game } = ctx;
+
+  if (result?.duplicate) {
+    broadcastTrixTableState(nsp, tableId);
+    return;
+  }
+
+  if (result?.gameStarted) {
+    try {
+      await markTrixTablePlaying(tableId);
+    } catch (err) {
+      logger.error("trix_mark_playing_failed", {
+        tableId: String(tableId),
+        reason: err?.message,
+      });
+    }
+    emitTablesUpdated({ gameType: "trix", reason: "game_start", tableId: String(tableId) });
+  }
+
+  if (result?.roundEnded || game.state === "round_end") {
+    const roundResult = game.getRoundResult ? game.getRoundResult() : null;
+    if (roundResult) {
+      emitToTrixHumans(nsp, tableId, "round_result", roundResult);
+    }
+  }
+
+  if (game.isGameFinished && game.isGameFinished()) {
+    if (!game._settlementTriggered) {
+      game._settlementTriggered = true;
+      roomManager.markTrixGameFinished(tableId);
+      const gameResult = game.getGameResult ? game.getGameResult() : null;
+      if (gameResult) {
+        emitToTrixHumans(nsp, tableId, "game_finished", gameResult);
+        if (Array.isArray(game.players) && gameResult.winnerIndex != null) {
+          const winner = game.players[gameResult.winnerIndex];
+          if (winner && !winner.isBot && winner.userId) {
+            trackTrixWin(winner.userId, { tableId: ctx.tableId });
+          }
+        }
+        emitTablesUpdated({ gameType: "trix", reason: "game_end", tableId: String(tableId) });
+        await runGameSettlement(nsp, ctx, gameResult);
+      }
+    }
+  }
+
+  broadcastTrixTableState(nsp, tableId);
+}
+
+function wireTarneeb41Game(nsp, tableId, game) {
+  if (!game || game._tarneeb41Wired) return;
+  game._tarneeb41Wired = true;
+  const tid = String(tableId);
+  game.setCountdownStartGate(async () => {
+    const { validateTarneeb41StartEligibility } = require("../../services/tableService");
+    const result = await validateTarneeb41StartEligibility(tid, game);
+    return result.ok;
+  });
+  game.setGameEventListener((event, payload) => {
+    if (
+      event === "turn_timer_started" ||
+      event === "turn_timer_update" ||
+      event === "turn_timer_expired" ||
+      event === "game_start_countdown" ||
+      event === "game_start_countdown_cancelled"
+    ) {
+      emitToTarneeb41Humans(nsp, tid, event, payload);
+    }
+  });
+  game.setAfterMoveListener((result) => {
+    void handleTarneeb41AfterMove(nsp, { type: "tarneeb41", tableId: tid, game }, result);
+  });
+}
+
+async function handleTarneeb41AfterMove(nsp, ctx, result) {
+  if (!ctx?.game || ctx.type !== "tarneeb41") return;
+  const { tableId, game } = ctx;
+
+  if (result?.duplicate) {
+    broadcastTarneeb41TableState(nsp, tableId);
+    return;
+  }
+
+  if (result?.gameStarted) {
+    emitTablesUpdated({ gameType: "tarneeb41", reason: "game_start", tableId: String(tableId) });
+  }
+
+  if (result?.trickComplete || result?.trickResolved) {
+    broadcastTarneeb41TableState(nsp, tableId);
+  }
+
+  if (result?.redeal) {
+    emitToTarneeb41Humans(nsp, tableId, "redeal_required", {
+      reason: result.reason || "sum_below_min",
+      minSum: result.minSum || 11,
+      declaredBids: [...game.declaredBids],
+    });
+  }
+
+  if (result?.roundEnded || game.state === "round_end") {
+    const roundResult = game.getRoundResult ? game.getRoundResult() : null;
+    if (roundResult) {
+      emitToTarneeb41Humans(nsp, tableId, "round_result", roundResult);
+    }
+  }
+
+  if (game.isGameFinished && game.isGameFinished()) {
+    const gameResult = game.getGameResult ? game.getGameResult() : null;
+    if (gameResult) {
+      roomManager.markTarneeb41GameFinished(tableId);
+      emitToTarneeb41Humans(nsp, tableId, "game_finished", gameResult);
+      emitTablesUpdated({ gameType: "tarneeb41", reason: "game_end", tableId: String(tableId) });
+      await runGameSettlement(nsp, ctx, gameResult);
+    }
+  }
+
+  broadcastTarneeb41TableState(nsp, tableId);
+}
+
+function getOrCreateTarneeb41GameWired(nsp, tableId) {
+  const game = roomManager.getOrCreateTarneeb41Game(tableId);
+  wireTarneeb41Game(nsp, tableId, game);
+  return game;
+}
+
+async function maybeAbandonTrixTable(nsp, tableId) {
+  if (!tableId) return null;
+  try {
+    const result = await abandonTrixTableIfNoHumans(tableId);
+    if (result?.abandoned) {
+      logger.info("trix_table_abandoned", {
+        tableId: String(tableId),
+        refunded: result.refunded,
+      });
+    } else {
+      roomManager.tryClearTrixGameIfReady(tableId);
+    }
+    return result;
+  } catch (err) {
+    logger.error("trix_abandon_failed", {
+      tableId: String(tableId),
+      reason: err?.message || "unknown",
+    });
+    return null;
+  }
+}
+
+async function runGameSettlement(nsp, ctx, gameResult) {
+  if (!ctx?.tableId || !ctx?.type || !gameResult) return null;
+  if (ctx.type !== "trix" && ctx.type !== "tarneeb41") return null;
+  try {
+    const outcome = await settleGameOnFinish({
+      gameType: ctx.type,
+      tableId: ctx.tableId,
+      sessionId: ctx.game?.sessionId,
+      gameResult,
+      gamePlayers: ctx.game?.players,
+    });
+    if (outcome?.settlement) {
+      const payload = {
+        settlementId: outcome.settlement.settlementId,
+        totalPayout: outcome.settlement.totalPayout,
+        totalRake: outcome.settlement.totalRake,
+        reconciliation: outcome.settlement.reconciliation,
+      };
+      if (ctx.type === "trix") {
+        emitToTrixHumans(nsp, ctx.tableId, "settlement_complete", payload);
+        if (ctx.game) ctx.game._lastSettlementPayload = payload;
+        roomManager.markTrixSettlementComplete(ctx.tableId);
+        roomManager.tryClearTrixGameIfReady(ctx.tableId);
+        roomManager.evictExpiredTrixGames();
+        emitTablesUpdated({
+          gameType: "trix",
+          reason: "settlement_complete",
+          tableId: String(ctx.tableId),
+        });
+      } else {
+        emitToTarneeb41Humans(nsp, ctx.tableId, "settlement_complete", payload);
+        roomManager.markTarneeb41SettlementComplete(ctx.tableId);
+        roomManager.tryClearTarneeb41GameIfReady(ctx.tableId);
+        roomManager.evictExpiredTarneeb41Games();
+      }
+    }
+    return outcome;
+  } catch (err) {
+    logger.error("game_settlement_hook_failed", {
+      tableId: String(ctx.tableId),
+      gameType: ctx.type,
+      reason: err?.message || "unknown",
+    });
+    if (ctx.type === "trix") {
+      emitToTrixHumans(nsp, ctx.tableId, "settlement_failed", {
+        reason: err?.message || "settlement_failed",
+      });
+    }
+    return null;
+  }
+}
+
 /** @returns {{ type:'room', room: object, game: object } | { type:'trix', tableId: string, game: object } | { type:'tarneeb41', tableId: string, game: object } | null} */
 function resolveGameContext(userId, roomIdFromPayload) {
   const room = roomManager.getRoomByUser(userId);
@@ -124,6 +363,26 @@ function resolveGameContext(userId, roomIdFromPayload) {
 
 /** Register game handlers on namespace */
 function registerGameHandlers(nsp, jwtVerify) {
+  registerParkourHandlers(nsp);
+  roomManager.startTarneeb41TtlSweep();
+  roomManager.startTrixTtlSweep();
+
+  void (async () => {
+    try {
+      await ensureDefaultTrack();
+      const restored = await parkourRoomManager.restoreActiveRaces();
+      if (restored > 0) {
+        logger.info("parkour_races_restored", { count: restored });
+        resumeRestoredRaces(nsp);
+      }
+      const settlements = await recoverParkourSettlements();
+      if (settlements > 0) logger.info("parkour_settlements_recovered", { count: settlements });
+      // Card-game settlement recovery runs in runBootSanitizer() before sockets accept connections.
+    } catch (err) {
+      logger.error("parkour_startup_recovery_failed", { reason: err?.message });
+    }
+  })();
+
   nsp.on("connection", (socket) => {
     const userId = socket.user?.id || socket.userId;
     if (!userId) {
@@ -158,27 +417,17 @@ function registerGameHandlers(nsp, jwtVerify) {
           return;
         }
         matchMaker.dequeue("trix", userId);
+        onCardTableRejoin({ gameType: "trix", tableId: table._id, userId });
         roomManager.setTrixUserSocket(String(userId), socket.id);
         roomManager.setUserTrixTable(String(userId), String(table._id));
-        const game = roomManager.getOrCreateTrixGame(table._id);
-        game.setStateChangedListener(() => {
-          broadcastTrixTableState(nsp, String(table._id));
-        });
+        const game = getOrCreateTrixGameWired(nsp, table._id);
         game.syncLobbyFromTable(table, (uid) => roomManager.getTrixUserSocket(String(uid)));
         if (!game.gameState) {
           game.startGame();
         }
         let seatIndex = game.getPlayerIndex(userId);
         if (seatIndex < 0) {
-          // Recover from stale in-memory game roster that doesn't match current DB seats.
-          if (game.botInterval) {
-            clearInterval(game.botInterval);
-            game.botInterval = null;
-          }
-          game.gameState = null;
-          game.state = "waiting";
           game.syncLobbyFromTable(table, (uid) => roomManager.getTrixUserSocket(String(uid)));
-          game.startGame();
           seatIndex = game.getPlayerIndex(userId);
         }
         if (seatIndex < 0) {
@@ -193,6 +442,16 @@ function registerGameHandlers(nsp, jwtVerify) {
           seatIndex,
           gameState: state,
         });
+        if (game.state === "game_end") {
+          const gameResult = game.getGameResult ? game.getGameResult() : null;
+          if (gameResult) socket.emit("game_finished", gameResult);
+          if (game._lastSettlementPayload) {
+            socket.emit("settlement_complete", game._lastSettlementPayload);
+          }
+        } else if (game.state === "round_end") {
+          const roundResult = game.getRoundResult ? game.getRoundResult() : null;
+          if (roundResult) socket.emit("round_result", roundResult);
+        }
         broadcastTrixTableState(nsp, String(table._id));
       } catch (err) {
         socket.emit("invalid_move", { reason: "join_trix_failed" });
@@ -226,24 +485,28 @@ function registerGameHandlers(nsp, jwtVerify) {
           return;
         }
         matchMaker.dequeue("tarneeb41", userId);
+        onCardTableRejoin({ gameType: "tarneeb41", tableId: table._id, userId });
         roomManager.setTarneeb41UserSocket(String(userId), socket.id);
         roomManager.setUserTarneeb41Table(String(userId), String(table._id));
-        let game = roomManager.getOrCreateTarneeb41Game(table._id);
+        let game = getOrCreateTarneeb41GameWired(nsp, table._id);
         game.syncLobbyFromTable(table, (uid) => roomManager.getTarneeb41UserSocket(String(uid)));
         let seatIndex = game.getPlayerIndex(userId);
         if (seatIndex < 0) {
+          if (!game.needsInitialDeal()) {
+            socket.emit("invalid_move", { reason: "join_tarneeb41_failed" });
+            return;
+          }
           roomManager.tarneeb41GamesByTableId.delete(String(table._id));
-          game = roomManager.getOrCreateTarneeb41Game(table._id);
+          game = getOrCreateTarneeb41GameWired(nsp, table._id);
           game.syncLobbyFromTable(table, (uid) => roomManager.getTarneeb41UserSocket(String(uid)));
-          seatIndex = game.getPlayerIndex(userId);
-        }
-        if (game.hands[0].length === 0) {
-          game.startGame();
           seatIndex = game.getPlayerIndex(userId);
         }
         if (seatIndex < 0) {
           socket.emit("invalid_move", { reason: "join_tarneeb41_failed" });
           return;
+        }
+        if (game.isReadyForCountdown() && !game.isCountdownActive()) {
+          game.startGameCountdown();
         }
         socket.join(`tarneeb41:${tableId}`);
         socket.emit("room_joined", {
@@ -259,9 +522,10 @@ function registerGameHandlers(nsp, jwtVerify) {
     });
 
     // join_game - add to matchmaking queue
-    socket.on("join_game", (payload) => {
+    socket.on("join_game", async (payload) => {
       const { gameType = "tarneeb" } = payload || {};
-      const result = matchMaker.enqueue(gameType, userId, socket.id);
+      let result = matchMaker.enqueue(gameType, userId, socket.id);
+      if (result && typeof result.then === "function") result = await result;
       if (result.error) {
         socket.emit("invalid_move", { reason: result.error });
         return;
@@ -271,6 +535,26 @@ function registerGameHandlers(nsp, jwtVerify) {
           waiting: true,
           queueSize: result.queueSize,
           required: result.required,
+        });
+        return;
+      }
+      if (result.roomCreated && result.gameType === "parkour" && result.raceId) {
+        const { raceId, players } = result;
+        players.forEach((p) => {
+          const sock = nsp.sockets.get(p.socketId);
+          if (sock) {
+            sock.join(`parkour:${raceId}`);
+            parkourRoomManager.bindUser(p.userId, raceId, p.socketId);
+            const room = parkourRoomManager.getRoom(raceId);
+            if (room) {
+              sock.emit("room_joined", {
+                raceId,
+                seatIndex: p.seatIndex,
+                gameType: "parkour",
+                roomState: room.game.getPublicState(p.userId),
+              });
+            }
+          }
         });
         return;
       }
@@ -380,6 +664,9 @@ function registerGameHandlers(nsp, jwtVerify) {
           clientSeed,
           nonce: nonceStr,
           isFreeSpin,
+          freeSpinMultiplier: isFreeSpin
+            ? Number(fsBefore.totalMultiplier || 0)
+            : 0,
           volatility,
         });
         let payout = outcome.totalWin;
@@ -398,25 +685,24 @@ function registerGameHandlers(nsp, jwtVerify) {
         await recordSpinAnalytics(userId, stake, payout, outcome.winType);
 
         if (isFreeSpin) {
+          await kingArthRoundState.setFreeSpinTotalMultiplier(
+            userId,
+            tableId,
+            outcome.multipliers.freeSpinTotal
+          );
           await kingArthRoundState.decrementFreeSpin(userId, tableId);
         }
 
         let freeSpinsAwarded = 0;
-        if (outcome.scatterCount >= 3) {
-          freeSpinsAwarded =
-            outcome.scatterCount >= 6
-              ? 20
-              : outcome.scatterCount >= 5
-                ? 16
-                : outcome.scatterCount >= 4
-                  ? 12
-                  : 8;
+        if (outcome.scatterCount >= 4) {
+          freeSpinsAwarded = DiceEngine.FREE_SPINS_AWARD;
           await kingArthRoundState.awardFreeSpins(
             userId,
             tableId,
             outcome.scatterCount,
             bet,
-            doubleChance
+            doubleChance,
+            outcome.multipliers.freeSpinTotal
           );
         }
 
@@ -436,6 +722,8 @@ function registerGameHandlers(nsp, jwtVerify) {
             volatility: outcome.volatility,
             lineWins: outcome.lineWins,
             scatterCount: outcome.scatterCount,
+            multipliers: outcome.multipliers,
+            cascadeSteps: outcome.cascadeSteps,
             winType: outcome.winType,
             isFreeSpin,
             nearMiss: outcome.nearMiss,
@@ -460,6 +748,8 @@ function registerGameHandlers(nsp, jwtVerify) {
           ok: true,
           tableId,
           grid: outcome.grid,
+          initialGrid: outcome.initialGrid,
+          finalGrid: outcome.finalGrid,
           baseBet: outcome.baseBet,
           stake: outcome.stake,
           doubleChance: outcome.doubleChance,
@@ -538,13 +828,17 @@ function registerGameHandlers(nsp, jwtVerify) {
       }
       const playerIndex = ctx.game.getPlayerIndex(userId);
       if (playerIndex < 0) return;
-      const result = ctx.game.applyMove(playerIndex, "select_game", { gameType });
+      const result = ctx.game.applyMove(playerIndex, "select_game", {
+        gameType,
+        moveId: payload && payload.moveId,
+      });
       if (!result.success) {
         socket.emit("invalid_move", { reason: result.reason });
         return;
       }
-      if (ctx.type === "trix") broadcastTrixTableState(nsp, ctx.tableId);
-      else broadcastGameState(nsp, ctx.room.roomId);
+      if (ctx.type === "trix") {
+        if (result.duplicate) broadcastTrixTableState(nsp, ctx.tableId);
+      } else broadcastGameState(nsp, ctx.room.roomId);
     });
 
     // tarneeb41_declare — Syrian individual declares (2–13 or pass)
@@ -557,12 +851,14 @@ function registerGameHandlers(nsp, jwtVerify) {
       }
       const playerIndex = ctx.game.getPlayerIndex(userId);
       if (playerIndex < 0) return;
-      const result = ctx.game.applyMove(playerIndex, "tarneeb41_declare", { value });
+      const result = ctx.game.applyMove(playerIndex, "tarneeb41_declare", {
+        value,
+        moveId: payload && payload.moveId,
+      });
       if (!result.success) {
         socket.emit("invalid_move", { reason: result.reason });
         return;
       }
-      broadcastTarneeb41TableState(nsp, ctx.tableId);
     });
 
     // play_card
@@ -576,31 +872,47 @@ function registerGameHandlers(nsp, jwtVerify) {
       const game = ctx.game;
       const playerIndex = game.getPlayerIndex(userId);
       if (playerIndex < 0) return;
-      const result = game.applyMove(playerIndex, "play_card", { card });
+      const result = game.applyMove(playerIndex, "play_card", {
+        card,
+        moveId: payload && payload.moveId,
+      });
       if (!result.success) {
         socket.emit("invalid_move", { reason: result.reason });
+        return;
+      }
+      if (ctx.type === "tarneeb41") {
+        return;
+      }
+      if (ctx.type === "trix") {
+        if (result.duplicate) {
+          broadcastTrixTableState(nsp, ctx.tableId);
+        }
         return;
       }
       if (game.state === "round_end") {
         const roundResult = game.getRoundResult ? game.getRoundResult() : null;
         if (roundResult) {
-          if (ctx.type === "trix") emitToTrixHumans(nsp, ctx.tableId, "round_result", roundResult);
-          else if (ctx.type === "tarneeb41")
-            emitToTarneeb41Humans(nsp, ctx.tableId, "round_result", roundResult);
-          else nsp.to(`room:${roomId}`).emit("round_result", roundResult);
+          if (ctx.type === "trix") {
+            emitToTrixHumans(nsp, ctx.tableId, "round_result", roundResult);
+          } else nsp.to(`room:${roomId}`).emit("round_result", roundResult);
         }
       }
       if (game.isGameFinished()) {
         const gameResult = game.getGameResult ? game.getGameResult() : null;
         if (gameResult) {
-          if (ctx.type === "trix") emitToTrixHumans(nsp, ctx.tableId, "game_finished", gameResult);
-          else if (ctx.type === "tarneeb41")
-            emitToTarneeb41Humans(nsp, ctx.tableId, "game_finished", gameResult);
-          else nsp.to(`room:${roomId}`).emit("game_finished", gameResult);
+          if (ctx.type === "trix") {
+            emitToTrixHumans(nsp, ctx.tableId, "game_finished", gameResult);
+            if (Array.isArray(game.players) && gameResult.winnerIndex != null) {
+              const winner = game.players[gameResult.winnerIndex];
+              if (winner && !winner.isBot && winner.userId) {
+                trackTrixWin(winner.userId, { tableId: ctx.tableId });
+              }
+            }
+            void runGameSettlement(nsp, ctx, gameResult);
+          } else nsp.to(`room:${roomId}`).emit("game_finished", gameResult);
         }
       }
       if (ctx.type === "trix") broadcastTrixTableState(nsp, ctx.tableId);
-      else if (ctx.type === "tarneeb41") broadcastTarneeb41TableState(nsp, ctx.tableId);
       else broadcastGameState(nsp, ctx.room.roomId);
     });
 
@@ -617,31 +929,39 @@ function registerGameHandlers(nsp, jwtVerify) {
       } else if (ctx.game.nextRound) {
         ok = ctx.game.nextRound();
       }
-      if (ok) {
-        if (ctx.type === "trix") broadcastTrixTableState(nsp, ctx.tableId);
-        else if (ctx.type === "tarneeb41") broadcastTarneeb41TableState(nsp, ctx.tableId);
-        else broadcastGameState(nsp, ctx.room.roomId);
+      if (ok && ctx.type !== "trix" && ctx.type !== "tarneeb41") {
+        broadcastGameState(nsp, ctx.room.roomId);
       }
     });
 
-    // leave_room
+    // leave_room — 30s grace before bot replacement
     socket.on("leave_room", (payload) => {
       const { roomId } = payload || {};
       const t41 = roomManager.getTarneeb41TableIdForUser(userId);
       if (roomId && t41 && String(t41) === String(roomId)) {
-        roomManager.leaveTarneeb41TableSocket(userId);
         roomManager.deleteTarneeb41UserSocket(userId);
         socket.leave(`tarneeb41:${roomId}`);
         matchMaker.dequeue("tarneeb41", userId);
+        scheduleCardTableVacate({
+          gameType: "tarneeb41",
+          tableId: t41,
+          userId,
+          nsp,
+        });
         broadcastTarneeb41TableState(nsp, t41);
         return;
       }
       const trixId = roomManager.getTrixTableIdForUser(userId);
       if (roomId && trixId && String(trixId) === String(roomId)) {
-        roomManager.leaveTrixTableSocket(userId);
         roomManager.deleteTrixUserSocket(userId);
         socket.leave(`trix:${roomId}`);
         matchMaker.dequeue("trix", userId);
+        scheduleCardTableVacate({
+          gameType: "trix",
+          tableId: trixId,
+          userId,
+          nsp,
+        });
         broadcastTrixTableState(nsp, trixId);
         return;
       }
@@ -664,6 +984,12 @@ function registerGameHandlers(nsp, jwtVerify) {
           if (p) p.socketId = null;
           broadcastTarneeb41TableState(nsp, t41);
         }
+        scheduleCardTableVacate({
+          gameType: "tarneeb41",
+          tableId: t41,
+          userId,
+          nsp,
+        });
         return;
       }
       const trixId = roomManager.getTrixTableIdForUser(userId);
@@ -675,6 +1001,12 @@ function registerGameHandlers(nsp, jwtVerify) {
           if (p) p.socketId = null;
           broadcastTrixTableState(nsp, trixId);
         }
+        scheduleCardTableVacate({
+          gameType: "trix",
+          tableId: trixId,
+          userId,
+          nsp,
+        });
         return;
       }
       const r = roomManager.removeUserFromRoom(userId);
@@ -689,4 +1021,10 @@ function registerGameHandlers(nsp, jwtVerify) {
   });
 }
 
-module.exports = { registerGameHandlers, getTokenFromHandshake, broadcastGameState };
+module.exports = {
+  registerGameHandlers,
+  getTokenFromHandshake,
+  broadcastGameState,
+  broadcastTrixTableState,
+  broadcastTarneeb41TableState,
+};

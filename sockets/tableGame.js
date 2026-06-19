@@ -9,7 +9,7 @@ const Jackpot = require("../models/jackpotModel");
 const Wallet = require("../models/walletModel");
 const User = require("../models/userModel");
 const { RedisTableStateStore } = require("../utils/tableStateStore");
-const { applyLockedDelta } = require("../services/walletLedgerService");
+const { applyLockedDelta, applyHouseSettlementDelta } = require("../services/walletLedgerService");
 const logger = require("../utils/logger");
 const { metrics } = require("../utils/metrics");
 const { sendAlert } = require("../utils/alert");
@@ -17,6 +17,28 @@ const { trackEventServerFireAndForget } = require("../services/analyticsService"
 const { evaluateHandChipDumpSuspect } = require("../services/fraudService");
 const cosmeticsService = require("../services/cosmeticsService");
 const { attachRedisClient: attachCosmeticsEquippedCache } = require("../utils/cosmeticsEquippedCache");
+const {
+  buildPokerLobbyFields,
+  derivePokerTableStatus,
+  normalizeCapacity,
+  countHumanSeatsFromEngine,
+  POKER_CAPACITY,
+  POKER_MIN_PLAYERS,
+} = require("../utils/pokerTableStatus");
+const { POKER_TIMINGS, sleep } = require("../utils/poker/timings");
+const {
+  PLAYER_STATE,
+  defaultPlayerState,
+  canParticipateInNextHand,
+  canBeDealtIntoHand,
+  promoteWaitingToSeated,
+  markActiveHandParticipants,
+  countEligibleHumans,
+  createSeatDefaults,
+} = require("../utils/poker/playerState");
+const { verifyHandChipConservation } = require("../utils/poker/chipConservation");
+const { auditOrFreeze } = require("../utils/poker/chipAuditor");
+const { buildHandAuditLog } = require("../services/handHistoryAuditService");
 
 function getTokenFromHandshake(socket) {
   const auth = socket.handshake.auth || {};
@@ -306,7 +328,7 @@ class PokerTable {
     this.bigBlind = toSafeInt(table.bigBlind, 0);
     this.minBuyIn = toSafeInt(table.minBuyIn, this.bigBlind * 100);
     this.maxBuyIn = toSafeInt(table.maxBuyIn, this.minBuyIn);
-    this.capacity = toSafeInt(table.capacity, 9);
+    this.capacity = normalizeCapacity(toSafeInt(table.capacity, 9));
     this.dealerIndex = 0;
     this.running = false;
     this.starting = false;
@@ -316,8 +338,19 @@ class PokerTable {
     this.botFillTimer = null;
     this.actionDeadline = null;
     this.botFillDeadline = null;
+    this.waitForPlayersTimer = null;
+    this.waitForPlayersDeadline = null;
     this.resetStateFromTable(table);
-    this.turnSeconds = 25;
+    this.turnSeconds = POKER_TIMINGS.TURN_SECONDS;
+    this.reconnectTimers = new Map();
+    this.pendingVacates = new Map();
+    this.vacateTimers = new Map();
+    this.spectatorUserIds = new Set();
+    this.handStartTotal = 0;
+    this.uncollectedRake = 0;
+    this.frozen = false;
+    this.tableStatusOverride = null;
+    this.pacingBusy = false;
 
     this.botFillDelayMs = Math.max(
       5000,
@@ -481,6 +514,7 @@ class PokerTable {
       v: 1,
       tableId: this.tableId,
       stateRevision: toSafeInt(this.stateRevision, 0),
+      capacity: this.capacity,
       savedAt: Date.now(),
       running: !!this.running,
       starting: !!this.starting,
@@ -493,6 +527,7 @@ class PokerTable {
       currentIndex: this.currentIndex,
       actionDeadline: this.actionDeadline,
       botFillDeadline: this.botFillDeadline,
+      waitForPlayersDeadline: this.waitForPlayersDeadline,
       turnSeconds: this.turnSeconds,
       smallBlind: this.smallBlind,
       bigBlind: this.bigBlind,
@@ -523,6 +558,9 @@ class PokerTable {
         handStartChips: toSafeInt(s.handStartChips, s.chips),
         lastAction: s.lastAction && typeof s.lastAction === "object" ? { ...s.lastAction } : null,
         actedThisStreet: !!s.actedThisStreet,
+        playerState: s.playerState || PLAYER_STATE.SEATED,
+        disconnectedAt: s.disconnectedAt || null,
+        reconnectDeadline: s.reconnectDeadline || null,
         cosmetics:
           s.cosmetics && typeof s.cosmetics === "object"
             ? { ...s.cosmetics }
@@ -547,6 +585,7 @@ class PokerTable {
     this.currentIndex = toSafeInt(snapshot.currentIndex, 0);
     this.actionDeadline = snapshot.actionDeadline || null;
     this.botFillDeadline = snapshot.botFillDeadline || null;
+    this.waitForPlayersDeadline = snapshot.waitForPlayersDeadline || null;
     this.turnSeconds = toSafeInt(snapshot.turnSeconds, this.turnSeconds);
     this.smallBlind = toSafeInt(snapshot.smallBlind, this.smallBlind);
     this.bigBlind = toSafeInt(snapshot.bigBlind, this.bigBlind);
@@ -588,6 +627,9 @@ class PokerTable {
         handStartChips: toSafeInt(s.handStartChips, toSafeInt(s.chips, 0)),
         lastAction: s.lastAction && typeof s.lastAction === "object" ? { ...s.lastAction } : null,
         actedThisStreet: !!s.actedThisStreet,
+        playerState: s.playerState || PLAYER_STATE.SEATED,
+        disconnectedAt: s.disconnectedAt || null,
+        reconnectDeadline: s.reconnectDeadline || null,
         cosmetics:
           s.cosmetics && typeof s.cosmetics === "object"
             ? { tableTheme: s.cosmetics.tableTheme || null, cardSkin: s.cosmetics.cardSkin || null }
@@ -617,11 +659,18 @@ class PokerTable {
       forUserId != null && turnUserId != null && String(forUserId) === String(turnUserId);
     const rawSpec = isActor ? snapshot.actionSpec || null : null;
     const actionSpec = normalizeClientActionSpec(rawSpec, isActor);
+    const lobby = buildPokerLobbyFields({
+      engineSeats: seats,
+      capacity: snapshot.capacity || POKER_CAPACITY,
+      running: !!snapshot.running,
+      round: snapshot.round,
+    });
 
     return {
       tableId: String(snapshot.tableId),
       stateRevision: toSafeInt(snapshot.stateRevision, 0),
       round: String(snapshot.round || "idle"),
+      ...lobby,
       community: Array.isArray(snapshot.community) ? snapshot.community : [],
       pot: toSafeInt(snapshot.pot, 0),
       currentBet: toSafeInt(snapshot.currentBet, 0),
@@ -635,6 +684,8 @@ class PokerTable {
       turnUserId,
       actionDeadline: snapshot.actionDeadline || null,
       botFillDeadline: snapshot.botFillDeadline || null,
+      waitForPlayersDeadline: snapshot.waitForPlayersDeadline || null,
+      waitForPlayersSeconds: Math.ceil(POKER_TIMINGS.WAIT_FOR_PLAYERS_MS / 1000),
       lastHand: snapshot.lastHand || null,
       actionSpec,
       lastAction:
@@ -701,6 +752,49 @@ class PokerTable {
       this.botFillTimer = null;
     }
     this.botFillDeadline = null;
+  }
+
+  clearWaitForPlayersTimer() {
+    if (this.waitForPlayersTimer) {
+      clearTimeout(this.waitForPlayersTimer);
+      this.waitForPlayersTimer = null;
+    }
+    this.waitForPlayersDeadline = null;
+  }
+
+  scheduleWaitForPlayers() {
+    if (this.running || this.frozen) return;
+    if (this.eligibleHumanCount() >= POKER_MIN_PLAYERS) {
+      this.clearWaitForPlayersTimer();
+      return;
+    }
+    if (this.waitForPlayersTimer) return;
+
+    this.waitForPlayersDeadline = Date.now() + POKER_TIMINGS.WAIT_FOR_PLAYERS_MS;
+    this.waitForPlayersTimer = setTimeout(() => {
+      void this.onWaitForPlayersWindowEnd();
+    }, POKER_TIMINGS.WAIT_FOR_PLAYERS_MS);
+  }
+
+  async onWaitForPlayersWindowEnd() {
+    this.waitForPlayersTimer = null;
+    if (this.running || this.frozen) {
+      this.clearWaitForPlayersTimer();
+      return;
+    }
+
+    if (this.eligibleHumanCount() >= POKER_MIN_PLAYERS) {
+      this.clearWaitForPlayersTimer();
+      await this.startIfReady({ refreshFromDb: true });
+      return;
+    }
+
+    // Still waiting — open next 30s window and keep the player seated.
+    this.waitForPlayersDeadline = Date.now() + POKER_TIMINGS.WAIT_FOR_PLAYERS_MS;
+    this.waitForPlayersTimer = setTimeout(() => {
+      void this.onWaitForPlayersWindowEnd();
+    }, POKER_TIMINGS.WAIT_FOR_PLAYERS_MS);
+    await this.broadcastState();
   }
 
   clearActionScheduling() {
@@ -782,13 +876,15 @@ class PokerTable {
   resetStateFromTable(table) {
     this.smallBlind = toSafeInt(table.smallBlind, this.smallBlind);
     this.bigBlind = toSafeInt(table.bigBlind, this.bigBlind);
-    this.capacity = toSafeInt(table.capacity, this.capacity || 9);
+    this.capacity = normalizeCapacity(toSafeInt(table.capacity, this.capacity || POKER_CAPACITY));
     this.minBuyIn = toSafeInt(table.minBuyIn, this.minBuyIn || this.bigBlind * 100);
     this.maxBuyIn = toSafeInt(table.maxBuyIn, this.maxBuyIn || this.minBuyIn);
     this.botFillTarget = clampInt(this.botFillTarget || 2, 2, Math.max(2, this.capacity));
 
-    // seats array as ordered in DB
-    this.seats = table.seats
+    const isHandRunning = this.running && this.round && String(this.round) !== "idle";
+    const seatDefaults = createSeatDefaults({ isHandRunning });
+
+    const mapped = table.seats
       .filter((s) => toSafeInt(s.chips, 0) > 0)
       .map((s) => ({
         userId: String(s.user?._id || s.user),
@@ -805,7 +901,11 @@ class PokerTable {
         lastAction: null,
         actedThisStreet: false,
         cosmetics: { tableTheme: null, cardSkin: null },
+        playerState: seatDefaults.playerState,
+        disconnectedAt: null,
+        reconnectDeadline: null,
       }));
+    this.seats = mapped.slice(0, this.capacity);
 
     if (this.seats.length > 0) {
       this.dealerIndex = ((this.dealerIndex % this.seats.length) + this.seats.length) % this.seats.length;
@@ -826,7 +926,59 @@ class PokerTable {
     this.showdownRevealedSeats = new Set();
   }
 
+  /**
+   * Full zero when Mongo has no seated players — pot/cards/timers cleared.
+   */
+  async resetToEmptyIdle(tableDoc) {
+    this.running = false;
+    this.starting = false;
+    this.frozen = false;
+    this.tableStatusOverride = null;
+    this.clearActionScheduling();
+    this.clearBotFillTimer();
+    this.clearWaitForPlayersTimer();
+    for (const timer of this.reconnectTimers.values()) {
+      clearTimeout(timer);
+    }
+    this.reconnectTimers.clear();
+    for (const timer of this.vacateTimers.values()) {
+      clearTimeout(timer);
+    }
+    this.vacateTimers.clear();
+    this.pendingVacates.clear();
+
+    this.currentHandId = null;
+    this.currentHandActions = [];
+    this.processedActionIds = new Set();
+    this.handStartTotal = 0;
+    this.uncollectedRake = 0;
+    this.lastHand = null;
+    this.handCounter = 0;
+    this.showdownEndSeq = 0;
+    this.deck = [];
+
+    const doc =
+      tableDoc ||
+      ({
+        seats: [],
+        smallBlind: this.smallBlind,
+        bigBlind: this.bigBlind,
+        minBuyIn: this.minBuyIn,
+        maxBuyIn: this.maxBuyIn,
+        capacity: this.capacity,
+      });
+    this.resetStateFromTable(doc);
+    this.stateRevision = toSafeInt(this.stateRevision, 0) + 1;
+
+    if (this.stateStore && typeof this.stateStore.delete === "function") {
+      await this.stateStore.delete(this.tableId);
+    }
+    await this.syncMongoTableStatus();
+    await this.broadcastState();
+  }
+
   async refreshSeatsFromDb() {
+    const prevByUser = new Map(this.seats.map((s) => [String(s.userId), s]));
     const previousBots = this.seats
       .filter((s) => s.isBot && s.chips > 0)
       .map((b) => ({
@@ -840,15 +992,63 @@ class PokerTable {
         actedThisStreet: false,
       }));
 
+    const handActive = this.running && this.round && String(this.round) !== "idle";
+
     const table = await Table.findById(this.tableId).populate({
       path: "seats.user",
       select: "name profileImg",
     });
     if (!table) return false;
+
+    if (handActive) {
+      const mongoIds = new Set(table.seats.map((s) => String(s.user?._id || s.user)));
+      for (const s of this.seats) {
+        if (!mongoIds.has(String(s.userId)) && !s.isBot) {
+          s.chips = 0;
+        }
+      }
+      for (const ms of table.seats) {
+        const uid = String(ms.user?._id || ms.user);
+        if (this.findSeatIndexByUser(uid) >= 0) continue;
+        const row = {
+          userId: uid,
+          name: ms.user?.name || "Player",
+          avatar: ms.user?.profileImg || null,
+          chips: toSafeInt(ms.chips, 0),
+          inHand: false,
+          hole: [],
+          folded: true,
+          allIn: false,
+          bet: 0,
+          invested: 0,
+          isBot: false,
+          lastAction: null,
+          actedThisStreet: false,
+          cosmetics: { tableTheme: null, cardSkin: null },
+          playerState: PLAYER_STATE.WAITING,
+          disconnectedAt: null,
+          reconnectDeadline: null,
+        };
+        if (this.seats.length < this.capacity) {
+          this.seats.push(row);
+        }
+      }
+      await this.applyCosmeticsToSeats();
+      return true;
+    }
+
     this.resetStateFromTable(table);
+    for (const s of this.seats) {
+      const prev = prevByUser.get(String(s.userId));
+      if (prev) {
+        s.playerState = prev.playerState || s.playerState;
+        s.disconnectedAt = prev.disconnectedAt;
+        s.reconnectDeadline = prev.reconnectDeadline;
+      }
+    }
     await this.applyCosmeticsToSeats();
 
-    if (this.humanSeatCount() > 0 && this.activeSeatCount() < 2 && previousBots.length > 0) {
+    if (this.running && this.humanSeatCount() >= POKER_MIN_PLAYERS && this.activeSeatCount() < POKER_MIN_PLAYERS && previousBots.length > 0) {
       const target = Math.min(this.capacity, Math.max(2, this.botFillTarget));
       const missing = Math.max(0, target - this.activeSeatCount());
       const freeSlots = Math.max(0, this.capacity - this.seats.length);
@@ -892,6 +1092,249 @@ class PokerTable {
 
   humanSeatCount() {
     return this.seats.filter((s) => !s.isBot && s.chips > 0).length;
+  }
+
+  eligibleHumanCount() {
+    return countEligibleHumans(this.seats);
+  }
+
+  applyMidHandJoinState(seat) {
+    if (!seat) return;
+    if (this.running && this.round && String(this.round) !== "idle") {
+      seat.playerState = PLAYER_STATE.WAITING;
+      seat.inHand = false;
+      seat.hole = [];
+      seat.folded = true;
+    } else {
+      seat.playerState = PLAYER_STATE.SEATED;
+    }
+  }
+
+  clearVacateTimer(userId) {
+    const key = String(userId);
+    const t = this.vacateTimers.get(key);
+    if (t) {
+      clearTimeout(t);
+      this.vacateTimers.delete(key);
+    }
+  }
+
+  /**
+   * Engine-only vacate after Mongo moved human → vacatingPlayers.
+   */
+  async applyEngineVacate(userId, { chips, vacateUntil } = {}) {
+    const uid = String(userId);
+    if (this.pendingVacates.has(uid)) return false;
+
+    const idx = this.findSeatIndexByUser(uid);
+    let seatChips = toSafeInt(chips, 0);
+    let seatIndex = idx >= 0 ? idx : this.seats.length;
+    let name = "Player";
+    let avatar = null;
+    let cosmetics = { tableTheme: null, cardSkin: null };
+
+    if (idx >= 0) {
+      const seat = this.seats[idx];
+      seatChips = toSafeInt(chips, toSafeInt(seat.chips, 0));
+      name = seat.name;
+      avatar = seat.avatar;
+      cosmetics = seat.cosmetics;
+      seatIndex = idx;
+
+      if (seat.inHand && this.running && !seat.folded) {
+        seat.folded = true;
+        await this.broadcastState();
+        if (this.currentIndex === idx) {
+          await this.advance();
+        }
+      }
+      this.clearReconnectTimer(uid);
+      this.seats.splice(idx, 1);
+      if (this.seats.length > 0) {
+        this.dealerIndex =
+          ((this.dealerIndex % this.seats.length) + this.seats.length) % this.seats.length;
+      } else {
+        this.dealerIndex = 0;
+      }
+    } else if (seatChips <= 0) {
+      return false;
+    } else {
+      this.clearReconnectTimer(uid);
+    }
+
+    const deadlineMs = vacateUntil
+      ? new Date(vacateUntil).getTime()
+      : Date.now() + POKER_TIMINGS.VACATE_WINDOW_MS;
+    const delayMs = Math.max(0, deadlineMs - Date.now());
+
+    this.pendingVacates.set(uid, {
+      chips: seatChips,
+      name,
+      avatar,
+      seatIndex,
+      deadline: deadlineMs,
+      cosmetics,
+    });
+
+    this.clearVacateTimer(uid);
+    const timer = setTimeout(() => {
+      void this.onVacateExpired(uid);
+    }, delayMs);
+    this.vacateTimers.set(uid, timer);
+
+    if (this.eligibleHumanCount() < POKER_MIN_PLAYERS) {
+      this.scheduleWaitForPlayers();
+    }
+    await this.syncMongoTableStatus();
+    await this.broadcastState();
+    return true;
+  }
+
+  async restoreVacatedHumanSeat(userId, { chips } = {}) {
+    const uid = String(userId);
+    const pending = this.pendingVacates.get(uid);
+    this.clearVacateTimer(uid);
+    this.pendingVacates.delete(uid);
+
+    if (this.findSeatIndexByUser(uid) >= 0) return false;
+
+    const table = await Table.findById(this.tableId).populate({
+      path: "seats.user",
+      select: "name profileImg",
+    });
+    const ms = table?.seats?.find((s) => String(s.user?._id || s.user) === uid);
+    const seatChips = toSafeInt(chips, toSafeInt(ms?.chips, pending?.chips || 0));
+
+    const row = {
+      userId: uid,
+      name: ms?.user?.name || pending?.name || "Player",
+      avatar: ms?.user?.profileImg || pending?.avatar || null,
+      chips: seatChips,
+      inHand: false,
+      hole: [],
+      folded: false,
+      allIn: false,
+      bet: 0,
+      invested: 0,
+      isBot: false,
+      lastAction: null,
+      actedThisStreet: false,
+      cosmetics: pending?.cosmetics || { tableTheme: null, cardSkin: null },
+      playerState: PLAYER_STATE.SEATED,
+      disconnectedAt: null,
+      reconnectDeadline: null,
+    };
+
+    const insertAt = Math.min(
+      pending?.seatIndex != null ? pending.seatIndex : this.seats.length,
+      this.seats.length
+    );
+    this.seats.splice(insertAt, 0, row);
+    if (this.seats.length > 0) {
+      this.dealerIndex = ((this.dealerIndex % this.seats.length) + this.seats.length) % this.seats.length;
+    }
+
+    this.clearWaitForPlayersTimer();
+    await this.applyCosmeticsToSeats();
+    await this.startIfReady({ refreshFromDb: false });
+    await this.broadcastState();
+    return true;
+  }
+
+  async onVacateExpired(userId) {
+    const uid = String(userId);
+    this.vacateTimers.delete(uid);
+    const pending = this.pendingVacates.get(uid);
+    if (!pending) return;
+
+    this.pendingVacates.delete(uid);
+
+    const { finalizeVacateWithBot } = require("../services/pokerVacateService");
+    const result = await finalizeVacateWithBot({
+      tableId: this.tableId,
+      userId: uid,
+      chips: pending.chips,
+    });
+    if (!result.ok) return;
+
+    const bot = this.createBotSeat();
+    bot.chips = pending.chips;
+    const insertAt = Math.min(pending.seatIndex, this.seats.length);
+    this.seats.splice(insertAt, 0, bot);
+
+    await this.startIfReady({ refreshFromDb: false });
+    await this.broadcastState();
+  }
+
+  clearReconnectTimer(userId) {
+    const key = String(userId);
+    const t = this.reconnectTimers.get(key);
+    if (t) {
+      clearTimeout(t);
+      this.reconnectTimers.delete(key);
+    }
+  }
+
+  onPlayerSocketConnected(userId) {
+    const idx = this.findSeatIndexByUser(userId);
+    if (idx < 0) return;
+    const seat = this.seats[idx];
+    this.clearReconnectTimer(userId);
+    seat.disconnectedAt = null;
+    seat.reconnectDeadline = null;
+    if (seat.playerState === PLAYER_STATE.DISCONNECTED) {
+      seat.playerState = seat.inHand ? PLAYER_STATE.ACTIVE_HAND : PLAYER_STATE.SEATED;
+    }
+    if (seat.playerState === PLAYER_STATE.SITTING_OUT && seat.chips > 0) {
+      seat.playerState = PLAYER_STATE.SEATED;
+    }
+  }
+
+  onPlayerSocketDisconnected(userId) {
+    const idx = this.findSeatIndexByUser(userId);
+    if (idx < 0) return;
+    const seat = this.seats[idx];
+    if (seat.isBot) return;
+    this.clearReconnectTimer(userId);
+    seat.disconnectedAt = Date.now();
+    seat.reconnectDeadline = seat.disconnectedAt + POKER_TIMINGS.RECONNECT_WINDOW_MS;
+    seat.playerState = PLAYER_STATE.DISCONNECTED;
+    const uid = String(userId);
+    const timer = setTimeout(async () => {
+      this.reconnectTimers.delete(uid);
+      const i = this.findSeatIndexByUser(uid);
+      if (i < 0) return;
+      const s = this.seats[i];
+      if (s.playerState !== PLAYER_STATE.DISCONNECTED) return;
+      s.playerState = PLAYER_STATE.SITTING_OUT;
+      if (s.inHand && this.running) {
+        s.folded = true;
+        await this.broadcastState();
+        if (this.currentIndex === i) {
+          await this.advance();
+        }
+      } else {
+        await this.broadcastState();
+      }
+    }, POKER_TIMINGS.RECONNECT_WINDOW_MS);
+    this.reconnectTimers.set(uid, timer);
+    void this.broadcastState();
+  }
+
+  assertChipConservation(context) {
+    const check = verifyHandChipConservation({
+      seats: this.seats,
+      pot: this.pot,
+      handStartTotal: this.handStartTotal,
+    });
+    if (!check.ok) {
+      this.logSuspicious("chip_conservation_violation", { context, ...check });
+    }
+    return check.ok;
+  }
+
+  async auditChipConservation(context) {
+    return auditOrFreeze(this, context);
   }
 
   createBotSeat() {
@@ -940,9 +1383,10 @@ class PokerTable {
   }
 
   scheduleBotFillIfNeeded() {
-    if (this.running) return;
-    if (this.humanSeatCount() <= 0) return;
-    if (this.activeSeatCount() >= 2) {
+    // Bots may fill empty seats only during an active game with 2+ humans seated.
+    if (!this.running) return;
+    if (this.humanSeatCount() < POKER_MIN_PLAYERS) return;
+    if (this.activeSeatCount() >= this.botFillTarget) {
       this.clearBotFillTimer();
       return;
     }
@@ -952,8 +1396,9 @@ class PokerTable {
     this.botFillTimer = setTimeout(async () => {
       this.botFillTimer = null;
       this.botFillDeadline = null;
-      if (this.running || this.starting) return;
-      if (this.activeSeatCount() >= 2) return;
+      if (!this.running || this.starting) return;
+      if (this.humanSeatCount() < POKER_MIN_PLAYERS) return;
+      if (this.activeSeatCount() >= this.botFillTarget) return;
 
       this.addBotsForMissingSeats();
       await this.broadcastState();
@@ -961,7 +1406,49 @@ class PokerTable {
     }, this.botFillDelayMs);
   }
 
+  async syncMongoTableStatus() {
+    try {
+      const table = await Table.findById(this.tableId).select("seats capacity status gameType");
+      if (!table || table.gameType !== "poker") return;
+      const cap = normalizeCapacity(table.capacity);
+      const next = derivePokerTableStatus({
+        mongoSeatCount: table.seats.length,
+        capacity: cap,
+        running: this.running,
+        round: this.round,
+        frozen: this.frozen === true,
+      });
+      if (table.status !== next || table.capacity !== cap) {
+        table.status = next;
+        table.capacity = cap;
+        await table.save();
+      }
+    } catch (e) {
+      logger.warn("poker_sync_table_status_failed", {
+        tableId: this.tableId,
+        reason: e?.message || "unknown",
+      });
+    }
+  }
+
+  buildLobbyStateFields() {
+    const humans = this.humanSeatCount();
+    const base = buildPokerLobbyFields({
+      mongoSeatCount: humans,
+      engineSeats: this.seats,
+      capacity: this.capacity,
+      running: this.running,
+      round: this.round,
+      frozen: this.frozen === true,
+    });
+    if (this.frozen || this.tableStatusOverride === "frozen") {
+      return { ...base, tableStatus: "frozen", canStart: false };
+    }
+    return base;
+  }
+
   async startIfReady({ refreshFromDb = true } = {}) {
+    if (this.frozen) return;
     if (this.running || this.starting) return;
     if (this.round !== "idle") {
       this.logSuspicious("start_if_ready_non_idle_round", { round: this.round });
@@ -973,15 +1460,30 @@ class PokerTable {
         await this.refreshSeatsFromDb();
       }
 
-      if (this.activeSeatCount() < 2) {
+      const humans = this.eligibleHumanCount();
+      if (humans < POKER_MIN_PLAYERS) {
+        this.running = false;
         this.clearActionScheduling();
-        this.scheduleBotFillIfNeeded();
+        this.clearBotFillTimer();
+        this.scheduleWaitForPlayers();
+        await this.syncMongoTableStatus();
+        await this.broadcastState();
+        return;
+      }
+
+      this.clearWaitForPlayersTimer();
+
+      if (this.activeSeatCount() < POKER_MIN_PLAYERS) {
+        this.running = false;
+        this.clearActionScheduling();
+        await this.syncMongoTableStatus();
         await this.broadcastState();
         return;
       }
 
       this.clearBotFillTimer();
       this.running = true;
+      await this.syncMongoTableStatus();
       await this.startHand();
     } finally {
       this.starting = false;
@@ -999,13 +1501,14 @@ class PokerTable {
 
   dealHoleCards(deck) {
     for (const s of this.seats) {
-      if (s.chips > 0) {
+      if (canBeDealtIntoHand(s)) {
         s.inHand = true;
         s.folded = false;
         s.allIn = false;
         s.bet = 0;
         s.invested = 0;
         s.hole = draw(deck, 2);
+        s.playerState = PLAYER_STATE.ACTIVE_HAND;
       } else {
         s.inHand = false;
         s.folded = true;
@@ -1013,6 +1516,9 @@ class PokerTable {
         s.bet = 0;
         s.invested = 0;
         s.hole = [];
+        if (s.chips > 0 && s.playerState === PLAYER_STATE.WAITING) {
+          /* stays WAITING until next hand promotion */
+        }
       }
     }
   }
@@ -1099,6 +1605,7 @@ class PokerTable {
 
   async startHand() {
     this.clearActionScheduling();
+    promoteWaitingToSeated(this.seats);
 
     // Reset
     this.community = [];
@@ -1196,7 +1703,15 @@ class PokerTable {
     // Jackpot contribution per hand (Golden Island)
     await this.applyJackpotContribution();
 
+    this.handStartTotal = this.seats.reduce(
+      (sum, s) => sum + toSafeInt(s.handStartChips, toSafeInt(s.chips, 0)),
+      0
+    );
+    const ok = await this.auditChipConservation("post_blinds");
+    if (!ok) return;
+
     await this.broadcastState();
+    await sleep(POKER_TIMINGS.PREFLOP_DEAL_MS);
     this.scheduleCurrentTurn();
   }
 
@@ -1259,7 +1774,7 @@ class PokerTable {
         });
       }
       this.markVoluntaryAction(this.currentIndex);
-      await this.advance();
+      await this.pacedAdvanceAfterAction();
     } finally {
       await this.releaseActionLock();
     }
@@ -1346,7 +1861,7 @@ class PokerTable {
     }
 
     this.markVoluntaryAction(seatIndex);
-    await this.advance();
+    await this.pacedAdvanceAfterAction();
   }
 
   applyFold(i) {
@@ -1554,7 +2069,15 @@ class PokerTable {
     this.shortAllInNoReopen = false;
   }
 
+  async pacedAdvanceAfterAction() {
+    await sleep(POKER_TIMINGS.ACTION_REVEAL_MS);
+    await this.advance();
+  }
+
   async advance() {
+    if (this.frozen) return;
+    const okPre = await this.auditChipConservation("advance_pre");
+    if (!okPre) return;
     // If one alive -> award
     if (this.aliveCount() <= 1) {
       await this.finishHandByFold();
@@ -1563,33 +2086,41 @@ class PokerTable {
 
     // If betting round settled, advance street or showdown
     if (this.everyoneSettled()) {
+      const okStreet = await this.auditChipConservation(`street_end_${this.round}`);
+      if (!okStreet) return;
+      let streetDelay = 0;
       if (this.round === "preflop") {
         this.endBettingRound();
         this.burn(1);
         this.dealCommunity(3); // flop
         this.setRound("flop");
         this.appendHandAction({ type: "street", street: "flop" });
+        streetDelay = POKER_TIMINGS.FLOP_MS;
       } else if (this.round === "flop") {
         this.endBettingRound();
         this.burn(1);
         this.dealCommunity(1); // turn
         this.setRound("turn");
         this.appendHandAction({ type: "street", street: "turn" });
+        streetDelay = POKER_TIMINGS.TURN_STREET_MS;
       } else if (this.round === "turn") {
         this.endBettingRound();
         this.burn(1);
         this.dealCommunity(1); // river
         this.setRound("river");
         this.appendHandAction({ type: "street", street: "river" });
+        streetDelay = POKER_TIMINGS.RIVER_MS;
       } else if (this.round === "river") {
         await this.showdown();
         return;
       }
-      // Set next player to first alive from dealer+1
       const order = this.seatOrderFrom(this.dealerIndex);
       const start = order[0];
       this.currentIndex = this.nextToActIndex(start);
       await this.broadcastState();
+      if (streetDelay > 0) await sleep(streetDelay);
+      const okPost = await this.auditChipConservation(`street_start_${this.round}`);
+      if (!okPost) return;
       this.scheduleCurrentTurn();
       return;
     }
@@ -1713,8 +2244,8 @@ class PokerTable {
     const handCategory =
       bestIdxs.length > 0 ? showdownRanks.get(bestIdxs[0])?.name || null : null;
 
-    const pauseMs = toSafeInt(process.env.POKER_SHOWDOWN_PAUSE_MS, 720);
-    const gapMs = toSafeInt(process.env.POKER_SHOWDOWN_REVEAL_GAP_MS, 520);
+    const pauseMs = POKER_TIMINGS.SHOWDOWN_MS;
+    const gapMs = Math.max(400, Math.floor(POKER_TIMINGS.SHOWDOWN_MS / 8));
     const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
     const room = `tg:${this.tableId}`;
 
@@ -1993,6 +2524,7 @@ class PokerTable {
     };
 
     // Atomic financial + history settlement
+    const auditLog = buildHandAuditLog(this.currentHandActions, this.seats, community);
     try {
       const session = await mongoose.startSession();
       await session.withTransaction(async () => {
@@ -2018,6 +2550,7 @@ class PokerTable {
                 amount: toSafeInt(a.amount, 0),
                 callAmount: toSafeInt(a.callAmount, 0),
               })),
+              auditLog,
               community,
               pot: this.pot,
               rake,
@@ -2045,6 +2578,26 @@ class PokerTable {
         // Persist seat chips and write ledger entries for each human player delta.
         const table = await Table.findById(this.tableId).session(session);
         if (table) {
+          let humanNetDelta = 0;
+          for (const s of this.seats) {
+            if (s.isBot || isBotUserId(s.userId)) continue;
+            const chipsBefore = toSafeInt(s.handStartChips, s.chips);
+            const chipsAfter = toSafeInt(s.chips, 0);
+            humanNetDelta += chipsAfter - chipsBefore;
+          }
+          if (humanNetDelta !== 0) {
+            await applyHouseSettlementDelta({
+              session,
+              delta: -humanNetDelta,
+              tableId: this.tableId,
+              handId: this.currentHandId,
+              meta: {
+                reason: "poker_hand_settlement_counterparty",
+                round: this.round,
+              },
+            });
+          }
+
           for (const tSeat of table.seats) {
             const s = this.seats.find((x) => String(x.userId) === String(tSeat.user));
             if (!s) continue;
@@ -2152,7 +2705,11 @@ class PokerTable {
     }
 
     // Small delay then attempt next hand if still enough players
-    setTimeout(() => this.startIfReady(), 1500);
+    const delay = POKER_TIMINGS.NEXT_HAND_DELAY_MS;
+    setTimeout(() => {
+      promoteWaitingToSeated(this.seats);
+      this.startIfReady();
+    }, delay);
   }
 
   getPublicState(forUserId) {
@@ -2163,11 +2720,15 @@ class PokerTable {
       forUserId != null && turnUserId != null && String(forUserId) === String(turnUserId);
     const rawSpec = isActor ? this.computeTurnActionSpec(turnSeatIndex) : null;
     const actionSpec = normalizeClientActionSpec(rawSpec, isActor);
+    const lobby = this.buildLobbyStateFields();
 
     return {
       tableId: this.tableId,
       stateRevision: toSafeInt(this.stateRevision, 0),
+      serverTime: Date.now(),
       round: this.round,
+      frozen: this.frozen === true,
+      ...lobby,
       community: this.community,
       pot: this.pot,
       currentBet: this.currentBet,
@@ -2180,7 +2741,10 @@ class PokerTable {
       dealerSeatIndex: this.dealerIndex,
       turnUserId,
       actionDeadline: this.actionDeadline,
+      turnSeconds: this.turnSeconds,
       botFillDeadline: this.botFillDeadline,
+      waitForPlayersDeadline: this.waitForPlayersDeadline,
+      waitForPlayersSeconds: Math.ceil(POKER_TIMINGS.WAIT_FOR_PLAYERS_MS / 1000),
       lastHand: this.lastHand,
       actionSpec,
       lastAction: this.computeLastTableAction(),
@@ -2203,6 +2767,8 @@ class PokerTable {
           showdownRevealedSeats: this.showdownRevealedSeats,
         }),
         bet: s.bet,
+        playerState: s.playerState || PLAYER_STATE.SEATED,
+        reconnectDeadline: s.reconnectDeadline || null,
         lastAction: s.lastAction && typeof s.lastAction === "object" ? { ...s.lastAction } : null,
         cosmetics:
           s.cosmetics && typeof s.cosmetics === "object"
@@ -2220,6 +2786,7 @@ class PokerTable {
     await this.saveSnapshot({
       finished: !this.running && (this.round === "idle" || this.round === "showdown"),
     });
+    await this.syncMongoTableStatus();
 
     const room = `tg:${this.tableId}`;
     const pub = this.getPublicState(null);
@@ -2314,6 +2881,9 @@ class PokerTable {
     }
 
     try {
+      if (this.frozen) {
+        return { status: "rejected", reason: "TABLE_FROZEN" };
+      }
       if (!this.running) {
         this.logSuspicious("action_while_not_running", { userId, payload, round: this.round });
         return { status: "rejected", reason: "INVALID_ACTION" };
@@ -2331,7 +2901,16 @@ class PokerTable {
           actorSeatIndex: idx,
           turnSeatIndex: this.currentIndex,
         });
-        return { status: "rejected", reason: "INVALID_ACTION" }; // not your turn
+        return { status: "rejected", reason: "NOT_YOUR_TURN" };
+      }
+      const actorSeat = this.seats[idx];
+      if (
+        !actorSeat?.inHand ||
+        actorSeat.folded ||
+        actorSeat.playerState === PLAYER_STATE.WAITING ||
+        actorSeat.playerState === PLAYER_STATE.SITTING_OUT
+      ) {
+        return { status: "rejected", reason: "NOT_IN_HAND" };
       }
       if (this.seats[idx]?.isBot) {
         this.logSuspicious("human_action_on_bot_seat", { userId, idx });
@@ -2434,7 +3013,7 @@ class PokerTable {
         action: normalizedAction,
         actionId: normalizedActionId,
       });
-      await this.advance();
+      await this.pacedAdvanceAfterAction();
       return { status: "accepted" };
     } finally {
       await this.releaseActionLock();
@@ -2494,6 +3073,17 @@ class GameRegistry {
     const snapshot = await this.stateStore.load(tableId);
     if (snapshot) {
       gt.restoreFromSnapshot(snapshot);
+      const handActive =
+        snapshot.running === true ||
+        (snapshot.round && String(snapshot.round) !== "idle");
+      if (handActive) {
+        try {
+          const { registerPokerRecoveryWatch } = require("../services/tableGcService");
+          registerPokerRecoveryWatch(tableId);
+        } catch (_) {
+          // GC service optional during tests
+        }
+      }
     }
 
     await gt.applyCosmeticsToSeats();
@@ -2525,7 +3115,7 @@ function initTableGame(io, options = {}) {
     try {
       const token = getTokenFromHandshake(socket);
       if (!token) return next(new Error("Authentication token missing"));
-      const decoded = jwt.verify(token, process.env.JWT_SECRET_KEY || "dev-secret");
+      const decoded = jwt.verify(token, process.env.JWT_SECRET_KEY);
       socket.userId = decoded.userId;
       socket.userIp = security.getIp(socket);
       const sec = security.onConnection(socket, socket.userId);
@@ -2571,11 +3161,17 @@ function initTableGame(io, options = {}) {
 
         const game = await registry.get(String(tableId));
         if (game) {
+          game.onPlayerSocketConnected(socket.userId);
           const idx = game.findSeatIndexByUser(socket.userId);
           if (idx >= 0 && typeof clientSeed === "string" && clientSeed.trim()) {
             game.seats[idx].clientSeed = clientSeed.trim().slice(0, 128);
           }
-          game.startIfReady();
+          if (game.round === "idle" && !game.running) {
+            game.startIfReady();
+          } else {
+            await game.refreshSeatsFromDb();
+            await game.broadcastState();
+          }
         }
       } catch (e) {
         metrics.errorsTotal.inc({ type: "subscribe_table_failed" });
@@ -2589,6 +3185,51 @@ function initTableGame(io, options = {}) {
 
     socket.on("join_table", handleJoinTable);
     socket.on("subscribe-table", handleJoinTable);
+
+    socket.on("time_sync", (payload, ack) => {
+      const serverTime = Date.now();
+      const body = {
+        serverTime,
+        clientTs: payload?.clientTs ?? null,
+        turnSeconds: POKER_TIMINGS.TURN_SECONDS,
+        turnActionMs: POKER_TIMINGS.TURN_SECONDS * 1000,
+      };
+      if (typeof ack === "function") ack(body);
+      else socket.emit("time_sync", body);
+    });
+
+    async function handleWatchTable({ tableId }) {
+      try {
+        if (!tableId) return;
+        const table = await Table.findById(tableId).select("gameType seats");
+        if (!table || table.gameType !== "poker") return;
+        const seated = table.seats.some((s) => String(s.user) === String(socket.userId));
+        if (seated) {
+          return handleJoinTable({ tableId });
+        }
+        socket.isSpectator = true;
+        socket.join(`tg:${tableId}`);
+        const game = await registry.get(String(tableId));
+        if (game) {
+          game.spectatorUserIds.add(String(socket.userId));
+          const pub = game.getPublicState(null);
+          socket.emit("table_state", pub);
+          socket.emit("state", pub);
+          socket.emit("table_state_me", pub);
+          socket.emit("reconnect_state", pub);
+          socket.emit("state:me", pub);
+        }
+        socket.emit("table_event", { type: "spectating", tableId: String(tableId) });
+      } catch (e) {
+        logger.error("watch_table_failed", {
+          userId: socket.userId,
+          tableId,
+          reason: e?.message || "unknown",
+        });
+      }
+    }
+
+    socket.on("watch_table", handleWatchTable);
 
     socket.on("leave_table", async ({ tableId }) => {
       if (!tableId) return;
@@ -2626,6 +3267,14 @@ function initTableGame(io, options = {}) {
     socket.on("disconnect", () => {
       security.onDisconnect(socket, socket.userId);
       metrics.activePlayers.dec();
+      if (socket.isSpectator) return;
+      for (const { game } of registry.map.values()) {
+        const idx = game.findSeatIndexByUser(socket.userId);
+        if (idx >= 0) {
+          game.onPlayerSocketDisconnected(socket.userId);
+          void game.broadcastState();
+        }
+      }
     });
   });
 }
@@ -2655,6 +3304,98 @@ async function refreshCosmeticsForUserOnTables(userId) {
         /* ignore emit / snapshot errors */
       }
     }
+  }
+}
+
+function evictTableFromRegistry(tableId) {
+  if (!activeRegistry) return false;
+  const tid = String(tableId);
+  const entry = activeRegistry.map.get(tid);
+  if (!entry) return false;
+  const game = entry.game;
+  if (game) {
+    game.clearActionScheduling?.();
+    game.clearBotFillTimer?.();
+    game.clearWaitForPlayersTimer?.();
+    game.running = false;
+  }
+  activeRegistry.map.delete(tid);
+  metrics.activeTables.set(activeRegistry.map.size);
+  return true;
+}
+
+async function resetLivePokerTableWhenEmpty(tableId) {
+  const tid = String(tableId);
+  if (!activeRegistry) return false;
+
+  const entry = activeRegistry.map.get(tid);
+  if (entry?.game) {
+    const table = await Table.findById(tid).select(
+      "seats smallBlind bigBlind minBuyIn maxBuyIn capacity status gameType"
+    );
+    await entry.game.resetToEmptyIdle(table || { seats: [] });
+  } else {
+    const table = await Table.findById(tid).select(
+      "seats smallBlind bigBlind minBuyIn maxBuyIn capacity"
+    );
+    if (table && activeRegistry.stateStore?.delete) {
+      await activeRegistry.stateStore.delete(tid);
+    }
+    const room = `tg:${tid}`;
+    const emptyPayload = {
+      tableId: tid,
+      stateRevision: 1,
+      serverTime: Date.now(),
+      round: "idle",
+      frozen: false,
+      capacity: normalizeCapacity(table?.capacity),
+      seatedCount: 0,
+      playersNeeded: POKER_MIN_PLAYERS,
+      tableStatus: "waiting",
+      canStart: false,
+      community: [],
+      pot: 0,
+      currentBet: 0,
+      minRaise: toSafeInt(table?.bigBlind, 0),
+      lastRaiseAmount: toSafeInt(table?.bigBlind, 0),
+      smallBlind: toSafeInt(table?.smallBlind, 0),
+      bigBlind: toSafeInt(table?.bigBlind, 0),
+      seats: [],
+      waitForPlayersDeadline: null,
+    };
+    activeRegistry.nsp.to(room).emit("table_state", emptyPayload);
+    activeRegistry.nsp.to(room).emit("state", emptyPayload);
+  }
+
+  evictTableFromRegistry(tid);
+  return true;
+}
+
+async function vacateLiveEngineSeat(tableId, userId, meta = {}) {
+  if (!activeRegistry) return false;
+  const game = await activeRegistry.get(String(tableId));
+  if (!game) return false;
+  return game.applyEngineVacate(userId, meta);
+}
+
+async function restoreLiveEngineSeat(tableId, userId, meta = {}) {
+  if (!activeRegistry) return false;
+  const game = await activeRegistry.get(String(tableId));
+  if (!game) return false;
+  return game.restoreVacatedHumanSeat(userId, meta);
+}
+
+async function syncLivePokerTableAfterLeave(tableId) {
+  if (!activeRegistry) return;
+  const game = await activeRegistry.get(String(tableId));
+  if (!game) return;
+  await game.refreshSeatsFromDb();
+  game.clearWaitForPlayersTimer();
+  if (game.eligibleHumanCount() >= POKER_MIN_PLAYERS) {
+    await game.startIfReady({ refreshFromDb: false });
+  } else {
+    game.scheduleWaitForPlayers();
+    await game.broadcastState();
   }
 }
 
@@ -2703,6 +3444,11 @@ module.exports = {
   initTableGame,
   PokerTable,
   getTableGameDebugSnapshot,
+  evictTableFromRegistry,
+  resetLivePokerTableWhenEmpty,
+  syncLivePokerTableAfterLeave,
+  vacateLiveEngineSeat,
+  restoreLiveEngineSeat,
   buildAdminRealtimeTablePayload,
   getLiveTableGameForAdmin,
   adminForceEndHandTable,

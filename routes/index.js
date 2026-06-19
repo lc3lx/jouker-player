@@ -15,6 +15,10 @@ const analyticsRoute = require("./analyticsRoute");
 const cosmeticsRoute = require("./cosmeticsRoute");
 const videoRoute = require("./videoRoute");
 const kingArthRoute = require("./kingArthRoute");
+const activityRoute = require("./activityRoute");
+const taskRoute = require("./taskRoute");
+const parkourRoute = require("./parkourRoute");
+const timeRoute = require("./timeRoute");
 
 const mountRoutes = (app) => {
   app.get("/api/v1/games/html5", (req, res) => {
@@ -48,6 +52,10 @@ const mountRoutes = (app) => {
   app.use("/api/v1/cosmetics", cosmeticsRoute);
   app.use("/api/v1/video", videoRoute);
   app.use("/api/v1/king-arth", kingArthRoute);
+  app.use("/api/v1/activities", activityRoute);
+  app.use("/api/v1/tasks", taskRoute);
+  app.use("/api/v1/parkour", parkourRoute);
+  app.use("/api/v1/time", timeRoute);
 };
 
 module.exports = mountRoutes;

@@ -39,9 +39,12 @@ exports.signup = asyncHandler(async (req, res, next) => {
   await User.findByIdAndUpdate(user._id, { wallet: wallet._id });
 
   // 4- Generate token
-  const token = createToken(user._id);
+  const token = createToken(user._id, user.sessionVersion);
 
-  res.status(201).json({ data: user, token });
+  const safeUser = user.toObject();
+  delete safeUser.password;
+
+  res.status(201).json({ data: safeUser, token });
 });
 
 // @desc    Login
@@ -55,8 +58,11 @@ exports.login = asyncHandler(async (req, res, next) => {
   if (!user || !(await bcrypt.compare(req.body.password, user.password))) {
     return next(new ApiError("Incorrect email or password", 401));
   }
+  if (user.active === false) {
+    return next(new ApiError("Account is deactivated", 403));
+  }
   // 3) generate token
-  const token = createToken(user._id);
+  const token = createToken(user._id, user.sessionVersion);
 
   // Delete password from response
   delete user._doc.password;
@@ -112,6 +118,14 @@ exports.protect = asyncHandler(async (req, res, next) => {
         )
       );
     }
+  }
+
+  const tokenSession = Math.floor(Number(decoded.sessionVersion) || 0);
+  const userSession = Math.floor(Number(currentUser.sessionVersion) || 0);
+  if (tokenSession !== userSession) {
+    return next(
+      new ApiError("Session expired. Please login again.", 401)
+    );
   }
 
   req.user = currentUser;
@@ -232,6 +246,6 @@ exports.resetPassword = asyncHandler(async (req, res, next) => {
   await user.save();
 
   // 3) if everything is ok, generate token
-  const token = createToken(user._id);
+  const token = createToken(user._id, user.sessionVersion);
   res.status(200).json({ token });
 });

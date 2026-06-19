@@ -123,6 +123,7 @@ exports.getBalanceLeaderboard = asyncHandler(async (req, res) => {
       rank: i + 1,
       userId: w.user?._id,
       name: (w.user && w.user.name) || "Player",
+      profileImg: (w.user && w.user.profileImg) || "",
       balance: w.balance || 0,
     })),
   });
@@ -271,7 +272,14 @@ exports.getWeeklyPokerWinsLeaderboard = asyncHandler(async (req, res) => {
       },
     },
     { $unwind: "$u" },
-    { $project: { userId: "$_id", name: "$u.name", totalWon: 1 } },
+    {
+      $project: {
+        userId: "$_id",
+        name: "$u.name",
+        profileImg: "$u.profileImg",
+        totalWon: 1,
+      },
+    },
   ]);
 
   res.status(200).json({
@@ -283,6 +291,7 @@ exports.getWeeklyPokerWinsLeaderboard = asyncHandler(async (req, res) => {
         rank: i + 1,
         userId: r.userId,
         name: r.name || "Player",
+        profileImg: r.profileImg || "",
         totalWon: r.totalWon || 0,
       })),
     },

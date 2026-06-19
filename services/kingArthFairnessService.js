@@ -15,6 +15,7 @@ exports.verifySpin = asyncHandler(async (req, res, next) => {
     baseBet,
     doubleChance,
     isFreeSpin,
+    freeSpinMultiplier,
     volatility,
   } = req.body || {};
 
@@ -40,21 +41,27 @@ exports.verifySpin = asyncHandler(async (req, res, next) => {
       nonce: String(nonce),
       doubleChance: !!doubleChance,
       isFreeSpin: !!isFreeSpin,
+      freeSpinMultiplier: Number(freeSpinMultiplier || 0),
       volatility: volatility || "medium",
     });
     res.status(200).json({
       status: "success",
       data: {
         grid: outcome.grid,
+        initialGrid: outcome.initialGrid,
+        finalGrid: outcome.finalGrid,
         totalWin: outcome.totalWin,
+        baseWin: outcome.baseWin,
         winType: outcome.winType,
         scatterCount: outcome.scatterCount,
         stake: outcome.stake,
         volatility: outcome.volatility,
+        multipliers: outcome.multipliers,
         nearMiss: outcome.nearMiss,
         almostBonus: outcome.almostBonus,
         winningCells: outcome.winningCells,
         lineWins: outcome.lineWins,
+        cascadeSteps: outcome.cascadeSteps,
       },
     });
   } catch (_e) {

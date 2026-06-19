@@ -1,3 +1,5 @@
+const logger = require("./logger");
+
 /** Main Socket.IO server ref for lobby-wide events (tables list refresh). */
 let mainIo = null;
 
@@ -12,8 +14,8 @@ function emitTablesUpdated(payload = {}) {
       at: new Date().toISOString(),
       ...payload,
     });
-  } catch (_) {
-    // ignore emit errors
+  } catch (err) {
+    logger.warn("lobby_emit_tables_updated_failed", { reason: err?.message || "unknown" });
   }
 }
 

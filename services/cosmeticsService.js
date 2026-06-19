@@ -59,11 +59,14 @@ function publicCosmeticDisplay(doc) {
   const base = Math.floor(Number(doc.price) || 0);
   const finalPrice = effectivePrice(doc);
   const promoFeatured = (doc.promoMeta || {}).featured === true || (doc.promoMeta || {}).featured === "true";
+  const previewImage = doc.previewImage ? String(doc.previewImage).trim() : null;
   return {
     id: String(doc._id),
     type: doc.type,
     name: doc.name,
     assetKey: doc.assetKey,
+    previewImage,
+    previewImageUrl: previewImage ? `/uploads/cosmetics/${previewImage}` : null,
     price: finalPrice,
     finalPrice,
     basePrice: base,
@@ -159,7 +162,7 @@ async function getOrCreateUserRow(userId, session) {
     row = new UserCosmetics({
       user: userId,
       ownedItems: [],
-      equipped: { tableTheme: null, cardSkin: null },
+      equipped: { tableTheme: null, cardSkin: null, avatarFrame: null },
     });
     await row.save(session ? { session } : {});
   }
@@ -169,6 +172,7 @@ async function getOrCreateUserRow(userId, session) {
 function payloadFromRowAndIdMap(row, idTo) {
   let tableTheme = null;
   let cardSkin = null;
+  let avatarFrame = null;
   if (row.equipped?.tableTheme) {
     const c = idTo.get(String(row.equipped.tableTheme));
     if (c && c.type === "table_theme") tableTheme = c.assetKey;
@@ -177,11 +181,15 @@ function payloadFromRowAndIdMap(row, idTo) {
     const c = idTo.get(String(row.equipped.cardSkin));
     if (c && c.type === "card_skin") cardSkin = c.assetKey;
   }
-  return { tableTheme, cardSkin };
+  if (row.equipped?.avatarFrame) {
+    const c = idTo.get(String(row.equipped.avatarFrame));
+    if (c && c.type === "avatar_frame") avatarFrame = c.assetKey;
+  }
+  return { tableTheme, cardSkin, avatarFrame };
 }
 
 /**
- * Map userId string -> { tableTheme: assetKey|null, cardSkin: assetKey|null }
+ * Map userId string -> { tableTheme, cardSkin, avatarFrame } asset keys
  * Redis-backed when configured, else memory; invalidated on buy/equip.
  */
 async function resolveEquippedPayloadForUsers(userIds) {
@@ -193,7 +201,11 @@ async function resolveEquippedPayloadForUsers(userIds) {
   const missing = [];
   for (const { uid, p } of cachedPairs) {
     if (p && typeof p === "object") {
-      out.set(uid, { tableTheme: p.tableTheme ?? null, cardSkin: p.cardSkin ?? null });
+      out.set(uid, {
+        tableTheme: p.tableTheme ?? null,
+        cardSkin: p.cardSkin ?? null,
+        avatarFrame: p.avatarFrame ?? null,
+      });
     } else {
       missing.push(uid);
     }
@@ -203,7 +215,7 @@ async function resolveEquippedPayloadForUsers(userIds) {
   const objectIds = missing.map((s) => toObjectId(s)).filter(Boolean);
   if (objectIds.length === 0) {
     for (const uid of missing) {
-      const empty = { tableTheme: null, cardSkin: null };
+      const empty = { tableTheme: null, cardSkin: null, avatarFrame: null };
       await equippedCache.set(uid, empty);
       out.set(uid, empty);
     }
@@ -217,6 +229,7 @@ async function resolveEquippedPayloadForUsers(userIds) {
   for (const r of rows) {
     if (r.equipped?.tableTheme) cosmeticIds.add(String(r.equipped.tableTheme));
     if (r.equipped?.cardSkin) cosmeticIds.add(String(r.equipped.cardSkin));
+    if (r.equipped?.avatarFrame) cosmeticIds.add(String(r.equipped.avatarFrame));
   }
   const cDocs =
     cosmeticIds.size > 0
@@ -239,7 +252,7 @@ async function resolveEquippedPayloadForUsers(userIds) {
   for (const oid of objectIds) {
     const uid = String(oid);
     if (!found.has(uid)) {
-      const empty = { tableTheme: null, cardSkin: null };
+      const empty = { tableTheme: null, cardSkin: null, avatarFrame: null };
       await equippedCache.set(uid, empty);
       out.set(uid, empty);
     }
@@ -253,7 +266,7 @@ async function getMe(userId) {
   if (!row) {
     return {
       owned: [],
-      equipped: { tableTheme: null, cardSkin: null },
+      equipped: { tableTheme: null, cardSkin: null, avatarFrame: null },
       ownedIds: [],
     };
   }
@@ -264,7 +277,7 @@ async function getMe(userId) {
       : [];
   const owned = ownedDocs.map(publicCosmeticDisplay).filter(Boolean);
 
-  let equipped = { tableTheme: null, cardSkin: null };
+  let equipped = { tableTheme: null, cardSkin: null, avatarFrame: null };
   if (row?.equipped) {
     const payload = (await resolveEquippedPayloadForUsers([userId])).get(String(userId));
     if (payload) equipped = payload;
@@ -384,6 +397,12 @@ async function equipCosmetic(userId, cosmeticIdRaw) {
       return getMe(userId);
     }
     row.equipped.cardSkin = cosmeticId;
+  } else if (item.type === "avatar_frame") {
+    if (String(row.equipped.avatarFrame || "") === String(cosmeticId)) {
+      invalidateEquippedCache(userId);
+      return getMe(userId);
+    }
+    row.equipped.avatarFrame = cosmeticId;
   } else {
     throw new ApiError("Invalid cosmetic type", 400);
   }
@@ -402,7 +421,7 @@ async function autoEquipAfterBuy(userId, cosmeticIdRaw) {
   if (!cosmeticId) return;
   const item = await Cosmetic.findOne({ _id: cosmeticId, isActive: true }).lean();
   if (!item) return;
-  if (item.type === "table_theme" || item.type === "card_skin") {
+  if (item.type === "table_theme" || item.type === "card_skin" || item.type === "avatar_frame") {
     try {
       await equipCosmetic(userId, cosmeticIdRaw);
     } catch (_) {
@@ -419,6 +438,7 @@ async function autoEquipAfterBuy(userId, cosmeticIdRaw) {
       : await Cosmetic.find({ _id: { $in: grantIds }, isActive: true }).lean();
   const themes = docs.filter((d) => d.type === "table_theme");
   const skins = docs.filter((d) => d.type === "card_skin");
+  const frames = docs.filter((d) => d.type === "avatar_frame");
   if (themes[0]) {
     try {
       await equipCosmetic(userId, String(themes[0]._id));
@@ -429,6 +449,11 @@ async function autoEquipAfterBuy(userId, cosmeticIdRaw) {
       await equipCosmetic(userId, String(skins[0]._id));
     } catch (_) {}
   }
+  if (frames[0]) {
+    try {
+      await equipCosmetic(userId, String(frames[0]._id));
+    } catch (_) {}
+  }
 }
 
 /** Attach server-truth cosmetics to a public table_state payload (seats[].cosmetics). */
@@ -437,7 +462,11 @@ async function mergeCosmeticsIntoPublicState(state) {
   const ids = state.seats.map((s) => s.userId).filter(Boolean);
   const map = await resolveEquippedPayloadForUsers(ids);
   for (const s of state.seats) {
-    s.cosmetics = map.get(String(s.userId)) || { tableTheme: null, cardSkin: null };
+    s.cosmetics = map.get(String(s.userId)) || {
+      tableTheme: null,
+      cardSkin: null,
+      avatarFrame: null,
+    };
   }
   return state;
 }

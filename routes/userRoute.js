@@ -18,10 +18,16 @@ const {
   resizeImage,
   changeUserPassword,
   getLoggedUserData,
-  updateLoggedUserPassword,
   updateLoggedUserData,
   deleteLoggedUserData,
 } = require('../services/userService');
+const { getProfileSummary } = require('../services/profileService');
+const {
+  getUserSettings,
+  updateUserSettings,
+  logoutAllDevices,
+  changeMyPassword,
+} = require('../services/settingsService');
 
 const authService = require('../services/authService');
 
@@ -30,8 +36,18 @@ const router = express.Router();
 router.use(authService.protect);
 
 router.get('/getMe', getLoggedUserData, getUser);
-router.put('/changeMyPassword', updateLoggedUserPassword);
-router.put('/updateMe', updateLoggedUserValidator, updateLoggedUserData);
+router.get('/profile', authService.allowedTo('user'), getProfileSummary);
+router.get('/settings', authService.allowedTo('user'), getUserSettings);
+router.patch('/settings', authService.allowedTo('user'), updateUserSettings);
+router.post('/logout-all', authService.allowedTo('user'), logoutAllDevices);
+router.put('/changeMyPassword', authService.allowedTo('user'), changeMyPassword);
+router.put(
+  '/updateMe',
+  uploadUserImage,
+  resizeImage,
+  updateLoggedUserValidator,
+  updateLoggedUserData
+);
 router.delete('/deleteMe', deleteLoggedUserData);
 
 // Admin

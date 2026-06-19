@@ -3,11 +3,13 @@
  * Tarneeb = 4 players
  */
 const roomManager = require("../rooms/roomManager");
+const { createRace } = require("../services/parkourService");
 
 const GAME_REQUIREMENTS = {
   tarneeb: 4,
   trix: 1, // Trix can start with 1 human, the rest are bots
   tarneeb41: 4,
+  parkour: 2,
 };
 
 class MatchMaker {
@@ -31,6 +33,11 @@ class MatchMaker {
     if (queue.length >= required) {
       const players = queue.splice(0, required);
       this.queues.delete(gameType);
+
+      if (gameType === "parkour") {
+        return this.createParkourMatch(players);
+      }
+
       const room = roomManager.createRoom(gameType);
       const results = [];
       for (const p of players) {
@@ -52,11 +59,30 @@ class MatchMaker {
     if (queue.length === 0) this.queues.delete(gameType);
   }
 
+  async createParkourMatch(players) {
+    const { raceId, room } = await createRace({ entryFee: 0, minPlayers: 2, maxPlayers: 20 });
+    const results = [];
+    for (const p of players) {
+      const r = room.game.addPlayer({
+        userId: p.userId,
+        displayName: "Player",
+        buyIn: 0,
+        socketId: p.socketId,
+      });
+      if (r.success) {
+        results.push({ userId: p.userId, socketId: p.socketId, raceId, seatIndex: r.seatIndex });
+      }
+    }
+    await room.persist();
+    return { roomCreated: true, raceId, gameType: "parkour", players: results };
+  }
+
   /** Used when table-based games dequeue on socket join */
   dequeueAny(userId) {
     this.dequeue("tarneeb", userId);
     this.dequeue("trix", userId);
     this.dequeue("tarneeb41", userId);
+    this.dequeue("parkour", userId);
   }
 
   getQueueSize(gameType) {
