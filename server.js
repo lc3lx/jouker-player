@@ -59,11 +59,13 @@ app.options("*", cors(corsConfig));
 app.use(compression());
 
 // Stripe webhooks need raw body — must run before express.json
-const { stripePaymentsWebhook } = require("./controllers/paymentWebhookController");
+const {
+  stripePaymentsWebhook,
+} = require("./controllers/paymentWebhookController");
 app.post(
   "/api/v1/payments/webhook",
   express.raw({ type: "application/json" }),
-  stripePaymentsWebhook
+  stripePaymentsWebhook,
 );
 
 // Middlewares
@@ -93,7 +95,7 @@ app.use("/api", limiter);
 app.use(
   hpp({
     whitelist: [],
-  })
+  }),
 );
 
 // Mount Routes
@@ -108,7 +110,9 @@ app.get("/metrics", async (req, res) => {
     res.set("Content-Type", contentType());
     res.end(await renderMetrics());
   } catch (err) {
-    logger.error("metrics_render_failed", { reason: err?.message || "unknown" });
+    logger.error("metrics_render_failed", {
+      reason: err?.message || "unknown",
+    });
     res.status(500).json({ status: "error" });
   }
 });
@@ -163,7 +167,10 @@ async function startServer() {
   }
 
   const { startPokerTableGc } = require("./services/pokerTableGcService");
-  const { runBootSanitizer, startTableGc } = require("./services/tableGcService");
+  const {
+    runBootSanitizer,
+    startTableGc,
+  } = require("./services/tableGcService");
 
   await runBootSanitizer({ redis: realtimeRedis?.commandClient || null });
 
@@ -175,7 +182,7 @@ async function startServer() {
 
   startTableGc(io, { redis: realtimeRedis?.commandClient || null });
 
-  const PORT = process.env.PORT || 8000;
+  const PORT = process.env.PORT || 8002;
   server = httpServer.listen(PORT, () => {
     logger.info("server_started", { port: PORT });
   });
@@ -188,7 +195,10 @@ startServer().catch((err) => {
 
 // Handle rejection outside express
 process.on("unhandledRejection", (err) => {
-  logger.error("unhandled_rejection", { name: err?.name, message: err?.message });
+  logger.error("unhandled_rejection", {
+    name: err?.name,
+    message: err?.message,
+  });
   metrics.errorsTotal.inc({ type: "unhandled_rejection" });
   if (server) {
     server.close(() => {
@@ -201,6 +211,9 @@ process.on("unhandledRejection", (err) => {
 });
 
 process.on("uncaughtException", (err) => {
-  logger.error("uncaught_exception", { name: err?.name, message: err?.message });
+  logger.error("uncaught_exception", {
+    name: err?.name,
+    message: err?.message,
+  });
   metrics.errorsTotal.inc({ type: "uncaught_exception" });
 });
