@@ -182,7 +182,7 @@ async function startServer() {
 
   startTableGc(io, { redis: realtimeRedis?.commandClient || null });
 
-  const PORT = process.env.PORT || 8002;
+  const PORT = process.env.PORT || 1099;
   server = httpServer.listen(PORT, () => {
     logger.info("server_started", { port: PORT });
   });
