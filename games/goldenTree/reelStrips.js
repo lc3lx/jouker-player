@@ -40,7 +40,8 @@ function stripForReel(reelIndex, mode) {
   }
 
   if (WILD_REELS.has(reelIndex)) {
-    const wildWeight = mode === "bonus" ? 10 : 7;
+    // Rare in main game — guaranteed wilds come from buy-bonus injection.
+    const wildWeight = mode === "bonus" ? 10 : 2;
     mix.push([SYMBOLS.WILD, wildWeight]);
   }
 
