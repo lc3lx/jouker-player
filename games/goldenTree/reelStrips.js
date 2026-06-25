@@ -21,10 +21,11 @@ function buildStrip(entries) {
 
 /** Base symbol mix shared by non-special reels. */
 const BASE_MIX = [
-  [SYMBOLS.CHERRY, 14],
-  [SYMBOLS.ORANGE, 14],
-  [SYMBOLS.LEMON, 14],
-  [SYMBOLS.PLUM, 14],
+  [SYMBOLS.CHERRY, 12],
+  [SYMBOLS.ORANGE, 12],
+  [SYMBOLS.PINEAPPLE, 12],
+  [SYMBOLS.PLUM, 12],
+  [SYMBOLS.BANANA, 14],
   [SYMBOLS.GRAPES, 9],
   [SYMBOLS.WATERMELON, 9],
   [SYMBOLS.BELL, 7],

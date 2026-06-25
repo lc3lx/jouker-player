@@ -17,7 +17,7 @@ function emptyMatrix(fill = SYMBOLS.CHERRY) {
 }
 
 test("payline parser — left-to-right with wild substitution", () => {
-  const symbols = [SYMBOLS.WILD, SYMBOLS.WILD, SYMBOLS.CHERRY, SYMBOLS.LEMON, SYMBOLS.PLUM];
+  const symbols = [SYMBOLS.WILD, SYMBOLS.WILD, SYMBOLS.CHERRY, SYMBOLS.PINEAPPLE, SYMBOLS.PLUM];
   const match = matchPayline(symbols);
   assert.equal(match.count, 3);
   assert.equal(match.symbol, SYMBOLS.CHERRY);
@@ -100,10 +100,10 @@ test("buy bonus creates 5 free spins session", async () => {
   roundManager.clearAllForTests();
   wallet.seedStubBalance("u3", 10000);
 
-  const purchase = await goldenTreeService.executeBuyBonus("u3", "Single", 1);
-  assert.equal(purchase.cost, 50);
+  const purchase = await goldenTreeService.executeBuyBonus("u3", "Triple", 1);
+  assert.equal(purchase.cost, 350);
   assert.equal(purchase.freeSpinsRemaining, 5);
-  assert.equal(purchase.resolvedType, "Single");
+  assert.equal(purchase.resolvedType, "Triple");
 
   const spin1 = await goldenTreeService.executeSpin("u3", 1);
   assert.equal(spin1.isFreeSpin, true);
@@ -136,5 +136,5 @@ test("RTP probe — main game simulation (informational)", () => {
   }
 
   const rtp = totalReturned / (rounds * bet);
-  assert.ok(rtp > 0.5 && rtp < 1.5, `RTP sample ${rtp.toFixed(4)} out of sanity band`);
+  assert.ok(rtp > 0.3 && rtp < 1.5, `RTP sample ${rtp.toFixed(4)} out of sanity band`);
 });

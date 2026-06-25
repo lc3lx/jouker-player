@@ -22,11 +22,12 @@ const FREE_SPINS_PER_BONUS = 5;
 const SYMBOLS = Object.freeze({
   CHERRY: "cherry",
   ORANGE: "orange",
-  LEMON: "lemon",
+  PINEAPPLE: "pineapple",
   PLUM: "plum",
   BELL: "bell",
   GRAPES: "grapes",
   WATERMELON: "watermelon",
+  BANANA: "banana",
   SEVEN: "seven",
   WILD: "wild",
   STAR: "star",
@@ -37,12 +38,16 @@ const SCATTERS = new Set([SYMBOLS.STAR, SYMBOLS.DOLLAR]);
 const LOW_FRUITS = new Set([
   SYMBOLS.CHERRY,
   SYMBOLS.ORANGE,
-  SYMBOLS.LEMON,
+  SYMBOLS.PINEAPPLE,
   SYMBOLS.PLUM,
+  SYMBOLS.BANANA,
 ]);
 
 /** Wild expanding reels — 1-indexed reels 2,3,4 → 0-based indices 1,2,3. */
 const WILD_REELS = new Set([1, 2, 3]);
+
+/** Wild trees appear only on the middle row (0=top, 1=middle, 2=bottom). */
+const WILD_ROW = 1;
 
 /** Star scatter reels — 1-indexed 1,3,5 → 0-based 0,2,4. */
 const STAR_REELS = new Set([0, 2, 4]);
@@ -74,9 +79,10 @@ const PAYTABLE = Object.freeze({
   [SYMBOLS.GRAPES]: [0, 0, 0, 0.8, 2.4, 14],
   [SYMBOLS.WATERMELON]: [0, 0, 0, 0.8, 2.4, 14],
   [SYMBOLS.BELL]: [0, 0, 0, 0.4, 0.8, 4],
+  [SYMBOLS.BANANA]: [0, 0, 0, 0.2, 0.6, 3],
   [SYMBOLS.CHERRY]: [0, 0, 0, 0.2, 0.6, 3],
   [SYMBOLS.ORANGE]: [0, 0, 0, 0.2, 0.6, 3],
-  [SYMBOLS.LEMON]: [0, 0, 0, 0.2, 0.6, 3],
+  [SYMBOLS.PINEAPPLE]: [0, 0, 0, 0.2, 0.6, 3],
   [SYMBOLS.PLUM]: [0, 0, 0, 0.2, 0.6, 3],
 });
 
@@ -86,20 +92,10 @@ const DOLLAR_SCATTER_PAY = Object.freeze({ 3: 1, 4: 4, 5: 20 });
 const MAIN_WILD_MULTIPLIERS = [2, 3];
 const BONUS_WILD_MULTIPLIERS = [2, 3, 5];
 
-const BUY_BONUS_COSTS = Object.freeze({
-  Single: 50,
-  Double: 150,
-  Triple: 350,
-  Random: 100,
-});
-
-const BONUS_GUARANTEED_WILDS = Object.freeze({
-  Single: 1,
-  Double: 2,
-  Triple: 3,
-});
-
-const RESOLVED_BONUS_TYPES = ["Single", "Double", "Triple"];
+/** Single buy-bonus: 5 free spins with 3 guaranteed trees each spin. */
+const BUY_BONUS_TYPE = "Triple";
+const BUY_BONUS_COST = 350;
+const BONUS_GUARANTEED_WILDS = 3;
 
 function minMatchCount(symbol) {
   return symbol === SYMBOLS.SEVEN ? 2 : 3;
@@ -128,6 +124,7 @@ module.exports = {
   SCATTERS,
   LOW_FRUITS,
   WILD_REELS,
+  WILD_ROW,
   STAR_REELS,
   PAYLINES,
   PAYTABLE,
@@ -135,9 +132,9 @@ module.exports = {
   DOLLAR_SCATTER_PAY,
   MAIN_WILD_MULTIPLIERS,
   BONUS_WILD_MULTIPLIERS,
-  BUY_BONUS_COSTS,
+  BUY_BONUS_TYPE,
+  BUY_BONUS_COST,
   BONUS_GUARANTEED_WILDS,
-  RESOLVED_BONUS_TYPES,
   minMatchCount,
   isScatter,
   roundMoney,

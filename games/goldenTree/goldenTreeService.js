@@ -3,12 +3,12 @@ const {
   BET_MIN,
   BET_MAX,
   MAX_WIN_MULTIPLIER,
-  BUY_BONUS_COSTS,
+  BUY_BONUS_TYPE,
+  BUY_BONUS_COST,
   BONUS_GUARANTEED_WILDS,
-  RESOLVED_BONUS_TYPES,
   roundMoney,
 } = require("./constants");
-const { generateSpin, pickFromArray, secureRandomInt } = require("./spinEngine");
+const { generateSpin, secureRandomInt } = require("./spinEngine");
 const { calculateWins } = require("./winCalculator");
 const roundManager = require("./roundManager");
 const wallet = require("./goldenTreeWalletAdapter");
@@ -71,8 +71,7 @@ async function executeSpin(userId, betAmountInput) {
 
   let guaranteedWilds = 0;
   if (isBonusSpin) {
-    const resolved = bonusSession.resolvedType || bonusSession.bonusType;
-    guaranteedWilds = BONUS_GUARANTEED_WILDS[resolved] || 1;
+    guaranteedWilds = BONUS_GUARANTEED_WILDS;
     roundManager.consumeBonusSpin(userKey);
   }
 
@@ -176,7 +175,7 @@ async function executeGamble(userId, roundId, choice) {
   };
 }
 
-async function executeBuyBonus(userId, bonusTypeInput, currentBetInput) {
+async function executeBuyBonus(userId, _bonusTypeInput, currentBetInput) {
   if (roundManager.hasFreeBet(String(userId))) {
     throw new ApiError("Buy Bonus inactive while free bet is active", 403);
   }
@@ -184,24 +183,16 @@ async function executeBuyBonus(userId, bonusTypeInput, currentBetInput) {
     throw new ApiError("Bonus session already active", 409);
   }
 
-  const bonusType = String(bonusTypeInput || "").trim();
-  if (!Object.keys(BUY_BONUS_COSTS).includes(bonusType)) {
-    throw new ApiError("Invalid bonusType", 400);
-  }
-
   const betAmount = validateBet(currentBetInput);
-  const costMultiplier = BUY_BONUS_COSTS[bonusType];
-  const cost = roundMoney(betAmount * costMultiplier);
+  const cost = roundMoney(betAmount * BUY_BONUS_COST);
 
   const balance = await wallet.getBalance(String(userId));
   if (balance < cost) {
     throw new ApiError("Insufficient wallet balance for bonus purchase", 402);
   }
 
-  let resolvedType = bonusType;
-  if (bonusType === "Random") {
-    resolvedType = RESOLVED_BONUS_TYPES[secureRandomInt(RESOLVED_BONUS_TYPES.length)];
-  }
+  const bonusType = BUY_BONUS_TYPE;
+  const resolvedType = BUY_BONUS_TYPE;
 
   await wallet.deductBalance(String(userId), cost, {
     leg: "buy_bonus",
