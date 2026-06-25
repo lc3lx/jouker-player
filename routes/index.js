@@ -20,6 +20,7 @@ const taskRoute = require("./taskRoute");
 const parkourRoute = require("./parkourRoute");
 const timeRoute = require("./timeRoute");
 const goldenTreeRoute = require("./goldenTreeRoute");
+const luckyWheelRoute = require("./luckyWheelRoute");
 
 const mountRoutes = (app) => {
   app.get("/api/v1/games/html5", (req, res) => {
@@ -57,6 +58,7 @@ const mountRoutes = (app) => {
   app.use("/api/v1/tasks", taskRoute);
   app.use("/api/v1/parkour", parkourRoute);
   app.use("/api/v1/time", timeRoute);
+  app.use("/api/v1/lucky-wheel", luckyWheelRoute);
   app.use("/api/game", goldenTreeRoute);
 };
 
