@@ -48,6 +48,8 @@ class Tarneeb41Game extends BaseGame {
     this.pendingTrickWinner = null;
     this.trickResolveTimer = null;
     this.trickResolveEndsAt = null;
+    this._lastSettlementPayload = null;
+    this._settlementTriggered = false;
   }
 
   humanCount() {
@@ -112,20 +114,36 @@ class Tarneeb41Game extends BaseGame {
     this._countdownStartGate = typeof gateFn === "function" ? gateFn : null;
   }
 
-  humanCount() {
-    return this.players.filter((p) => !p.isBot).length;
-  }
-
   convertHumanToBot(userId) {
     const p = this.players.find(
       (x) => !x.isBot && x.userId && String(x.userId) === String(userId)
     );
     if (!p) return false;
+    p.vacatedFromUserId = String(userId);
     p.isBot = true;
     p.userId = `bot_vacate_${Date.now()}_${p.seatIndex ?? 0}`;
     p.socketId = null;
     p.displayName = "بوت";
     p.reconnectDeadline = null;
+    return true;
+  }
+
+  /** Restore a human who was replaced by a vacate-bot at the same Mongo seat index. */
+  restoreHumanAtSeat(seatIndex, userId, socketId, displayName) {
+    const p = this.players.find(
+      (x) => x.seatIndex === seatIndex && x.isBot
+    );
+    if (!p) return false;
+    const uid = String(userId);
+    if (p.vacatedFromUserId && String(p.vacatedFromUserId) !== uid) {
+      return false;
+    }
+    p.isBot = false;
+    p.userId = userId;
+    p.socketId = socketId;
+    p.displayName = displayName || p.displayName;
+    p.reconnectDeadline = null;
+    delete p.vacatedFromUserId;
     return true;
   }
 
@@ -226,12 +244,35 @@ class Tarneeb41Game extends BaseGame {
 
   startGame() {
     if (this.state !== "waiting" && this.state !== "countdown") return false;
-    if (this.players.length !== 4 || this.humanCount() !== 4) return false;
+    if (this.players.length !== 4) return false;
     this.clearCountdown();
     this.sessionId = crypto.randomUUID();
     this.dealRound(true);
     this.startBotTimer();
     return true;
+  }
+
+  /** Fill remaining seats with AI bots then start the game immediately. */
+  fillWithBots() {
+    if (this.state !== "waiting") return false;
+    const needed = this.maxPlayers - this.players.length;
+    const ts = Date.now();
+    for (let i = 0; i < needed; i++) {
+      const seatIndex = this.players.length;
+      this.players.push({
+        userId: `bot_fill_${ts}_${seatIndex}`,
+        socketId: null,
+        seatIndex,
+        isBot: true,
+        displayName: "بوت",
+        chips: 0,
+      });
+    }
+    const started = this.startGame();
+    if (started) {
+      this._notifyAfterMove({ success: true, gameStarted: true });
+    }
+    return started;
   }
 
   dealRound(rotateDealer) {
@@ -387,14 +428,39 @@ class Tarneeb41Game extends BaseGame {
     }
   }
 
+  /** Estimate expected tricks for the current player based on hand strength. */
+  _botBid() {
+    const idx = this.currentPlayerIndex;
+    const hand = this.hands[idx];
+    if (!hand || hand.length === 0) return 0;
+    let expected = 0;
+    for (const c of hand) {
+      if (c.rank === 14) expected += 1.0;       // Ace
+      else if (c.rank === 13) expected += 0.75;  // King
+      else if (c.rank === 12) expected += 0.5;   // Queen
+      if (this.trump && c.suit === this.trump) expected += 0.4; // trump bonus
+    }
+    const bid = Math.round(expected);
+    if (bid < 2) return 0; // pass
+    return Math.min(bid, 13);
+  }
+
   checkBotTurn() {
     if (
       this.state === "game_end" ||
       this.state === "waiting" ||
-      this.state === "round_end" ||
       this.state === "countdown" ||
       this.trickResolving
     ) {
+      return;
+    }
+
+    // Auto-advance from round_end when no humans are connected
+    if (this.state === "round_end") {
+      const hasConnectedHuman = this.players.some((p) => !p.isBot && p.socketId);
+      if (!hasConnectedHuman) {
+        this.advanceNextRound();
+      }
       return;
     }
     const idx = this.currentPlayerIndex;
@@ -402,7 +468,7 @@ class Tarneeb41Game extends BaseGame {
     if (!p || !p.isBot) return;
 
     if (this.state === "bidding_syrian") {
-      const v = 3 + Math.floor(Math.random() * 5);
+      const v = this._botBid();
       this.applyMove(idx, "tarneeb41_declare", { value: v });
     } else if (this.state === "playing") {
       const card = this._pickAutoPlayCard(this.hands[idx]);

@@ -252,12 +252,15 @@ async function handleTarneeb41AfterMove(nsp, ctx, result) {
   }
 
   if (game.isGameFinished && game.isGameFinished()) {
-    const gameResult = game.getGameResult ? game.getGameResult() : null;
-    if (gameResult) {
+    if (!game._settlementTriggered) {
+      game._settlementTriggered = true;
       roomManager.markTarneeb41GameFinished(tableId);
-      emitToTarneeb41Humans(nsp, tableId, "game_finished", gameResult);
-      emitTablesUpdated({ gameType: "tarneeb41", reason: "game_end", tableId: String(tableId) });
-      await runGameSettlement(nsp, ctx, gameResult);
+      const gameResult = game.getGameResult ? game.getGameResult() : null;
+      if (gameResult) {
+        emitToTarneeb41Humans(nsp, tableId, "game_finished", gameResult);
+        emitTablesUpdated({ gameType: "tarneeb41", reason: "game_end", tableId: String(tableId) });
+        await runGameSettlement(nsp, ctx, gameResult);
+      }
     }
   }
 
@@ -323,9 +326,15 @@ async function runGameSettlement(nsp, ctx, gameResult) {
         });
       } else {
         emitToTarneeb41Humans(nsp, ctx.tableId, "settlement_complete", payload);
+        if (ctx.game) ctx.game._lastSettlementPayload = payload;
         roomManager.markTarneeb41SettlementComplete(ctx.tableId);
         roomManager.tryClearTarneeb41GameIfReady(ctx.tableId);
         roomManager.evictExpiredTarneeb41Games();
+        emitTablesUpdated({
+          gameType: "tarneeb41",
+          reason: "settlement_complete",
+          tableId: String(ctx.tableId),
+        });
       }
     }
     return outcome;
@@ -337,6 +346,10 @@ async function runGameSettlement(nsp, ctx, gameResult) {
     });
     if (ctx.type === "trix") {
       emitToTrixHumans(nsp, ctx.tableId, "settlement_failed", {
+        reason: err?.message || "settlement_failed",
+      });
+    } else if (ctx.type === "tarneeb41") {
+      emitToTarneeb41Humans(nsp, ctx.tableId, "settlement_failed", {
         reason: err?.message || "settlement_failed",
       });
     }
@@ -492,6 +505,29 @@ function registerGameHandlers(nsp, jwtVerify) {
         game.syncLobbyFromTable(table, (uid) => roomManager.getTarneeb41UserSocket(String(uid)));
         let seatIndex = game.getPlayerIndex(userId);
         if (seatIndex < 0) {
+          const mongoSeatIdx = table.seats.findIndex(
+            (s) => seatUserId(s) === userIdStr
+          );
+          if (mongoSeatIdx >= 0) {
+            const seat = table.seats[mongoSeatIdx];
+            let nm = `لاعب ${mongoSeatIdx + 1}`;
+            if (seat.user && typeof seat.user === "object" && seat.user.name) {
+              nm = String(seat.user.name);
+            }
+            if (
+              game.restoreHumanAtSeat(
+                mongoSeatIdx,
+                userId,
+                socket.id,
+                nm
+              )
+            ) {
+              seatIndex = mongoSeatIdx;
+              roomManager.setUserTarneeb41Table(String(userId), String(table._id));
+            }
+          }
+        }
+        if (seatIndex < 0) {
           if (!game.needsInitialDeal()) {
             socket.emit("invalid_move", { reason: "join_tarneeb41_failed" });
             return;
@@ -509,12 +545,23 @@ function registerGameHandlers(nsp, jwtVerify) {
           game.startGameCountdown();
         }
         socket.join(`tarneeb41:${tableId}`);
+        const state = game.getGameState(seatIndex);
         socket.emit("room_joined", {
           waiting: false,
           roomId: String(tableId),
           seatIndex,
-          gameState: game.getGameState(seatIndex),
+          gameState: state,
         });
+        if (game.state === "game_end") {
+          const gameResult = game.getGameResult ? game.getGameResult() : null;
+          if (gameResult) socket.emit("game_finished", gameResult);
+          if (game._lastSettlementPayload) {
+            socket.emit("settlement_complete", game._lastSettlementPayload);
+          }
+        } else if (game.state === "round_end") {
+          const roundResult = game.getRoundResult ? game.getRoundResult() : null;
+          if (roundResult) socket.emit("round_result", roundResult);
+        }
         broadcastTarneeb41TableState(nsp, String(table._id));
       } catch (err) {
         socket.emit("invalid_move", { reason: "join_tarneeb41_failed" });
@@ -932,6 +979,27 @@ function registerGameHandlers(nsp, jwtVerify) {
       if (ok && ctx.type !== "trix" && ctx.type !== "tarneeb41") {
         broadcastGameState(nsp, ctx.room.roomId);
       }
+    });
+
+    // fill_with_bots — client requests AI fill after waiting (no humans available)
+    socket.on("fill_with_bots", (payload) => {
+      const { roomId } = payload || {};
+      const t41 = roomManager.getTarneeb41TableIdForUser(userId);
+      if (!t41 || (roomId && String(t41) !== String(roomId))) {
+        socket.emit("invalid_move", { reason: "not_in_tarneeb41_room" });
+        return;
+      }
+      const game = roomManager.getTarneeb41GameForTable(t41);
+      if (!game) {
+        socket.emit("invalid_move", { reason: "game_not_found" });
+        return;
+      }
+      if (game.state !== "waiting") {
+        broadcastTarneeb41TableState(nsp, t41);
+        return;
+      }
+      game.fillWithBots();
+      broadcastTarneeb41TableState(nsp, t41);
     });
 
     // leave_room — 30s grace before bot replacement

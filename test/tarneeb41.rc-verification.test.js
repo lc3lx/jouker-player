@@ -139,14 +139,39 @@ test("RC-2: mixed human/bot game completes without human stall", () => {
     game.clearBotTimer();
     const humans = game.players.filter((p) => !p.isBot);
     assert.equal(humans.length, 2);
-    assert.equal(game.startGame(), false);
-    forceStartMixedGame(game);
+    // startGame now accepts mixed human/bot rosters (players.length === 4 is sufficient)
+    assert.equal(game.startGame(), true);
+    assert.equal(game.state, "bidding_syrian");
     playBidding(game);
     if (game.state === "playing") {
       playTricks(game);
     }
     assert.notEqual(game.state, "waiting");
     assert.ok(["bidding_syrian", "playing", "round_end", "game_end"].includes(game.state));
+  } finally {
+    game.destroy();
+  }
+});
+
+test("RC-2b: fillWithBots starts game from 1-human waiting state", () => {
+  const game = new Tarneeb41Game("fill_test");
+  game.players.push({
+    userId: "u0",
+    socketId: "sock_0",
+    seatIndex: 0,
+    isBot: false,
+    displayName: "Human 0",
+    chips: 1000,
+  });
+  try {
+    game.clearBotTimer();
+    assert.equal(game.players.length, 1);
+    assert.equal(game.state, "waiting");
+    const started = game.fillWithBots();
+    assert.equal(started, true);
+    assert.equal(game.players.length, 4);
+    assert.equal(game.players.filter((p) => p.isBot).length, 3);
+    assert.equal(game.state, "bidding_syrian");
   } finally {
     game.destroy();
   }
