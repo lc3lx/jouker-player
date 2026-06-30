@@ -53,7 +53,7 @@ class Tarneeb41Game extends BaseGame {
   }
 
   humanCount() {
-    return this.players.filter((p) => !p.isBot).length;
+    return this.players.filter((p) => !p.isBot && p.userId != null).length;
   }
 
   isReadyForCountdown() {
@@ -255,8 +255,23 @@ class Tarneeb41Game extends BaseGame {
   /** Fill remaining seats with AI bots then start the game immediately. */
   fillWithBots() {
     if (this.state !== "waiting") return false;
-    const needed = this.maxPlayers - this.players.length;
     const ts = Date.now();
+    // Replace empty-slot placeholders (userId=null, not a real bot) with actual bots
+    for (let i = 0; i < this.players.length; i++) {
+      const p = this.players[i];
+      if (!p.isBot && !p.userId) {
+        this.players[i] = {
+          userId: `bot_fill_${ts}_${p.seatIndex}`,
+          socketId: null,
+          seatIndex: p.seatIndex,
+          isBot: true,
+          displayName: "بوت",
+          chips: 0,
+        };
+      }
+    }
+    // Also append bots for any seats not yet in this.players
+    const needed = this.maxPlayers - this.players.length;
     for (let i = 0; i < needed; i++) {
       const seatIndex = this.players.length;
       this.players.push({

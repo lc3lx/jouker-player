@@ -789,7 +789,16 @@ class PokerTable {
       return;
     }
 
-    // Still waiting — open next 30s window and keep the player seated.
+    // At least 1 human is seated but not enough humans for a normal start.
+    // Fill the remaining seats with bots and start immediately.
+    if (this.humanSeatCount() >= 1) {
+      this.addBotsForMissingSeats();
+      await this.broadcastState();
+      await this.startIfReady({ refreshFromDb: false, allowBotFill: true });
+      return;
+    }
+
+    // No humans at all — restart the wait window and keep the table warm.
     this.waitForPlayersDeadline = Date.now() + POKER_TIMINGS.WAIT_FOR_PLAYERS_MS;
     this.waitForPlayersTimer = setTimeout(() => {
       void this.onWaitForPlayersWindowEnd();
@@ -1383,9 +1392,9 @@ class PokerTable {
   }
 
   scheduleBotFillIfNeeded() {
-    // Bots may fill empty seats only during an active game with 2+ humans seated.
+    // Bots fill empty seats during an active game as long as at least 1 human is seated.
     if (!this.running) return;
-    if (this.humanSeatCount() < POKER_MIN_PLAYERS) return;
+    if (this.humanSeatCount() < 1) return;
     if (this.activeSeatCount() >= this.botFillTarget) {
       this.clearBotFillTimer();
       return;
@@ -1397,12 +1406,12 @@ class PokerTable {
       this.botFillTimer = null;
       this.botFillDeadline = null;
       if (!this.running || this.starting) return;
-      if (this.humanSeatCount() < POKER_MIN_PLAYERS) return;
+      if (this.humanSeatCount() < 1) return;
       if (this.activeSeatCount() >= this.botFillTarget) return;
 
       this.addBotsForMissingSeats();
       await this.broadcastState();
-      await this.startIfReady({ refreshFromDb: false });
+      await this.startIfReady({ refreshFromDb: false, allowBotFill: true });
     }, this.botFillDelayMs);
   }
 
@@ -1447,7 +1456,7 @@ class PokerTable {
     return base;
   }
 
-  async startIfReady({ refreshFromDb = true } = {}) {
+  async startIfReady({ refreshFromDb = true, allowBotFill = false } = {}) {
     if (this.frozen) return;
     if (this.running || this.starting) return;
     if (this.round !== "idle") {
@@ -1461,7 +1470,14 @@ class PokerTable {
       }
 
       const humans = this.eligibleHumanCount();
-      if (humans < POKER_MIN_PLAYERS) {
+      // Normal case: 2+ eligible humans.
+      // Bot-fill case: at least 1 human and bots fill the remaining seats.
+      const canStartWithBots =
+        allowBotFill &&
+        this.humanSeatCount() >= 1 &&
+        this.activeSeatCount() >= POKER_MIN_PLAYERS;
+
+      if (humans < POKER_MIN_PLAYERS && !canStartWithBots) {
         this.running = false;
         this.clearActionScheduling();
         this.clearBotFillTimer();
@@ -3385,6 +3401,36 @@ async function restoreLiveEngineSeat(tableId, userId, meta = {}) {
   return game.restoreVacatedHumanSeat(userId, meta);
 }
 
+async function syncLivePokerTableAfterJoin(tableId) {
+  if (!activeRegistry) return;
+  try {
+    const game = await activeRegistry.get(String(tableId));
+    if (!game) return;
+    await game.refreshSeatsFromDb();
+    await game.startIfReady({ refreshFromDb: false });
+  } catch (e) {
+    logger.error("sync_live_poker_after_join_failed", {
+      tableId: String(tableId),
+      reason: e?.message || "unknown",
+    });
+  }
+}
+
+async function syncLivePokerTableAfterJoin(tableId) {
+  if (!activeRegistry) return;
+  try {
+    const game = await activeRegistry.get(String(tableId));
+    if (!game) return;
+    await game.refreshSeatsFromDb();
+    await game.startIfReady({ refreshFromDb: false });
+  } catch (e) {
+    logger.error("sync_live_poker_after_join_failed", {
+      tableId: String(tableId),
+      reason: e?.message || "unknown",
+    });
+  }
+}
+
 async function syncLivePokerTableAfterLeave(tableId) {
   if (!activeRegistry) return;
   const game = await activeRegistry.get(String(tableId));
@@ -3446,6 +3492,7 @@ module.exports = {
   getTableGameDebugSnapshot,
   evictTableFromRegistry,
   resetLivePokerTableWhenEmpty,
+  syncLivePokerTableAfterJoin,
   syncLivePokerTableAfterLeave,
   vacateLiveEngineSeat,
   restoreLiveEngineSeat,

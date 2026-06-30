@@ -32,7 +32,7 @@ const { LOBBY_EXCLUDED_STATUSES } = require("./tableLifecycleService");
 const { seatNextFromQueue, getQueuePosition, getWaitingQueueSize } = require("./pokerWaitingQueueService");
 const { removeSeatPresence } = require("./pokerCollusionGuard");
 const { markTableActivity, resetPokerTableWhenEmpty } = require("./pokerTableGcService");
-const { syncLivePokerTableAfterLeave } = require("../sockets/tableGame");
+const { syncLivePokerTableAfterLeave, syncLivePokerTableAfterJoin } = require("../sockets/tableGame");
 const { vacatePokerSeat, tryRestoreVacatedSeat } = require("./pokerVacateService");
 
 const FIXED_TIER_TABLES = {
@@ -668,6 +668,9 @@ exports.joinTable = asyncHandler(async (req, res, next) => {
 
   if (table.gameType === "poker") {
     void syncPokerTableStatusById(joinedTableId);
+    if (!joinMeta.queued) {
+      void syncLivePokerTableAfterJoin(joinedTableId);
+    }
   }
 
   if (table.gameType === "tarneeb41") {
