@@ -22,6 +22,7 @@ const {
   onCardTableRejoin,
 } = require("../../services/cardTableVacateService");
 const logger = require("../../utils/logger");
+const ActionPipeline = require("../../engine/ActionPipeline");
 const DiceEngine = require("../../games/dice/DiceEngine");
 const kingArthRoundState = require("../../games/dice/kingArthRoundState");
 const kingArthSeedRotation = require("../../games/dice/kingArthSeedRotation");
@@ -834,10 +835,12 @@ function registerGameHandlers(nsp, jwtVerify) {
         return;
       }
       const game = room.gameInstance;
-      if (!game) return;
-      const playerIndex = game.getPlayerIndex(userId);
-      if (playerIndex < 0) return;
-      const result = game.applyMove(playerIndex, "bid", { value });
+      const guard = ActionPipeline.run({ userId, game, requireRunning: false });
+      if (!guard.ok) {
+        socket.emit("invalid_move", { reason: guard.reason, code: guard.code });
+        return;
+      }
+      const result = game.applyMove(guard.playerIndex, "bid", { value });
       if (!result.success) {
         socket.emit("invalid_move", { reason: result.reason });
         return;
@@ -855,9 +858,12 @@ function registerGameHandlers(nsp, jwtVerify) {
       }
       const game = room.gameInstance;
       if (!game || !game.chooseTrump) return;
-      const playerIndex = game.getPlayerIndex(userId);
-      if (playerIndex < 0) return;
-      const ok = game.chooseTrump(playerIndex, trump);
+      const guard = ActionPipeline.run({ userId, game, requireRunning: false });
+      if (!guard.ok) {
+        socket.emit("invalid_move", { reason: guard.reason, code: guard.code });
+        return;
+      }
+      const ok = game.chooseTrump(guard.playerIndex, trump);
       if (!ok) {
         socket.emit("invalid_move", { reason: "invalid_trump" });
         return;
@@ -873,9 +879,12 @@ function registerGameHandlers(nsp, jwtVerify) {
         socket.emit("invalid_move", { reason: "not_in_room" });
         return;
       }
-      const playerIndex = ctx.game.getPlayerIndex(userId);
-      if (playerIndex < 0) return;
-      const result = ctx.game.applyMove(playerIndex, "select_game", {
+      const guard = ActionPipeline.run({ userId, game: ctx.game, requireRunning: false });
+      if (!guard.ok) {
+        socket.emit("invalid_move", { reason: guard.reason, code: guard.code });
+        return;
+      }
+      const result = ctx.game.applyMove(guard.playerIndex, "select_game", {
         gameType,
         moveId: payload && payload.moveId,
       });
@@ -896,9 +905,12 @@ function registerGameHandlers(nsp, jwtVerify) {
         socket.emit("invalid_move", { reason: "not_in_room" });
         return;
       }
-      const playerIndex = ctx.game.getPlayerIndex(userId);
-      if (playerIndex < 0) return;
-      const result = ctx.game.applyMove(playerIndex, "tarneeb41_declare", {
+      const guard = ActionPipeline.run({ userId, game: ctx.game, requireRunning: false });
+      if (!guard.ok) {
+        socket.emit("invalid_move", { reason: guard.reason, code: guard.code });
+        return;
+      }
+      const result = ctx.game.applyMove(guard.playerIndex, "tarneeb41_declare", {
         value,
         moveId: payload && payload.moveId,
       });
@@ -917,9 +929,12 @@ function registerGameHandlers(nsp, jwtVerify) {
         return;
       }
       const game = ctx.game;
-      const playerIndex = game.getPlayerIndex(userId);
-      if (playerIndex < 0) return;
-      const result = game.applyMove(playerIndex, "play_card", {
+      const guard = ActionPipeline.run({ userId, game, requireRunning: true });
+      if (!guard.ok) {
+        socket.emit("invalid_move", { reason: guard.reason, code: guard.code });
+        return;
+      }
+      const result = game.applyMove(guard.playerIndex, "play_card", {
         card,
         moveId: payload && payload.moveId,
       });
@@ -967,7 +982,15 @@ function registerGameHandlers(nsp, jwtVerify) {
     socket.on("next_round", (payload) => {
       const { roomId } = payload || {};
       const ctx = resolveGameContext(userId, roomId);
-      if (!ctx?.game) return;
+      if (!ctx?.game) {
+        socket.emit("invalid_move", { reason: "not_in_room", code: "ERR_NOT_SEATED" });
+        return;
+      }
+      const guard = ActionPipeline.run({ userId, game: ctx.game, requireRunning: false });
+      if (!guard.ok) {
+        socket.emit("invalid_move", { reason: guard.reason, code: guard.code });
+        return;
+      }
       let ok = false;
       if (ctx.type === "tarneeb41" && typeof ctx.game.advanceNextRound === "function") {
         ok = ctx.game.advanceNextRound();

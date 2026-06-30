@@ -2,11 +2,23 @@
  * Tarneeb Syrian 41 — table-based game (Mongo seats + bots).
  * Play order between tricks: counter-clockwise (index + 3) % 4.
  */
-const BaseGame = require("../base/BaseGame");
+const BaseGameEngine = require("../../engine/BaseGameEngine");
 const crypto = require("crypto");
 const { newDeck, shuffle } = require("../utils/cards");
 const rules = require("./tarneeb41.rules");
 const { GAME_START_COUNTDOWN_SECONDS, TRICK_DISPLAY_MS } = require("./tarneeb41.constants");
+const TarneebBot = require("../../engine/bots/TarneebBot");
+const timerManager = require("../../engine/TimerManager");
+const StateMachine = require("../../engine/StateMachine");
+const { STATE: T41_STATE, TRANSITIONS: T41_TRANSITIONS } = require("../../engine/states/tarneeb41States");
+
+/**
+ * Try timerManager first; if id not found there (e.g. a native Interval from a
+ * test helper that bypassed the scheduler), fall back to native clearInterval.
+ */
+function clearManagedOrNativeInterval(id) {
+  if (!timerManager.clear(id)) clearInterval(id);
+}
 
 const ACTIVE_STATES = new Set(["bidding_syrian", "playing", "round_end", "game_end", "countdown"]);
 
@@ -16,7 +28,7 @@ function parseTurnTimeoutSeconds() {
   return Math.min(n, 120);
 }
 
-class Tarneeb41Game extends BaseGame {
+class Tarneeb41Game extends BaseGameEngine {
   constructor(roomId, options = {}) {
     super(roomId, "tarneeb41", options);
     this.maxPlayers = 4;
@@ -50,6 +62,12 @@ class Tarneeb41Game extends BaseGame {
     this.trickResolveEndsAt = null;
     this._lastSettlementPayload = null;
     this._settlementTriggered = false;
+    this._fsm = new StateMachine(this.state, T41_TRANSITIONS, {
+      onIllegal: (from, to) => {
+        console.warn(`[Tarneeb41Game:${this.roomId}] FSM observed unexpected transition: ${from} -> ${to}`);
+        return true; // mirror stays in sync with the authoritative this.state string
+      },
+    });
   }
 
   humanCount() {
@@ -183,16 +201,23 @@ class Tarneeb41Game extends BaseGame {
     if (this.isCountdownActive()) return false;
     this.clearCountdown();
     this.state = "countdown";
+    this._fsm.transition(T41_STATE.COUNTDOWN);
     this.countdownSeconds = GAME_START_COUNTDOWN_SECONDS;
     this._emit("game_start_countdown", { remainingSeconds: this.countdownSeconds });
-    this.countdownInterval = setInterval(() => {
-      this.countdownSeconds -= 1;
-      if (this.countdownSeconds <= 0) {
-        void this._onCountdownElapsed();
-        return;
-      }
-      this._emit("game_start_countdown", { remainingSeconds: this.countdownSeconds });
-    }, 1000);
+    this.countdownInterval = timerManager.schedule(
+      this.roomId,
+      "countdown",
+      1000,
+      () => {
+        this.countdownSeconds -= 1;
+        if (this.countdownSeconds <= 0) {
+          void this._onCountdownElapsed();
+          return;
+        }
+        this._emit("game_start_countdown", { remainingSeconds: this.countdownSeconds });
+      },
+      { repeat: true }
+    );
     return true;
   }
 
@@ -203,16 +228,19 @@ class Tarneeb41Game extends BaseGame {
         const ok = await this._countdownStartGate();
         if (!ok) {
           this.state = "waiting";
+          this._fsm.transition(T41_STATE.WAITING);
           this._emit("game_start_countdown_cancelled", { reason: "validation_failed" });
           return;
         }
       } catch (_) {
         this.state = "waiting";
+        this._fsm.transition(T41_STATE.WAITING);
         this._emit("game_start_countdown_cancelled", { reason: "validation_error" });
         return;
       }
     } else if (!this.isReadyForCountdown()) {
       this.state = "waiting";
+      this._fsm.transition(T41_STATE.WAITING);
       this._emit("game_start_countdown_cancelled", { reason: "not_ready" });
       return;
     }
@@ -222,6 +250,7 @@ class Tarneeb41Game extends BaseGame {
       this._notifyAfterMove({ success: true, gameStarted: true });
     } else {
       this.state = "waiting";
+      this._fsm.transition(T41_STATE.WAITING);
       this._emit("game_start_countdown_cancelled", { reason: "start_failed" });
     }
   }
@@ -230,13 +259,14 @@ class Tarneeb41Game extends BaseGame {
     if (this.state !== "countdown" && !this.countdownInterval) return false;
     this.clearCountdown();
     this.state = "waiting";
+    this._fsm.transition(T41_STATE.WAITING);
     this._emit("game_start_countdown_cancelled", { reason });
     return true;
   }
 
   clearCountdown() {
     if (this.countdownInterval) {
-      clearInterval(this.countdownInterval);
+      timerManager.clear(this.countdownInterval);
       this.countdownInterval = null;
     }
     this.countdownSeconds = null;
@@ -314,19 +344,20 @@ class Tarneeb41Game extends BaseGame {
     this.trick = [];
     this.ledSuit = null;
     this.state = "bidding_syrian";
+    this._fsm.transition(T41_STATE.BIDDING_SYRIAN);
     this.currentPlayerIndex = (this.dealerIndex + 1) % 4;
     this.trickLeader = this.currentPlayerIndex;
     this.startTurnTimer();
   }
 
   startBotTimer() {
-    if (this.botInterval) clearInterval(this.botInterval);
-    this.botInterval = setInterval(() => this.checkBotTurn(), 1500);
+    if (this.botInterval != null) clearManagedOrNativeInterval(this.botInterval);
+    this.botInterval = timerManager.schedule(this.roomId, "bot", 1500, () => this.checkBotTurn(), { repeat: true });
   }
 
   clearBotTimer() {
-    if (this.botInterval) {
-      clearInterval(this.botInterval);
+    if (this.botInterval != null) {
+      clearManagedOrNativeInterval(this.botInterval);
       this.botInterval = null;
     }
   }
@@ -348,13 +379,15 @@ class Tarneeb41Game extends BaseGame {
     this.turnTimerPhase = this.state === "bidding_syrian" ? "bidding" : "playing";
     this.turnTimerEndsAt = Date.now() + this.turnTimerSeconds * 1000;
     this._emitTurnTimerStarted();
-    if (this.turnTimerInterval) clearInterval(this.turnTimerInterval);
-    this.turnTimerInterval = setInterval(() => this._tickTurnTimer(), 1000);
+    if (this.turnTimerInterval != null) clearManagedOrNativeInterval(this.turnTimerInterval);
+    this.turnTimerInterval = timerManager.schedule(this.roomId, "turn", 1000, () => this._tickTurnTimer(), {
+      repeat: true,
+    });
   }
 
   clearTurnTimer() {
-    if (this.turnTimerInterval) {
-      clearInterval(this.turnTimerInterval);
+    if (this.turnTimerInterval != null) {
+      clearManagedOrNativeInterval(this.turnTimerInterval);
       this.turnTimerInterval = null;
     }
     this.turnTimerEndsAt = null;
@@ -366,14 +399,15 @@ class Tarneeb41Game extends BaseGame {
     this.clearTurnTimer();
     this.clearCountdown();
     this.clearTrickResolveTimer();
+    timerManager.clearAll(this.roomId);
     this._countdownStartGate = null;
     this.onGameEvent = null;
     this.onAfterMove = null;
   }
 
   clearTrickResolveTimer() {
-    if (this.trickResolveTimer) {
-      clearTimeout(this.trickResolveTimer);
+    if (this.trickResolveTimer != null) {
+      if (!timerManager.clear(this.trickResolveTimer)) clearTimeout(this.trickResolveTimer);
       this.trickResolveTimer = null;
     }
     this.trickResolving = false;
@@ -421,11 +455,7 @@ class Tarneeb41Game extends BaseGame {
   }
 
   _pickAutoPlayCard(hand) {
-    const valid = rules.getValidCards(hand, this.ledSuit);
-    const pool = valid.length > 0 ? valid : [...hand];
-    if (pool.length === 0) return null;
-    pool.sort((a, b) => a.rank - b.rank);
-    return pool[0];
+    return TarneebBot.pickAutoPlayCard(hand, this.ledSuit, rules);
   }
 
   _handleTurnTimeout() {
@@ -447,17 +477,7 @@ class Tarneeb41Game extends BaseGame {
   _botBid() {
     const idx = this.currentPlayerIndex;
     const hand = this.hands[idx];
-    if (!hand || hand.length === 0) return 0;
-    let expected = 0;
-    for (const c of hand) {
-      if (c.rank === 14) expected += 1.0;       // Ace
-      else if (c.rank === 13) expected += 0.75;  // King
-      else if (c.rank === 12) expected += 0.5;   // Queen
-      if (this.trump && c.suit === this.trump) expected += 0.4; // trump bonus
-    }
-    const bid = Math.round(expected);
-    if (bid < 2) return 0; // pass
-    return Math.min(bid, 13);
+    return TarneebBot.botBid(hand, this.trump);
   }
 
   checkBotTurn() {
@@ -552,6 +572,7 @@ class Tarneeb41Game extends BaseGame {
       }
 
       this.state = "playing";
+      this._fsm.transition(T41_STATE.PLAYING);
       this.trickLeader = (this.dealerIndex + 1) % 4;
       this.currentPlayerIndex = this.trickLeader;
       this.trick = [];
@@ -587,10 +608,16 @@ class Tarneeb41Game extends BaseGame {
       this.pendingTrickWinner = winner.playerIndex;
       this.clearTurnTimer();
       this.trickResolveEndsAt = Date.now() + TRICK_DISPLAY_MS;
-      if (this.trickResolveTimer) clearTimeout(this.trickResolveTimer);
-      this.trickResolveTimer = setTimeout(() => {
-        this._finalizePendingTrick();
-      }, TRICK_DISPLAY_MS);
+      if (this.trickResolveTimer) timerManager.clear(this.trickResolveTimer);
+      this.trickResolveTimer = timerManager.schedule(
+        this.roomId,
+        "animation_delay",
+        TRICK_DISPLAY_MS,
+        () => {
+          this._finalizePendingTrick();
+        },
+        { repeat: false }
+      );
 
       return {
         success: true,
@@ -646,7 +673,7 @@ class Tarneeb41Game extends BaseGame {
   finalizePendingTrickNow() {
     if (!this.trickResolving) return null;
     if (this.trickResolveTimer) {
-      clearTimeout(this.trickResolveTimer);
+      timerManager.clear(this.trickResolveTimer);
       this.trickResolveTimer = null;
     }
     return this._finalizePendingTrick();
@@ -659,10 +686,12 @@ class Tarneeb41Game extends BaseGame {
     this.clearTurnTimer();
     if (end.ended) {
       this.state = "game_end";
+      this._fsm.transition(T41_STATE.GAME_END);
       this.clearBotTimer();
       this._finishedAt = Date.now();
     } else {
       this.state = "round_end";
+      this._fsm.transition(T41_STATE.ROUND_END);
     }
   }
 

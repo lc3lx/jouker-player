@@ -1,4 +1,4 @@
-﻿const BaseGame = require('../base/BaseGame');
+﻿const BaseGameEngine = require('../../engine/BaseGameEngine');
 const crypto = require('crypto');
 const Player = require('./models/Player');
 const GameState = require('./models/GameState');
@@ -6,6 +6,13 @@ const RoundManager = require('./managers/RoundManager');
 const ScoreManager = require('./managers/ScoreManager');
 const GameManager = require('./managers/GameManager');
 const BotAI = require('./ai/BotAI');
+const timerManager = require('../../engine/TimerManager');
+const StateMachine = require('../../engine/StateMachine');
+const { STATE: TRIX_STATE, TRANSITIONS: TRIX_TRANSITIONS } = require('../../engine/states/trixStates');
+
+function clearManagedOrNativeInterval(id) {
+  if (!timerManager.clear(id)) clearInterval(id);
+}
 
 const ACTIVE_STATES = new Set(['selecting_game', 'playing', 'round_end', 'game_end']);
 
@@ -21,11 +28,17 @@ function parseSelectTimeoutSeconds() {
   return Math.min(n, 120);
 }
 
-class TrixGame extends BaseGame {
+class TrixGame extends BaseGameEngine {
   constructor(roomId, options = {}) {
     super(roomId, 'trix', options);
     this.maxPlayers = 4;
     this.gameState = null;
+    this._fsm = new StateMachine(this.state, TRIX_TRANSITIONS, {
+      onIllegal: (from, to) => {
+        console.warn(`[TrixGame:${this.roomId}] FSM observed unexpected transition: ${from} -> ${to}`);
+        return true; // mirror stays in sync with the authoritative this.state string
+      },
+    });
     this.botInterval = null;
     this.onStateChanged = null;
     this.onGameEvent = null;
@@ -106,15 +119,15 @@ class TrixGame extends BaseGame {
   }
 
   clearBotTimer() {
-    if (this.botInterval) {
-      clearInterval(this.botInterval);
+    if (this.botInterval != null) {
+      clearManagedOrNativeInterval(this.botInterval);
       this.botInterval = null;
     }
   }
 
   clearTurnTimer() {
-    if (this.turnTimerInterval) {
-      clearInterval(this.turnTimerInterval);
+    if (this.turnTimerInterval != null) {
+      clearManagedOrNativeInterval(this.turnTimerInterval);
       this.turnTimerInterval = null;
     }
     this.turnTimerEndsAt = null;
@@ -124,6 +137,7 @@ class TrixGame extends BaseGame {
   destroy() {
     this.clearBotTimer();
     this.clearTurnTimer();
+    timerManager.clearAll(this.roomId);
     this.onStateChanged = null;
     this.onGameEvent = null;
     this.onAfterMove = null;
@@ -187,10 +201,9 @@ class TrixGame extends BaseGame {
     }
 
     this._emitTurnTimerStarted();
-    this.turnTimerInterval = setInterval(() => this._tickTurnTimer(), 1000);
-    if (typeof this.turnTimerInterval.unref === 'function') {
-      this.turnTimerInterval.unref();
-    }
+    this.turnTimerInterval = timerManager.schedule(this.roomId, 'turn', 1000, () => this._tickTurnTimer(), {
+      repeat: true,
+    });
   }
 
   _pickAutoPlayCard(playerIndex) {
@@ -354,6 +367,7 @@ class TrixGame extends BaseGame {
 
   startRound() {
     this.state = 'selecting_game';
+    this._fsm.transition(TRIX_STATE.SELECTING_GAME);
     this.selectingStartedAt = Date.now();
     this.roundEndAt = 0;
     this.gameState.deck.dealCardsToPlayers(this.gameState.players);
@@ -361,13 +375,16 @@ class TrixGame extends BaseGame {
   }
 
   startBotTimer() {
-    if (this.botInterval) clearInterval(this.botInterval);
-    this.botInterval = setInterval(() => {
-      this.checkBotTurn();
-    }, 900);
-    if (typeof this.botInterval.unref === 'function') {
-      this.botInterval.unref();
-    }
+    if (this.botInterval != null) clearManagedOrNativeInterval(this.botInterval);
+    this.botInterval = timerManager.schedule(
+      this.roomId,
+      'bot',
+      900,
+      () => {
+        this.checkBotTurn();
+      },
+      { repeat: true }
+    );
   }
 
   checkBotTurn() {
@@ -519,6 +536,7 @@ class TrixGame extends BaseGame {
       const ok = RoundManager.selectGame(this.gameState, gameType);
       if (!ok) return { success: false, reason: 'Invalid game selection' };
       this.state = 'playing';
+      this._fsm.transition(TRIX_STATE.PLAYING);
       this.selectingStartedAt = 0;
       if (this.gameState.currentGameType === 'Trix') {
         const currentValid = GameManager.getValidCards(
@@ -548,6 +566,7 @@ class TrixGame extends BaseGame {
 
       if (this.gameState.isRoundOver()) {
         this.state = 'round_end';
+        this._fsm.transition(TRIX_STATE.ROUND_END);
         this.roundEndAt = Date.now();
         ScoreManager.calculateRoundScore(this.gameState);
         roundEnded = true;
@@ -576,6 +595,7 @@ class TrixGame extends BaseGame {
 
     if (this.gameState.roundNumber >= 20) {
       this.state = 'game_end';
+      this._fsm.transition(TRIX_STATE.GAME_END);
       this.clearBotTimer();
       this.clearTurnTimer();
       if (!this._finishedAt) this._finishedAt = Date.now();

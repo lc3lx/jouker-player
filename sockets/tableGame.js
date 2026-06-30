@@ -3035,6 +3035,34 @@ class PokerTable {
       await this.releaseActionLock();
     }
   }
+
+  // --- BaseGameEngine duck-typing adapter methods (additive, ~12 new lines) ---
+  // Thin pass-throughs so PokerTable is structurally compatible with the
+  // BaseGameEngine interface without requiring a formal `extends` relationship
+  // (its constructor signature (nsp, table, options) is incompatible with
+  // BaseGameEngine's (roomId, gameType, options) so composition is used here).
+
+  /** Maps BaseGameEngine.serialize() -> existing serializeSnapshot() */
+  serialize() { return this.serializeSnapshot(); }
+
+  /** Maps BaseGameEngine.deserialize() -> existing restoreFromSnapshot() */
+  deserialize(data) { return this.restoreFromSnapshot(data); }
+
+  /** Maps BaseGameEngine.emitState() -> existing broadcastState() */
+  emitState() { return this.broadcastState(); }
+
+  /** Maps BaseGameEngine.reconnectPlayer() -> existing onPlayerSocketConnected() */
+  reconnectPlayer(userId) { return this.onPlayerSocketConnected(userId); }
+
+  /** Maps BaseGameEngine.leavePlayer() -> existing onPlayerSocketDisconnected() */
+  leavePlayer(userId) { return this.onPlayerSocketDisconnected(userId); }
+
+  /** Maps BaseGameEngine.state (string read) -> existing this.round field.
+   *  Safe: PokerTable has no prior `state` property (confirmed - uses `this.round`). */
+  get state() { return this.round; }
+
+  /** isGameFinished mirrors PokerTable's concept of not being in an active hand (idle = between hands). */
+  isGameFinished() { return false; } // PokerTable tables don't permanently finish; GC handles lifecycle.
 }
 
 class GameRegistry {
