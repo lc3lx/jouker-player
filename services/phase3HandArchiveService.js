@@ -2,6 +2,7 @@ const HandHistory = require("../models/handHistoryModel");
 const auditService = require("./auditService");
 const replayService = require("./replayService");
 const handScreenshotService = require("./handScreenshotService");
+const handEvidenceService = require("./handEvidenceService");
 const playerAnalyticsService = require("./playerAnalyticsService");
 const achievementHookService = require("./achievementHookService");
 const logger = require("../utils/logger");
@@ -28,7 +29,7 @@ async function onHandSettled({
   handCategory = null,
   seats = [],
   actions = [],
-  auditLog = [],
+  potDistribution = [],
 }) {
   const ended = endedAt ? new Date(endedAt) : new Date();
   const started = startedAt ? new Date(startedAt) : ended;
@@ -68,6 +69,12 @@ async function onHandSettled({
     .filter(Boolean)
     .join(", ");
 
+  const holeCardsByPlayer = {};
+  for (const s of seats || []) {
+    const uid = s.user || s.userId;
+    if (uid && s.hole?.length) holeCardsByPlayer[String(uid)] = s.hole;
+  }
+
   if (handHistoryId) {
     await HandHistory.findByIdAndUpdate(handHistoryId, {
       $set: {
@@ -80,11 +87,12 @@ async function onHandSettled({
         replayData,
         auditHash,
         startedAt: started,
+        potDistribution,
       },
     });
   }
 
-  await handScreenshotService.generateHandScreenshot({
+  const screenshot = await handScreenshotService.generateHandScreenshot({
     handId,
     handHistoryId,
     tableId,
@@ -105,28 +113,57 @@ async function onHandSettled({
     },
   });
 
-  void playerAnalyticsService.recordHandStats({
+  await handEvidenceService.createHandEvidencePackage({
     handId,
     gameType,
-    seats,
-    winners,
+    table: tableId,
+    handHistoryId,
+    replayData,
+    settlementSummary: { pot, rake, winners, potDistribution },
+    auditHash,
+    screenshotId: screenshot._id,
+    screenshotUrl: screenshot.publicUrl,
+    screenshotChecksum: screenshot.checksum,
+    players: seats.map((s, i) => ({
+      seatIndex: i,
+      userId: s.user || s.userId,
+      name: s.name,
+    })),
+    communityCards: community,
+    holeCardsByPlayer,
+    winner: winners?.[0] || null,
+    potDistribution,
     pot,
-    rake,
-    actions,
-  }).catch((e) => {
-    logger.warn("player_analytics_record_failed", { handId, reason: e?.message });
+    durationMs,
+    endedAt: ended,
   });
 
-  void achievementHookService.onHandCompleted({
-    handId,
-    gameType,
-    seats,
-    winners,
-    handCategory,
-    actions,
-  }).catch((e) => {
-    logger.warn("achievement_hook_failed", { handId, reason: e?.message });
-  });
+  void playerAnalyticsService
+    .recordHandStats({
+      handId,
+      gameType,
+      seats,
+      winners,
+      pot,
+      rake,
+      actions,
+    })
+    .catch((e) => {
+      logger.warn("player_analytics_record_failed", { handId, reason: e?.message });
+    });
+
+  void achievementHookService
+    .onHandCompleted({
+      handId,
+      gameType,
+      seats,
+      winners,
+      handCategory,
+      actions,
+    })
+    .catch((e) => {
+      logger.warn("achievement_hook_failed", { handId, reason: e?.message });
+    });
 
   await auditService.logEvent({
     event: "hand_settled",

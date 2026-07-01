@@ -184,14 +184,14 @@ test("applyRoundScores matches Syrian 41 per-player scoring", () => {
   assert.deepEqual(scores2, [4, 13, 15, 17]);
 });
 
-test("bidding advances counter-clockwise", () => {
+test("bidding advances clockwise", () => {
   const game = mkFourHumans();
   try {
     game.startGame();
     game.declaredBids = [5, null, null, null];
     game.currentPlayerIndex = 0;
     const next = game.findNextUndeclared(0);
-    assert.equal(next, 3);
+    assert.equal(next, 1);
   } finally {
     game.destroy();
   }

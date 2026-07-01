@@ -15,6 +15,7 @@ const Wallet = require("../../models/walletModel");
 const MiniGamePlay = require("../../models/miniGamePlayModel");
 const { trackTrixWin } = require("../../services/taskService");
 const { settleGameOnFinish } = require("../../services/gameSettlementService");
+const { archiveCardGameMatch } = require("../../services/cardGameHistoryService");
 const { markTrixTablePlaying } = require("../../services/tableService");
 const { emitTablesUpdated } = require("../../utils/lobbyRealtime");
 const {
@@ -325,6 +326,22 @@ async function runGameSettlement(nsp, ctx, gameResult) {
         totalRake: outcome.settlement.totalRake,
         reconciliation: outcome.settlement.reconciliation,
       };
+      void archiveCardGameMatch({
+        gameType: ctx.type,
+        tableId: ctx.tableId,
+        tableNumber: ctx.game?.tableNumber,
+        sessionId: ctx.game?.sessionId,
+        gameResult,
+        gamePlayers: ctx.game?.players,
+        settlement: outcome.settlement,
+        game: ctx.game,
+      }).catch((err) => {
+        logger.warn("card_game_archive_failed", {
+          tableId: String(ctx.tableId),
+          gameType: ctx.type,
+          reason: err?.message,
+        });
+      });
       if (ctx.type === "trix") {
         emitToTrixHumans(nsp, ctx.tableId, "settlement_complete", payload);
         if (ctx.game) {

@@ -1,4 +1,5 @@
 const HandHistory = require("../models/handHistoryModel");
+const CardGameHistory = require("../models/cardGameHistoryModel");
 const ApiError = require("../utils/apiError");
 
 function buildReplaySteps(doc) {
@@ -47,7 +48,14 @@ function buildReplayPayload(doc) {
 }
 
 async function getHandReplay(handId, { revealSeed = false } = {}) {
-  const doc = await HandHistory.findOne({ handId }).lean();
+  let doc = await HandHistory.findOne({ handId }).lean();
+  if (!doc) {
+    doc = await CardGameHistory.findOne({ sessionId: handId }).lean();
+    if (!doc) {
+      const byReplay = await CardGameHistory.findOne({ "replayData.handId": handId }).lean();
+      doc = byReplay;
+    }
+  }
   if (!doc) throw new ApiError("Hand not found", 404);
   const payload = buildReplayPayload(doc);
   if (!revealSeed && payload.provablyFair) {

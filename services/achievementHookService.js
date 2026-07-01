@@ -2,14 +2,14 @@ const Achievement = require("../models/achievementModel");
 const Player = require("../models/playerModel");
 
 const HAND_CATEGORY_ACHIEVEMENTS = {
-  "Royal Flush": "royal_flush",
-  "Straight Flush": "straight_flush",
-  "Four of a Kind": "four_of_a_kind",
-  "Full House": "full_house",
+  "Royal Flush": "ROYAL_FLUSH",
+  "Straight Flush": "STRAIGHT_FLUSH",
+  "Four of a Kind": "FOUR_OF_A_KIND",
+  "Full House": "FULL_HOUSE",
 };
 
-async function unlockAchievement(userId, achievementKey) {
-  const ach = await Achievement.findOne({ key: achievementKey });
+async function unlockAchievement(userId, achievementCode) {
+  const ach = await Achievement.findOne({ code: achievementCode.toUpperCase() });
   if (!ach) return null;
   const player = await Player.findOne({ user: userId });
   if (!player) return null;
@@ -27,9 +27,9 @@ async function onHandCompleted({ handId, gameType, seats, winners, handCategory,
   for (const w of winners || []) {
     const uid = w.user || w.userId;
     if (!uid) continue;
-    await unlockAchievement(uid, "first_win").catch(() => {});
+    await unlockAchievement(uid, "FIRST_WIN").catch(() => {});
     const wins = (w.share || 0) > 0;
-    if (wins) await unlockAchievement(uid, "hand_won").catch(() => {});
+    if (wins) await unlockAchievement(uid, "HAND_WON").catch(() => {});
   }
 
   if (handCategory && HAND_CATEGORY_ACHIEVEMENTS[handCategory]) {
@@ -43,7 +43,7 @@ async function onHandCompleted({ handId, gameType, seats, winners, handCategory,
   const aliveAtEnd = (seats || []).filter((s) => !s.folded).length;
   if (reasonFold > 0 && aliveAtEnd === 1 && winners?.length === 1) {
     const uid = winners[0].user || winners[0].userId;
-    if (uid) await unlockAchievement(uid, "win_without_showdown").catch(() => {});
+    if (uid) await unlockAchievement(uid, "WIN_WITHOUT_SHOWDOWN").catch(() => {});
   }
 }
 

@@ -8,6 +8,9 @@ const achievementSchema = new mongoose.Schema(
     points: { type: Number, default: 0 },
     icon: { type: String },
     isActive: { type: Boolean, default: true },
+    hidden: { type: Boolean, default: false },
+    category: { type: String, default: "general" },
+    seasonal: { type: Boolean, default: false },
   },
   { timestamps: true }
 );

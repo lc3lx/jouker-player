@@ -25,6 +25,7 @@ const socialRoute = require("./socialRoute");
 const chatRoute = require("./chatRoute");
 const replayRoute = require("./replayRoute");
 const platformRoute = require("./platformRoute");
+const historyRoute = require("./historyRoute");
 const openapiRoute = require("./openapiRoute");
 
 const mountRoutes = (app) => {
@@ -68,6 +69,7 @@ const mountRoutes = (app) => {
   app.use("/api/v1/chat", chatRoute);
   app.use("/api/v1/replay", replayRoute);
   app.use("/api/v1/platform", platformRoute);
+  app.use("/api/v1/history", historyRoute);
   app.use("/api-docs", openapiRoute);
   app.use("/api/game", goldenTreeRoute);
 };

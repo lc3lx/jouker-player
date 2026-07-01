@@ -182,6 +182,9 @@ async function startServer() {
   initSocial(io, { redis: realtimeRedis?.commandClient || null });
   initGameServer(io, { redis: realtimeRedis?.commandClient || null });
 
+  const { startEngine: startTournamentEngine } = require("./services/tournamentEngineService");
+  startTournamentEngine();
+
   startTableGc(io, { redis: realtimeRedis?.commandClient || null });
 
   const PORT = process.env.PORT || 1099;

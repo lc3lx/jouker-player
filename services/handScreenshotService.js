@@ -1,17 +1,8 @@
-const fs = require("fs");
-const path = require("path");
 const sharp = require("sharp");
 
 const HandScreenshot = require("../models/handScreenshotModel");
 const HandHistory = require("../models/handHistoryModel");
-
-const UPLOAD_DIR = path.join(__dirname, "..", "uploads", "hand-screenshots");
-
-function ensureDir() {
-  if (!fs.existsSync(UPLOAD_DIR)) {
-    fs.mkdirSync(UPLOAD_DIR, { recursive: true });
-  }
-}
+const { uploadWithRetry } = require("../utils/storage/storageProvider");
 
 function formatCard(c) {
   if (!c || typeof c !== "string") return "??";
@@ -21,8 +12,12 @@ function formatCard(c) {
 function buildSvgSnapshot(meta) {
   const lines = [];
   const push = (y, text, size = 22, bold = false) => {
+    const safe = String(text || "")
+      .replace(/&/g, "&amp;")
+      .replace(/</g, "&lt;")
+      .replace(/>/g, "&gt;");
     lines.push(
-      `<text x="40" y="${y}" font-family="Arial,sans-serif" font-size="${size}" font-weight="${bold ? "700" : "400"}" fill="#fff">${text}</text>`
+      `<text x="40" y="${y}" font-family="Arial,sans-serif" font-size="${size}" font-weight="${bold ? "700" : "400"}" fill="#fff">${safe}</text>`
     );
   };
 
@@ -57,9 +52,6 @@ async function generateHandScreenshot({
   auditHash,
   meta,
 }) {
-  ensureDir();
-  const filename = `${handId}.png`;
-  const fullPath = path.join(UPLOAD_DIR, filename);
   const svg = buildSvgSnapshot({
     handId,
     tableId: String(tableId),
@@ -72,9 +64,13 @@ async function generateHandScreenshot({
     seats: meta.seats,
   });
 
-  const img = sharp(Buffer.from(svg));
-  const info = await img.png().toFile(fullPath);
-  const publicUrl = `/uploads/hand-screenshots/${filename}`;
+  const buffer = await sharp(Buffer.from(svg)).png().toBuffer();
+  const storageKey = `hand-screenshots/${handId}.png`;
+  const uploaded = await uploadWithRetry({
+    key: storageKey,
+    buffer,
+    contentType: "image/png",
+  });
 
   const doc = await HandScreenshot.findOneAndUpdate(
     { handId },
@@ -83,12 +79,13 @@ async function generateHandScreenshot({
         handHistory: handHistoryId,
         table: tableId,
         gameType,
-        storageProvider: "local",
-        storageKey: filename,
-        publicUrl,
-        width: info.width,
-        height: info.height,
-        snapshotMeta: meta,
+        storageProvider: uploaded.provider,
+        storageKey: uploaded.key,
+        publicUrl: uploaded.publicUrl,
+        checksum: uploaded.checksum,
+        width: 900,
+        height: meta.seats?.length ? 260 + meta.seats.length * 28 + 40 : 500,
+        snapshotMeta: { ...meta, checksum: uploaded.checksum },
         auditHash: auditHash || null,
       },
     },

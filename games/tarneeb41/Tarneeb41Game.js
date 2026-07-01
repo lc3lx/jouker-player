@@ -1,6 +1,6 @@
 /**
  * Tarneeb Syrian 41 — table-based game (Mongo seats + bots).
- * Play order between tricks: counter-clockwise (index + 3) % 4.
+ * Play order between tricks: clockwise (index + 1) % 4.
  */
 const BaseGameEngine = require("../../engine/BaseGameEngine");
 const crypto = require("crypto");
@@ -120,6 +120,11 @@ class Tarneeb41Game extends BaseGameEngine {
     } catch (_) {
       // ignore listener errors
     }
+  }
+
+  /** Next seat in play/bidding order (clockwise). */
+  nextSeat(i) {
+    return (i + 1) % 4;
   }
 
   nextSeatCCW(i) {
@@ -561,10 +566,10 @@ class Tarneeb41Game extends BaseGameEngine {
   }
 
   findNextUndeclared(from) {
-    let c = this.nextSeatCCW(from);
+    let c = this.nextSeat(from);
     for (let n = 0; n < 4; n += 1) {
       if (this.declaredBids[c] === null) return c;
-      c = this.nextSeatCCW(c);
+      c = this.nextSeat(c);
     }
     return from;
   }
@@ -624,7 +629,7 @@ class Tarneeb41Game extends BaseGameEngine {
       if (this.trick.length === 1) this.ledSuit = c.suit;
 
       if (this.trick.length < 4) {
-        this.currentPlayerIndex = this.nextSeatCCW(this.currentPlayerIndex);
+        this.currentPlayerIndex = this.nextSeat(this.currentPlayerIndex);
         this.startTurnTimer();
         return { success: true };
       }

@@ -6,6 +6,8 @@ const {
   createTournament,
   registerTournament,
   getLeaderboard,
+  getLobby,
+  getStatistics,
 } = require("../services/tournamentService");
 const {
   createTournamentValidator,
@@ -17,6 +19,10 @@ const {
 const router = express.Router();
 
 router.get("/", listTournamentsValidator, listTournaments);
+
+router.get("/lobby", getLobby);
+
+router.get("/:id/statistics", getTournamentValidator, getStatistics);
 
 router.get("/:id", getTournamentValidator, getTournament);
 

@@ -15,6 +15,12 @@ function periodStart(period) {
   if (period === "monthly") {
     return new Date(now.getFullYear(), now.getMonth(), 1);
   }
+  if (period === "yearly") {
+    return new Date(now.getFullYear(), 0, 1);
+  }
+  if (period === "all_time" || period === "all") {
+    return null;
+  }
   return null;
 }
 
