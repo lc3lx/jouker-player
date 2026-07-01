@@ -40,6 +40,7 @@ class Tarneeb41Game extends BaseGameEngine {
     this.tricksThisRound = [0, 0, 0, 0];
     this.playerScores = [0, 0, 0, 0];
     this.trick = [];
+    this.lastTrick = [];
     this.ledSuit = null;
     this.currentPlayerIndex = 0;
     this.trickLeader = 0;
@@ -61,6 +62,7 @@ class Tarneeb41Game extends BaseGameEngine {
     this.trickResolveTimer = null;
     this.trickResolveEndsAt = null;
     this._lastSettlementPayload = null;
+    this._lastSettlementFailure = null;
     this._settlementTriggered = false;
     this._fsm = new StateMachine(this.state, T41_TRANSITIONS, {
       onIllegal: (from, to) => {
@@ -148,20 +150,45 @@ class Tarneeb41Game extends BaseGameEngine {
 
   /** Restore a human who was replaced by a vacate-bot at the same Mongo seat index. */
   restoreHumanAtSeat(seatIndex, userId, socketId, displayName) {
-    const p = this.players.find(
-      (x) => x.seatIndex === seatIndex && x.isBot
-    );
-    if (!p) return false;
+    return this.replaceBotWithHuman(seatIndex, userId, socketId, displayName, {
+      allowTakeover: false,
+    });
+  }
+
+  /**
+   * Replace a bot at [seatIndex] with a human.
+   * @param {object} [opts]
+   * @param {number} [opts.chips]
+   * @param {boolean} [opts.allowTakeover] — false: only vacatedFromUserId may return
+   */
+  replaceBotWithHuman(seatIndex, userId, socketId, displayName, opts = {}) {
+    const p = this.players.find((x) => x.seatIndex === seatIndex);
+    if (!p || !p.isBot) return false;
+
     const uid = String(userId);
-    if (p.vacatedFromUserId && String(p.vacatedFromUserId) !== uid) {
+    const allowTakeover = !!opts.allowTakeover;
+    if (
+      !allowTakeover &&
+      p.vacatedFromUserId &&
+      String(p.vacatedFromUserId) !== uid
+    ) {
       return false;
     }
+
     p.isBot = false;
     p.userId = userId;
-    p.socketId = socketId;
-    p.displayName = displayName || p.displayName;
+    p.socketId = socketId || null;
+    p.displayName = displayName || p.displayName || `لاعب ${seatIndex + 1}`;
+    if (opts.chips != null) p.chips = opts.chips;
     p.reconnectDeadline = null;
     delete p.vacatedFromUserId;
+
+    if (
+      (this.state === "bidding_syrian" || this.state === "playing") &&
+      this.currentPlayerIndex === seatIndex
+    ) {
+      this.startTurnTimer();
+    }
     return true;
   }
 
@@ -342,6 +369,7 @@ class Tarneeb41Game extends BaseGameEngine {
     this.declaredBids = [null, null, null, null];
     this.tricksThisRound = [0, 0, 0, 0];
     this.trick = [];
+    this.lastTrick = [];
     this.ledSuit = null;
     this.state = "bidding_syrian";
     this._fsm.transition(T41_STATE.BIDDING_SYRIAN);
@@ -533,10 +561,10 @@ class Tarneeb41Game extends BaseGameEngine {
   }
 
   findNextUndeclared(from) {
-    let c = this.nextSeatCW(from);
+    let c = this.nextSeatCCW(from);
     for (let n = 0; n < 4; n += 1) {
       if (this.declaredBids[c] === null) return c;
-      c = this.nextSeatCW(c);
+      c = this.nextSeatCCW(c);
     }
     return from;
   }
@@ -644,6 +672,10 @@ class Tarneeb41Game extends BaseGameEngine {
   _finalizePendingTrick() {
     if (!this.trickResolving || this.pendingTrickWinner == null) return null;
     const winnerIndex = this.pendingTrickWinner;
+    this.lastTrick = this.trick.map((t) => ({
+      playerIndex: t.playerIndex,
+      card: { rank: t.card.rank, suit: t.card.suit },
+    }));
     this.clearTrickResolveTimer();
     this.tricksThisRound[winnerIndex] += 1;
     this.trickLeader = winnerIndex;
@@ -751,7 +783,14 @@ class Tarneeb41Game extends BaseGameEngine {
       displayName: p.displayName || (p.isBot ? "بوت" : `لاعب ${idx + 1}`),
       isBot: !!p.isBot,
       chips: p.chips || 0,
+      reconnectDeadline:
+        !p.isBot && p.reconnectDeadline && p.reconnectDeadline > Date.now()
+          ? p.reconnectDeadline
+          : null,
+      vacatedFromUserId: p.vacatedFromUserId || null,
     }));
+
+    const gameResult = this.state === "game_end" ? this.getGameResult() : null;
 
     return {
       state: this.state,
@@ -759,6 +798,10 @@ class Tarneeb41Game extends BaseGameEngine {
       hands,
       handSizes,
       trick: this.trick.map((t) => ({
+        playerIndex: t.playerIndex,
+        card: this._cardToApi(t.card),
+      })),
+      lastTrick: (this.lastTrick || []).map((t) => ({
         playerIndex: t.playerIndex,
         card: this._cardToApi(t.card),
       })),
@@ -784,6 +827,12 @@ class Tarneeb41Game extends BaseGameEngine {
             remainingSeconds: this._remainingTurnSeconds(),
           }
         : null,
+      ...(gameResult
+        ? {
+            winnerTeam: gameResult.winnerTeam,
+            gameResult,
+          }
+        : {}),
     };
   }
 }

@@ -85,12 +85,16 @@ test("countdown completion deals and enters bidding", () => {
   }
 });
 
-test("win condition requires team >= 41 and opponent team > 0", () => {
+test("win condition: partner must be > 0 when one seat reaches 41", () => {
   assert.equal(rules.checkGameEnd([41, 10, 5, 8]).ended, true);
   assert.equal(rules.checkGameEnd([41, 0, 0, 0]).ended, false);
+  assert.equal(rules.checkGameEnd([41, 0, 0, 10]).ended, false);
+  assert.equal(rules.checkGameEnd([41, 0, 1, 10]).ended, true);
   assert.equal(rules.checkGameEnd([40, 10, 5, 8]).ended, false);
   assert.equal(rules.checkGameEnd([10, 41, 8, 5]).ended, true);
   assert.equal(rules.checkGameEnd([0, 41, 0, 0]).ended, false);
+  assert.equal(rules.checkGameEnd([5, 41, 0, 3]).ended, true);
+  assert.equal(rules.checkGameEnd([25, 10, 41, 8]).ended, true);
 });
 
 test("last trick stays visible until finalize", () => {
@@ -160,4 +164,35 @@ test("reconnect during countdown preserves countdown state", () => {
 
 test("findAvailableTarneeb41Table is exported", () => {
   assert.equal(typeof findAvailableTarneeb41Table, "function");
+});
+
+test("opposite color trump from revealed card", () => {
+  assert.equal(rules.oppositeColorSuit("clubs"), "spades");
+  assert.equal(rules.oppositeColorSuit("spades"), "clubs");
+  assert.equal(rules.oppositeColorSuit("hearts"), "diamonds");
+  assert.equal(rules.oppositeColorSuit("diamonds"), "hearts");
+});
+
+test("applyRoundScores matches Syrian 41 per-player scoring", () => {
+  const scores = [0, 0, 0, 0];
+  rules.applyRoundScores([5, 3, 4, 0], [5, 2, 4, 1], scores);
+  // Seat 1 failed bid: -3 from seat 1, split to opponents seats 2 (+1) and 0 (+2).
+  assert.deepEqual(scores, [7, -3, 5, 0]);
+
+  const scores2 = [10, 10, 10, 10];
+  rules.applyRoundScores([6, 0, 5, 4], [3, 0, 5, 4], scores2);
+  assert.deepEqual(scores2, [4, 13, 15, 17]);
+});
+
+test("bidding advances counter-clockwise", () => {
+  const game = mkFourHumans();
+  try {
+    game.startGame();
+    game.declaredBids = [5, null, null, null];
+    game.currentPlayerIndex = 0;
+    const next = game.findNextUndeclared(0);
+    assert.equal(next, 3);
+  } finally {
+    game.destroy();
+  }
 });

@@ -30,10 +30,16 @@ const {
 } = require("./tableAllocationService");
 const { LOBBY_EXCLUDED_STATUSES } = require("./tableLifecycleService");
 const { seatNextFromQueue, getQueuePosition, getWaitingQueueSize } = require("./pokerWaitingQueueService");
+const waitingQueueService = require("./waitingQueueService");
 const { removeSeatPresence } = require("./pokerCollusionGuard");
 const { markTableActivity, resetPokerTableWhenEmpty } = require("./pokerTableGcService");
 const { syncLivePokerTableAfterLeave, syncLivePokerTableAfterJoin } = require("../sockets/tableGame");
 const { vacatePokerSeat, tryRestoreVacatedSeat } = require("./pokerVacateService");
+const {
+  tryClaimTarneeb41BotSeat,
+  tryRestoreVacatedTarneeb41Seat,
+  listReplaceableBotSeats,
+} = require("./tarneeb41BotSeatService");
 
 const FIXED_TIER_TABLES = {
   beginner: [10000, 40000, 100000, 150000],
@@ -83,10 +89,13 @@ async function migrateTablesLegacyUniqueIndex() {
   }
 }
 
+const { deriveMinimumBet } = require("../utils/poker/tableBettingConfig");
+
 function deriveBlindsFromBuyIn(buyIn) {
   const bigBlind = Math.max(100, Math.floor(Number(buyIn || 0) / 50));
   const smallBlind = Math.max(50, Math.floor(bigBlind / 2));
-  return { smallBlind, bigBlind };
+  const minimumBet = deriveMinimumBet(buyIn);
+  return { smallBlind, bigBlind, minimumBet, buyIn: Number(buyIn) || 0 };
 }
 
 async function ensureFixedTierTables() {
@@ -101,12 +110,22 @@ async function ensureFixedTierTables() {
       { $set: { gameType: "poker" } }
     );
 
+    // Phase 2 backfill: assign tableKind for rows that predate this field (idempotent).
+    await Table.updateMany(
+      { tableNumber: { $lte: 4 }, tableKind: { $exists: false } },
+      { $set: { tableKind: "static" } }
+    );
+    await Table.updateMany(
+      { tableNumber: { $gt: 4 }, tableKind: { $exists: false } },
+      { $set: { tableKind: "dynamic" } }
+    );
+
     const ops = [];
 
     for (const [tier, buyIns] of Object.entries(FIXED_TIER_TABLES)) {
       buyIns.forEach((buyIn, index) => {
         const tableNumber = index + 1;
-        const { smallBlind, bigBlind } = deriveBlindsFromBuyIn(buyIn);
+        const { smallBlind, bigBlind, minimumBet, buyIn: buyInVal } = deriveBlindsFromBuyIn(buyIn);
 
         ops.push({
           updateOne: {
@@ -114,8 +133,11 @@ async function ensureFixedTierTables() {
             update: {
               $set: {
                 gameType: "poker",
+                tableKind: "static",
                 smallBlind,
                 bigBlind,
+                buyIn: buyInVal,
+                minimumBet,
                 minBuyIn: buyIn,
                 maxBuyIn: buyIn,
                 capacity: 9,
@@ -139,6 +161,7 @@ async function ensureFixedTierTables() {
             update: {
               $set: {
                 gameType: "trix",
+                tableKind: "static",
                 smallBlind: 0,
                 bigBlind: 0,
                 minBuyIn: buyIn,
@@ -164,6 +187,7 @@ async function ensureFixedTierTables() {
             update: {
               $set: {
                 gameType: "tarneeb41",
+                tableKind: "static",
                 smallBlind: 0,
                 bigBlind: 0,
                 minBuyIn: buyIn,
@@ -454,6 +478,30 @@ exports.joinTable = asyncHandler(async (req, res, next) => {
     }
   }
 
+  // Reconnect anchor: tarneeb41 vacate grace (bot replaced, mongo vacatingPlayers).
+  if (table.gameType === "tarneeb41") {
+    const vacRestore = await tryRestoreVacatedTarneeb41Seat({
+      tableId: id,
+      userId: req.user._id,
+    });
+    if (vacRestore) {
+      void trackJoinLeaveEvent(req.user._id, "join_table");
+      emitTablesUpdated({ gameType: "tarneeb41", reason: "vacate_restore", tableId: id });
+      return res.status(200).json({
+        status: "success",
+        message: "Seat restored — return within vacate window",
+        data: {
+          tableId: String(id),
+          tableNumber: table.tableNumber,
+          reconnect: true,
+          vacateRestore: true,
+          seatIndex: vacRestore.seatIndex,
+          rtcRoom: { roomId: String(id), type: "table" },
+        },
+      });
+    }
+  }
+
   // Reconnect anchor: user already seated at an active table for this tier — skip re-join.
   if (table.gameType === "poker") {
     const vacRestore = await tryRestoreVacatedSeat({
@@ -498,12 +546,61 @@ exports.joinTable = asyncHandler(async (req, res, next) => {
   }
 
   if (table.gameType === "tarneeb41") {
-    if (table.status === "playing" || table.seats.length >= table.capacity) {
-      table = await findAvailableTarneeb41Table(table.tier, buyIn);
-      id = String(table._id);
+    const isFull = table.status === "playing" || table.seats.length >= table.capacity;
+    if (isFull) {
+      const game = roomManager.getTarneeb41GameForTable(id);
+      const botSeats = game ? listReplaceableBotSeats(game) : [];
+      if (botSeats.length > 0) {
+        // Keep this table — bot seat claim runs after wallet check.
+      } else if (table.tableKind === "static") {
+        // Static card game table full → queue the player
+        const player = await Player.getOrCreateByUser(req.user._id);
+        try {
+          const position = await waitingQueueService.enqueue({
+            userId: req.user._id,
+            playerId: player._id,
+            tableId: id,
+            gameType: "tarneeb41",
+            buyIn,
+          });
+          return res.status(200).json({
+            status: "success",
+            message: "Added to waiting queue",
+            data: { tableId: id, tableNumber: table.tableNumber, queued: true, queuePosition: position },
+          });
+        } catch (e) {
+          if (e.message === "ALREADY_QUEUED") throw new ApiError("You are already in the waiting queue", 400);
+          throw e;
+        }
+      } else {
+        table = await findAvailableTarneeb41Table(table.tier, buyIn);
+        id = String(table._id);
+      }
     }
   } else if (table.gameType === "trix") {
-    if (table.status === "playing" || table.seats.length >= table.capacity) {
+    const isFull = table.status === "playing" || table.seats.length >= table.capacity;
+    if (isFull) {
+      if (table.tableKind === "static") {
+        // Static card game table full → queue the player
+        const player = await Player.getOrCreateByUser(req.user._id);
+        try {
+          const position = await waitingQueueService.enqueue({
+            userId: req.user._id,
+            playerId: player._id,
+            tableId: id,
+            gameType: "trix",
+            buyIn,
+          });
+          return res.status(200).json({
+            status: "success",
+            message: "Added to waiting queue",
+            data: { tableId: id, tableNumber: table.tableNumber, queued: true, queuePosition: position },
+          });
+        } catch (e) {
+          if (e.message === "ALREADY_QUEUED") throw new ApiError("You are already in the waiting queue", 400);
+          throw e;
+        }
+      }
       table = await findAvailableTrixTable(table.tier, buyIn);
       id = String(table._id);
     }
@@ -575,17 +672,48 @@ exports.joinTable = asyncHandler(async (req, res, next) => {
 
   // Atomic: lock funds + seat user (Tarneeb41 uses retry allocation)
   let joinedTableId = id;
-  let joinMeta = { queued: false, queuePosition: 0, midHandJoin: false };
+  let joinMeta = { queued: false, queuePosition: 0, midHandJoin: false, botSeatClaim: false };
   try {
     if (table.gameType === "tarneeb41") {
-      joinedTableId = await joinFixedCapacityWithRetry({
-        gameType: "tarneeb41",
-        userId: req.user._id,
-        playerId: player._id,
-        buyIn,
-        initialTableId: id,
-        tier: table.tier,
-      });
+      const game = roomManager.getTarneeb41GameForTable(id);
+      const botSeats = game ? listReplaceableBotSeats(game) : [];
+      const isFull = table.status === "playing" || table.seats.length >= table.capacity;
+      const reqSeatRaw = req.body.seatIndex;
+      const reqSeat =
+        reqSeatRaw != null && Number.isFinite(Number(reqSeatRaw))
+          ? Number(reqSeatRaw)
+          : null;
+
+      if (isFull && botSeats.length > 0) {
+        const claim = await tryClaimTarneeb41BotSeat({
+          tableId: id,
+          userId: req.user._id,
+          playerId: player._id,
+          buyIn,
+          seatIndex: reqSeat,
+        });
+        if (!claim.claimed) {
+          if (claim.reason === "INVALID_BUYIN") {
+            throw new Error("INVALID_BUYIN");
+          }
+          throw new ApiError("Could not claim bot seat on this table", 400);
+        }
+        joinedTableId = id;
+        joinMeta = {
+          midHandJoin: !!claim.midHandJoin,
+          botSeatClaim: true,
+          seatIndex: claim.seatIndex,
+        };
+      } else {
+        joinedTableId = await joinFixedCapacityWithRetry({
+          gameType: "tarneeb41",
+          userId: req.user._id,
+          playerId: player._id,
+          buyIn,
+          initialTableId: id,
+          tier: table.tier,
+        });
+      }
     } else if (table.gameType === "trix") {
       joinedTableId = await joinFixedCapacityWithRetry({
         gameType: "trix",
@@ -673,7 +801,7 @@ exports.joinTable = asyncHandler(async (req, res, next) => {
     }
   }
 
-  if (table.gameType === "tarneeb41") {
+  if (table.gameType === "tarneeb41" && !joinMeta.botSeatClaim) {
     void refreshTarneeb41GameSeats(joinedTableId);
   }
 
@@ -707,6 +835,8 @@ exports.joinTable = asyncHandler(async (req, res, next) => {
       tableNumber: joinedTable?.tableNumber ?? table.tableNumber,
       chips: buyIn,
       midHandJoin: joinMeta.midHandJoin,
+      botSeatClaim: joinMeta.botSeatClaim || false,
+      seatIndex: joinMeta.seatIndex ?? null,
       rtcRoom: { roomId: joinedTableId, type: "table" },
     },
   });
@@ -855,6 +985,26 @@ exports.leaveTable = asyncHandler(async (req, res, next) => {
 
   if (table.gameType === "tarneeb41") {
     void refreshTarneeb41GameSeats(String(id));
+  }
+
+  // Notify next queued player (card games only; poker queue handled inside the transaction).
+  if (table.gameType === "trix" || table.gameType === "tarneeb41") {
+    void (async () => {
+      try {
+        const dequeued = await waitingQueueService.dequeueNext(String(id), table.gameType);
+        if (dequeued) {
+          const sock =
+            table.gameType === "trix"
+              ? roomManager.getTrixUserSocket(dequeued.userId)
+              : roomManager.getTarneeb41UserSocket(dequeued.userId);
+          if (sock) {
+            sock.emit("queue_seat_available", { tableId: String(id), position: 0 });
+          }
+        }
+      } catch (_) {
+        // non-fatal — player will timeout and re-poll
+      }
+    })();
   }
 
   res.status(200).json({

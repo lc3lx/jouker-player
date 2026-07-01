@@ -36,7 +36,7 @@ async function countQueue(tableId) {
 async function resetPokerTableWhenEmpty(tableId) {
   const tid = String(tableId);
   const table = await Table.findById(tid).select(
-    "gameType seats tableNumber tier minBuyIn status waitingQueue vacatingPlayers"
+    "gameType seats tableNumber tableKind tier minBuyIn status waitingQueue vacatingPlayers"
   );
   if (!table || table.gameType !== "poker") return { reset: false, reason: "not_poker" };
   if (table.seats.length > 0) return { reset: false, reason: "not_empty" };
@@ -69,7 +69,7 @@ async function resetPokerTableWhenEmpty(tableId) {
 
   emptySince.delete(tid);
 
-  if (qLen === 0 && table.tableNumber > 4) {
+  if (qLen === 0 && table.tableKind === "dynamic") {
     await destroyEmptyTable(tid);
     return { reset: true, destroyed: true };
   }
@@ -92,7 +92,7 @@ async function destroyEmptyTable(tableId) {
   }
 
   const table = await Table.findById(tid).select(
-    "gameType seats tableNumber tier minBuyIn status tableNumber"
+    "gameType seats tableNumber tableKind tier minBuyIn status"
   );
   if (!table || table.gameType !== "poker") return false;
   if (table.seats.length > 0) {
@@ -106,7 +106,8 @@ async function destroyEmptyTable(tableId) {
     return false;
   }
 
-  if (table.tableNumber <= 4) {
+  if (table.tableKind !== "dynamic") {
+    // Static/VIP tables are permanent — reset to waiting, never delete.
     table.status = "waiting";
     await table.save();
     markTableActivity(tid);

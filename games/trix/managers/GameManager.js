@@ -70,6 +70,7 @@ class GameManager {
         gameState.leadingSuit = card.suit;
       }
       gameState.tableCards.push({ playerIndex, card });
+      gameState.roundPlayedCards.push({ rank: card.rank, suit: card.suit });
     }
 
     return { success: true };

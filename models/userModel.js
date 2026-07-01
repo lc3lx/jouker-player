@@ -94,6 +94,11 @@ const userSchema = new mongoose.Schema(
     /** Fraud / trust — payments & high-risk actions blocked when true. */
     trustRestricted: { type: Boolean, default: false },
     suspiciousFlag: { type: Boolean, default: false },
+    /** Phase 2: time-limited VIP subscription. */
+    vip: {
+      active:    { type: Boolean, default: false },
+      expiresAt: { type: Date },
+    },
   },
   { timestamps: true }
 );

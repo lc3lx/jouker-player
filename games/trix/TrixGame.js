@@ -365,12 +365,31 @@ class TrixGame extends BaseGameEngine {
     return true;
   }
 
+  _assignKingBySevenOfHearts() {
+    if (!this.gameState) return;
+    for (let i = 0; i < this.gameState.players.length; i++) {
+      const hasSeven = this.gameState.players[i].hand.some(
+        (c) => c.suit === 'Hearts' && c.rank === '7'
+      );
+      if (hasSeven) {
+        this.gameState.currentKingIndex = i;
+        return;
+      }
+    }
+  }
+
   startRound() {
     this.state = 'selecting_game';
     this._fsm.transition(TRIX_STATE.SELECTING_GAME);
     this.selectingStartedAt = Date.now();
     this.roundEndAt = 0;
     this.gameState.deck.dealCardsToPlayers(this.gameState.players);
+    const isFirstDeal =
+      this.gameState.roundNumber === 0 &&
+      this.gameState.gamesPlayedByKing.every((row) => row.length === 0);
+    if (isFirstDeal) {
+      this._assignKingBySevenOfHearts();
+    }
     this._restartTurnTimer();
   }
 
@@ -499,6 +518,16 @@ class TrixGame extends BaseGameEngine {
       gamesPlayedByKing: this.gameState.gamesPlayedByKing.map((row) => [...row]),
       trixTable: JSON.parse(JSON.stringify(this.gameState.trixTable)),
       finishedPlayers: [...this.gameState.finishedPlayers],
+      roundPlayedCards: (this.gameState.roundPlayedCards || []).map((c) => ({
+        rank: c.rank,
+        suit: c.suit,
+      })),
+      tricksTakenThisRound:
+        forPlayerIndex >= 0 && forPlayerIndex < this.gameState.players.length
+          ? Math.floor(
+              this.gameState.players[forPlayerIndex].takenCards.length / 4
+            )
+          : 0,
       validCards:
         this.state === 'playing' &&
         forPlayerIndex === this.gameState.turnPlayerIndex

@@ -16,6 +16,7 @@ class RoundManager {
     
     gameState.tableCards = [];
     gameState.lastTrick = [];
+    gameState.roundPlayedCards = [];
     gameState.leadingSuit = null;
     gameState.finishedPlayers = [];
     gameState.trixTable = {

@@ -38,6 +38,7 @@ const {
 } = require("../utils/poker/playerState");
 const { verifyHandChipConservation } = require("../utils/poker/chipConservation");
 const { auditOrFreeze } = require("../utils/poker/chipAuditor");
+const { deriveMinimumBet } = require("../utils/poker/tableBettingConfig");
 const { buildHandAuditLog } = require("../services/handHistoryAuditService");
 
 function getTokenFromHandshake(socket) {
@@ -328,6 +329,8 @@ class PokerTable {
     this.bigBlind = toSafeInt(table.bigBlind, 0);
     this.minBuyIn = toSafeInt(table.minBuyIn, this.bigBlind * 100);
     this.maxBuyIn = toSafeInt(table.maxBuyIn, this.minBuyIn);
+    this.buyIn = toSafeInt(table.buyIn ?? table.minBuyIn, this.minBuyIn);
+    this.minimumBet = deriveMinimumBet(this.buyIn, table.minimumBet);
     this.capacity = normalizeCapacity(toSafeInt(table.capacity, 9));
     this.dealerIndex = 0;
     this.running = false;
@@ -383,8 +386,7 @@ class PokerTable {
     this.clientSeedDigest = null;
     this.sbSeatIndex = -1;
     this.bbSeatIndex = -1;
-
-    // Backward compatibility: allow passing lockManager directly.
+    this.handStartedAt = null;
     const lockArg = options && typeof options.acquire === "function"
       ? options
       : options?.lockManager;
@@ -531,6 +533,8 @@ class PokerTable {
       turnSeconds: this.turnSeconds,
       smallBlind: this.smallBlind,
       bigBlind: this.bigBlind,
+      buyIn: this.buyIn,
+      minimumBet: this.minimumBet,
       sbSeatIndex: this.sbSeatIndex,
       bbSeatIndex: this.bbSeatIndex,
       community: [...this.community],
@@ -589,6 +593,8 @@ class PokerTable {
     this.turnSeconds = toSafeInt(snapshot.turnSeconds, this.turnSeconds);
     this.smallBlind = toSafeInt(snapshot.smallBlind, this.smallBlind);
     this.bigBlind = toSafeInt(snapshot.bigBlind, this.bigBlind);
+    this.buyIn = toSafeInt(snapshot.buyIn, this.buyIn || this.minBuyIn);
+    this.minimumBet = toSafeInt(snapshot.minimumBet, deriveMinimumBet(this.buyIn));
     this.sbSeatIndex = toSafeInt(snapshot.sbSeatIndex, -1);
     this.bbSeatIndex = toSafeInt(snapshot.bbSeatIndex, -1);
     this.community = Array.isArray(snapshot.community) ? [...snapshot.community] : [];
@@ -888,6 +894,8 @@ class PokerTable {
     this.capacity = normalizeCapacity(toSafeInt(table.capacity, this.capacity || POKER_CAPACITY));
     this.minBuyIn = toSafeInt(table.minBuyIn, this.minBuyIn || this.bigBlind * 100);
     this.maxBuyIn = toSafeInt(table.maxBuyIn, this.maxBuyIn || this.minBuyIn);
+    this.buyIn = toSafeInt(table.buyIn ?? table.minBuyIn, this.buyIn || this.minBuyIn);
+    this.minimumBet = deriveMinimumBet(this.buyIn, table.minimumBet ?? this.minimumBet);
     this.botFillTarget = clampInt(this.botFillTarget || 2, 2, Math.max(2, this.capacity));
 
     const isHandRunning = this.running && this.round && String(this.round) !== "idle";
@@ -1562,12 +1570,32 @@ class PokerTable {
   }
 
   everyoneSettled() {
-    // Everyone either folded or matched currentBet or all-in
+    // Everyone matched currentBet AND completed a voluntary action this street (BB option).
     return this.seats.every((s) => {
       if (!s.inHand || s.folded) return true;
       if (s.allIn) return true;
-      return s.bet === this.currentBet;
+      if (s.bet !== this.currentBet) return false;
+      return s.actedThisStreet === true;
     });
+  }
+
+  /**
+   * Minimum extra raise for seat respecting poker rules + table minimum bet.
+   */
+  computeMinRaiseExtra(seatIndex) {
+    const seat = this.seats[seatIndex];
+    const tableMin = Math.max(1, toSafeInt(this.minimumBet, Math.floor(this.buyIn / 10) || this.bigBlind));
+    const pokerMin = toSafeInt(this.lastRaiseAmount, this.bigBlind);
+    const callAmount = seat
+      ? Math.max(0, this.currentBet - seat.bet)
+      : 0;
+
+    let minExtra = Math.max(pokerMin, tableMin);
+    if (callAmount === 0 && seat) {
+      const minTotal = Math.max(tableMin, this.bigBlind);
+      minExtra = Math.max(minExtra, minTotal - toSafeInt(seat.bet, 0));
+    }
+    return minExtra;
   }
 
   aliveCount() {
@@ -1586,11 +1614,15 @@ class PokerTable {
     const canCheck = callAmount === 0;
     const isAllInOnly = callAmount > 0 && seat.chips < callAmount;
 
-    // Real-poker rule: minimum next raise equals last full raise amount.
-    const minRaise = toSafeInt(this.lastRaiseAmount, this.bigBlind);
+    const minRaise = this.computeMinRaiseExtra(seatIndex);
     const maxRaise = Math.max(0, seat.chips - callAmount); // extra above call
 
-    const allowed = ["fold", "call"];
+    const allowed = ["fold"];
+    if (canCheck) {
+      allowed.push("check");
+    } else {
+      allowed.push("call");
+    }
 
     // Remove raise if it can't satisfy the minimum extra raise.
     if (maxRaise < minRaise || maxRaise <= 0) {
@@ -1631,6 +1663,7 @@ class PokerTable {
     this.minRaise = this.bigBlind;
     this.lastRaiseAmount = this.bigBlind;
     this.currentHandId = `${this.tableId}-${Date.now()}-${this.handCounter + 1}`;
+    this.handStartedAt = Date.now();
     this.currentHandActions = [];
     this.processedActionIds = new Set();
     this.shortAllInNoReopen = false;
@@ -1716,13 +1749,13 @@ class PokerTable {
     // Burn+flop/turn/river deferred until rounds advance
     this.deck = deck;
 
-    // Jackpot contribution per hand (Golden Island)
-    await this.applyJackpotContribution();
+    // Jackpot contribution per hand (Golden Island) — skipped when fee is 0.
+    const jackpotDeducted = await this.applyJackpotContribution();
 
     this.handStartTotal = this.seats.reduce(
       (sum, s) => sum + toSafeInt(s.handStartChips, toSafeInt(s.chips, 0)),
       0
-    );
+    ) - toSafeInt(jackpotDeducted, 0);
     const ok = await this.auditChipConservation("post_blinds");
     if (!ok) return;
 
@@ -2377,9 +2410,15 @@ class PokerTable {
 
   async applyJackpotContribution() {
     try {
+      const enabled = String(process.env.JACKPOT_ENABLED || "").toLowerCase() === "true";
+      if (!enabled) return 0;
+
       const j = await Jackpot.getSingleton();
-      const fee = Math.max(0, Number(process.env.JACKPOT_FEE_PER_HAND || j.contributionPerHand || 0));
-      if (fee <= 0) return;
+      const envFee = process.env.JACKPOT_FEE_PER_HAND;
+      const fee = envFee != null && String(envFee).trim() !== ""
+        ? Math.max(0, Number(envFee))
+        : Math.max(0, Number(j.contributionPerHand || 0));
+      if (fee <= 0) return 0;
       let total = 0;
       for (const s of this.seats) {
         if (!s.isBot && s.inHand && s.chips > 0) {
@@ -2393,8 +2432,23 @@ class PokerTable {
         j.pot += total;
         await j.save();
       }
+      return total;
     } catch (e) {
-      // ignore jackpot errors to not block gameplay
+      return 0;
+    }
+  }
+
+  /** Zero pot/street bets after hand settlement — prevents double-count in idle UI. */
+  resetHandBettingState() {
+    this.pot = 0;
+    this.currentBet = 0;
+    this.minRaise = this.bigBlind;
+    this.lastRaiseAmount = this.bigBlind;
+    this.shortAllInNoReopen = false;
+    for (const s of this.seats) {
+      s.bet = 0;
+      s.invested = 0;
+      s.actedThisStreet = false;
     }
   }
 
@@ -2450,6 +2504,8 @@ class PokerTable {
         winners.push({ user: this.seats[idx].userId, share });
       }
     }
+
+    this.resetHandBettingState();
 
     const winnerSummaries = [];
     for (const [idx, share] of payouts.entries()) {
@@ -2541,14 +2597,20 @@ class PokerTable {
 
     // Atomic financial + history settlement
     const auditLog = buildHandAuditLog(this.currentHandActions, this.seats, community);
+    let settledHandHistoryId = null;
     try {
       const session = await mongoose.startSession();
       await session.withTransaction(async () => {
-        await HandHistory.create(
+        const [handDoc] = await HandHistory.create(
           [
             {
               handId: this.currentHandId,
               table: this.tableId,
+              gameType: "poker",
+              dealerSeatIndex: this.dealerIndex,
+              smallBlind: this.smallBlind,
+              bigBlind: this.bigBlind,
+              startedAt: this.handStartedAt ? new Date(this.handStartedAt) : new Date(),
               players: this.seats
                 .filter((s) => !s.isBot)
                 .map((s) => ({
@@ -2590,6 +2652,7 @@ class PokerTable {
           ],
           { session }
         );
+        settledHandHistoryId = handDoc?._id || null;
 
         // Persist seat chips and write ledger entries for each human player delta.
         const table = await Table.findById(this.tableId).session(session);
@@ -2692,6 +2755,36 @@ class PokerTable {
           reason: statErr?.message || "unknown",
         });
       }
+
+      if (settledHandHistoryId) {
+        void require("../services/phase3HandArchiveService")
+          .onHandSettled({
+            handId: this.currentHandId,
+            handHistoryId: settledHandHistoryId,
+            tableId: this.tableId,
+            gameType: "poker",
+            dealerSeatIndex: this.dealerIndex,
+            smallBlind: this.smallBlind,
+            bigBlind: this.bigBlind,
+            startedAt: this.handStartedAt,
+            endedAt: Date.now(),
+            community,
+            pot: this.lastHand?.pot ?? 0,
+            rake,
+            winners: winnerSummaries,
+            handCategory: handCategory || null,
+            seats: seatSummaries,
+            actions: this.lastHand?.actions || [...this.currentHandActions],
+            auditLog,
+          })
+          .catch((archiveErr) => {
+            logger.warn("phase3_hand_archive_failed", {
+              tableId: this.tableId,
+              handId: this.currentHandId,
+              reason: archiveErr?.message || "unknown",
+            });
+          });
+      }
     } catch (e) {
       // financial settlement is critical: log and keep table state for retry/manual recovery
       this.logSuspicious("financial_settlement_failed", {
@@ -2752,6 +2845,8 @@ class PokerTable {
       lastRaiseAmount: this.lastRaiseAmount,
       smallBlind: this.smallBlind,
       bigBlind: this.bigBlind,
+      buyIn: this.buyIn,
+      minimumBet: this.minimumBet,
       sbSeatIndex: this.sbSeatIndex,
       bbSeatIndex: this.bbSeatIndex,
       dealerSeatIndex: this.dealerIndex,
@@ -2806,17 +2901,33 @@ class PokerTable {
 
     const room = `tg:${this.tableId}`;
     const pub = this.getPublicState(null);
-    this.nsp.to(room).emit("table_state", pub);
-    this.nsp.to(room).emit("state", pub);
+    const spectatorDelay = require("../services/spectatorDelayService");
+    spectatorDelay.enqueueSpectatorState(this.tableId, pub);
+
     try {
       const sockets = await this.nsp.in(room).fetchSockets();
       for (const sock of sockets) {
         const uid = sock.userId;
         if (!uid) continue;
+        const isSeated = this.seats.some((s) => String(s.userId) === String(uid));
+        const isSpectator = this.spectatorUserIds.has(String(uid));
         const me = this.getPublicState(uid);
-        sock.emit("table_state_me", me);
-        sock.emit("reconnect_state", me);
-        sock.emit("state:me", me);
+        if (isSeated) {
+          sock.emit("table_state", pub);
+          sock.emit("state", pub);
+          sock.emit("table_state_me", me);
+          sock.emit("state:me", me);
+          void require("../services/presenceService")
+            .markPlaying(uid, { gameType: "poker", tableId: this.tableId })
+            .catch(() => {});
+        } else if (isSpectator) {
+          const delayed = spectatorDelay.getLatestDelayedState(this.tableId) || pub;
+          sock.emit("table_state", delayed);
+          sock.emit("state", delayed);
+          void require("../services/presenceService")
+            .markWatching(uid, { gameType: "poker", tableId: this.tableId })
+            .catch(() => {});
+        }
       }
     } catch (e) {
       metrics.errorsTotal.inc({ type: "broadcast_state_failed" });
@@ -2972,6 +3083,18 @@ class PokerTable {
           });
           return { status: "rejected", reason: "INVALID_ACTION" };
         }
+        const actorSeat = this.seats[idx];
+        const totalAfter = toSafeInt(actorSeat.bet, 0) + spec.callAmount + v;
+        const tableMin = Math.max(1, toSafeInt(this.minimumBet, this.bigBlind));
+        const isAllInRaise = actorSeat.chips <= spec.callAmount + v;
+        if (!isAllInRaise && totalAfter < tableMin) {
+          this.logSuspicious("raise_below_table_minimum", {
+            userId,
+            totalAfter,
+            tableMin,
+          });
+          return { status: "rejected", reason: "INVALID_ACTION" };
+        }
         raiseExtra = v;
       }
 
@@ -2989,6 +3112,18 @@ class PokerTable {
           type: "fold",
           seatIndex: idx,
           playerId: this.seats[idx]?.userId,
+        });
+      } else if (normalizedAction === "check") {
+        if (spec.callAmount !== 0 || !spec.canCheck) {
+          this.logSuspicious("check_when_not_free", { userId, callAmount: spec.callAmount });
+          return { status: "rejected", reason: "INVALID_ACTION" };
+        }
+        this.recordSeatAction(idx, "check", 0);
+        this.appendHandAction({
+          type: "check",
+          seatIndex: idx,
+          playerId: this.seats[idx]?.userId,
+          amount: 0,
         });
       } else if (normalizedAction === "call") {
         // "call" acts as check when callAmount == 0
@@ -3427,21 +3562,6 @@ async function restoreLiveEngineSeat(tableId, userId, meta = {}) {
   const game = await activeRegistry.get(String(tableId));
   if (!game) return false;
   return game.restoreVacatedHumanSeat(userId, meta);
-}
-
-async function syncLivePokerTableAfterJoin(tableId) {
-  if (!activeRegistry) return;
-  try {
-    const game = await activeRegistry.get(String(tableId));
-    if (!game) return;
-    await game.refreshSeatsFromDb();
-    await game.startIfReady({ refreshFromDb: false });
-  } catch (e) {
-    logger.error("sync_live_poker_after_join_failed", {
-      tableId: String(tableId),
-      reason: e?.message || "unknown",
-    });
-  }
 }
 
 async function syncLivePokerTableAfterJoin(tableId) {

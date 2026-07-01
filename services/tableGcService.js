@@ -38,7 +38,7 @@ const ZOMBIE_POKER_STATUSES = ["playing", "ready", "full"];
 
 const TABLE_IDLE_TIMEOUT_MS = Math.max(
   60_000,
-  parseInt(process.env.TABLE_IDLE_TIMEOUT_MS || "180000", 10)
+  parseInt(process.env.TABLE_IDLE_TIMEOUT_MS || "900000", 10)  // Phase 2: 15 min for dynamic tables
 );
 const TABLE_GC_INTERVAL_MS = Math.max(
   30_000,
@@ -144,7 +144,7 @@ async function refundPokerTableTransactional(tableDoc, reason) {
     tableTx.vacatingPlayers = [];
     tableTx.waitingQueue = [];
     tableTx.activeSettlementId = null;
-    tableTx.status = tableTx.tableNumber <= 4 ? "waiting" : "closed";
+    tableTx.status = tableTx.tableKind === "dynamic" ? "closed" : "waiting";
     await tableTx.save({ session });
   }).catch((err) => {
     logger.error("poker_boot_refund_failed", {
@@ -230,10 +230,11 @@ async function sanitizeCardTableOnBoot(table) {
 
   clearCardMemory(gameType, tableId);
 
-  if (table.tableNumber > 4) {
-    await archiveTableDocument(tableId, { reason: "server_reboot" });
-    emitTablesUpdated({ gameType, reason: "table_archived", tableId });
-    return { tableId, action: "archived", refunded, seatCount };
+  if (table.tableKind === "dynamic") {
+    // Dynamic tables are ephemeral — delete from Mongo on boot cleanup.
+    await Table.deleteOne({ _id: tableId });
+    emitTablesUpdated({ gameType, reason: "table_removed", tableId });
+    return { tableId, action: "deleted", refunded, seatCount };
   }
 
   await reopenFixedCardTable(tableId);
@@ -380,6 +381,13 @@ async function forceCloseIdleCardTable(gameType, tableId) {
     return { closed: false, reason: "already_finished" };
   }
 
+  // Phase 2: static tables are permanent — never idle-archive them.
+  const tableDoc = await Table.findById(key).select("tableKind");
+  if (tableDoc?.tableKind === "static") {
+    cardIdleSince.delete(key);
+    return { closed: false, reason: "static_table_exempt" };
+  }
+
   const humans = Array.isArray(game.players)
     ? game.players.filter((p) => !p.isBot && p.userId)
     : [];
@@ -410,6 +418,13 @@ async function forceCloseIdleCardTable(gameType, tableId) {
 
   const result = await abandonCardTableIfNoHumans(gameNsp, gameType, key);
   cardIdleSince.delete(key);
+
+  // Phase 2: delete dynamic tables from Mongo after abandon (abandon archives first, then we delete).
+  if (result?.abandoned && tableDoc?.tableKind === "dynamic") {
+    void Table.deleteOne({ _id: key }).catch(() => {});
+    emitTablesUpdated({ gameType, reason: "table_removed", tableId: key });
+  }
+
   return { closed: true, ...result };
 }
 

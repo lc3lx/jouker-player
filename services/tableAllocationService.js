@@ -5,6 +5,7 @@ const Table = require("../models/tableModel");
 const { withMongoTransaction, transferToLocked } = require("./walletLedgerService");
 const { emitTablesUpdated } = require("../utils/lobbyRealtime");
 const { LOBBY_EXCLUDED_STATUSES } = require("./tableLifecycleService");
+const tableFactory = require("./tableFactory");
 const {
   findAvailablePokerTable,
   joinPokerWithRetry,
@@ -65,35 +66,16 @@ async function findAvailableFixedCapacityTable({ gameType, tier, buyIn, capacity
       .select("tableNumber")
       .session(session || null);
     const tableNumber = (maxDoc?.tableNumber || 0) + 1 + attempt;
-    const createOpts = session ? { session } : {};
     try {
-      table = await Table.create(
-        [
-          {
-            gameType,
-            tier,
-            tableNumber,
-            smallBlind: 0,
-            bigBlind: 0,
-            minBuyIn: buyIn,
-            maxBuyIn: buyIn,
-            capacity,
-            isPrivate: false,
-            status: "open",
-            seats: [],
-          },
-        ],
-        createOpts
-      );
-      const created = Array.isArray(table) ? table[0] : table;
-      emitTablesUpdated({
+      table = await tableFactory.createDynamicTable({
         gameType,
-        reason: "table_created",
-        tableId: String(created._id),
         tier,
         buyIn,
+        capacity,
+        tableNumber,
+        session,
       });
-      return created;
+      return table;
     } catch (err) {
       if (err && err.code === 11000 && attempt < MAX_JOIN_ATTEMPTS - 1) continue;
       throw err;

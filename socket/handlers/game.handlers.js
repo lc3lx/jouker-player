@@ -23,6 +23,7 @@ const {
 } = require("../../services/cardTableVacateService");
 const logger = require("../../utils/logger");
 const ActionPipeline = require("../../engine/ActionPipeline");
+const spectatorService = require("../../services/spectatorService");
 const DiceEngine = require("../../games/dice/DiceEngine");
 const kingArthRoundState = require("../../games/dice/kingArthRoundState");
 const kingArthSeedRotation = require("../../games/dice/kingArthSeedRotation");
@@ -88,6 +89,11 @@ function broadcastTrixTableState(nsp, mongoTableId) {
     if (!sock) return;
     sock.emit("game_state", game.getGameState(p.seatIndex));
   });
+  // Push public state (no private hands) to spectators.
+  if (spectatorService.getCount(mongoTableId) > 0) {
+    const spectState = game.getGameState(-1);
+    if (spectState) nsp.to(`spec:${mongoTableId}`).emit("game_state", spectState);
+  }
 }
 
 function emitToTrixHumans(nsp, mongoTableId, event, payload) {
@@ -109,6 +115,11 @@ function broadcastTarneeb41TableState(nsp, mongoTableId) {
     if (!sock) return;
     sock.emit("game_state", game.getGameState(p.seatIndex));
   });
+  // Push public state (no private hands) to spectators.
+  if (spectatorService.getCount(mongoTableId) > 0) {
+    const spectState = game.getGameState(-1);
+    if (spectState) nsp.to(`spec:${mongoTableId}`).emit("game_state", spectState);
+  }
 }
 
 function emitToTarneeb41Humans(nsp, mongoTableId, event, payload) {
@@ -316,7 +327,10 @@ async function runGameSettlement(nsp, ctx, gameResult) {
       };
       if (ctx.type === "trix") {
         emitToTrixHumans(nsp, ctx.tableId, "settlement_complete", payload);
-        if (ctx.game) ctx.game._lastSettlementPayload = payload;
+        if (ctx.game) {
+          ctx.game._lastSettlementPayload = payload;
+          ctx.game._lastSettlementFailure = null;
+        }
         roomManager.markTrixSettlementComplete(ctx.tableId);
         roomManager.tryClearTrixGameIfReady(ctx.tableId);
         roomManager.evictExpiredTrixGames();
@@ -327,7 +341,10 @@ async function runGameSettlement(nsp, ctx, gameResult) {
         });
       } else {
         emitToTarneeb41Humans(nsp, ctx.tableId, "settlement_complete", payload);
-        if (ctx.game) ctx.game._lastSettlementPayload = payload;
+        if (ctx.game) {
+          ctx.game._lastSettlementPayload = payload;
+          ctx.game._lastSettlementFailure = null;
+        }
         roomManager.markTarneeb41SettlementComplete(ctx.tableId);
         roomManager.tryClearTarneeb41GameIfReady(ctx.tableId);
         roomManager.evictExpiredTarneeb41Games();
@@ -349,10 +366,20 @@ async function runGameSettlement(nsp, ctx, gameResult) {
       emitToTrixHumans(nsp, ctx.tableId, "settlement_failed", {
         reason: err?.message || "settlement_failed",
       });
+      if (ctx.game) {
+        ctx.game._lastSettlementFailure = {
+          reason: err?.message || "settlement_failed",
+        };
+      }
     } else if (ctx.type === "tarneeb41") {
       emitToTarneeb41Humans(nsp, ctx.tableId, "settlement_failed", {
         reason: err?.message || "settlement_failed",
       });
+      if (ctx.game) {
+        ctx.game._lastSettlementFailure = {
+          reason: err?.message || "settlement_failed",
+        };
+      }
     }
     return null;
   }
@@ -461,6 +488,8 @@ function registerGameHandlers(nsp, jwtVerify) {
           if (gameResult) socket.emit("game_finished", gameResult);
           if (game._lastSettlementPayload) {
             socket.emit("settlement_complete", game._lastSettlementPayload);
+          } else if (game._lastSettlementFailure) {
+            socket.emit("settlement_failed", game._lastSettlementFailure);
           }
         } else if (game.state === "round_end") {
           const roundResult = game.getRoundResult ? game.getRoundResult() : null;
@@ -558,6 +587,8 @@ function registerGameHandlers(nsp, jwtVerify) {
           if (gameResult) socket.emit("game_finished", gameResult);
           if (game._lastSettlementPayload) {
             socket.emit("settlement_complete", game._lastSettlementPayload);
+          } else if (game._lastSettlementFailure) {
+            socket.emit("settlement_failed", game._lastSettlementFailure);
           }
         } else if (game.state === "round_end") {
           const roundResult = game.getRoundResult ? game.getRoundResult() : null;
@@ -1064,7 +1095,53 @@ function registerGameHandlers(nsp, jwtVerify) {
       }
     });
 
+    // ── Spectator handlers ──────────────────────────────────────────────────
+    socket.on("spectate_table", async ({ tableId, gameType } = {}) => {
+      if (!tableId) return;
+      const tid = String(tableId);
+      try {
+        const table = await Table.findById(tid).select("settings gameType tableKind");
+        if (!table) return socket.emit("spectate_error", { reason: "table_not_found" });
+        if (table.settings?.allowSpectators === false) {
+          return socket.emit("spectate_error", { reason: "spectators_disabled" });
+        }
+        spectatorService.add(tid, userId, socket.id);
+        socket.join(`spec:${tid}`);
+
+        const gt = gameType || table.gameType;
+        if (gt === "trix") {
+          const game = roomManager.getTrixGameForTable(tid);
+          if (game?.gameState) {
+            socket.emit("game_state", game.getGameState(-1));
+          }
+        } else if (gt === "tarneeb41") {
+          const game = roomManager.getTarneeb41GameForTable(tid);
+          if (game) {
+            socket.emit("game_state", game.getGameState(-1));
+          }
+        }
+        socket.emit("spectate_joined", { tableId: tid, spectators: spectatorService.getCount(tid) });
+      } catch (err) {
+        logger.error("spectate_table_error", { userId, tableId: tid, reason: err?.message });
+      }
+    });
+
+    socket.on("stop_spectate", ({ tableId } = {}) => {
+      if (!tableId) return;
+      const tid = String(tableId);
+      spectatorService.remove(tid, userId);
+      socket.leave(`spec:${tid}`);
+    });
+
     socket.on("disconnect", () => {
+      // Clean up any spectator subscriptions on disconnect.
+      // spectatorService stores userId → socketId; we use the socket.rooms to find spec: rooms.
+      for (const room of socket.rooms) {
+        if (room.startsWith("spec:")) {
+          const tid = room.slice(5);
+          spectatorService.remove(tid, userId);
+        }
+      }
       void kingArthRoundState.clearLocksForUser(userId);
       const t41 = roomManager.getTarneeb41TableIdForUser(userId);
       if (t41) {

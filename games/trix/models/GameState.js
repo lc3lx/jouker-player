@@ -23,6 +23,7 @@ class GameState {
     this.gamesPlayedByKing = [
       [], [], [], [] // 4 kings, each array stores game types selected
     ];
+    this.roundPlayedCards = []; // public trick cards played this contract
     this.scores = players.map(() => 0);
   }
 

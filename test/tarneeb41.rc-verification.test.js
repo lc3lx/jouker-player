@@ -240,9 +240,60 @@ test("RC-5: reconnect during settlement/game_end restores scores without restart
     assert.equal(seatIndex, 2);
     assert.equal(game.state, "game_end");
     assert.deepEqual(state.playerScores, [41, 10, 5, 8]);
-    assert.ok(state.gameResult || game.getGameResult());
+    assert.equal(state.winnerTeam, 0);
+    assert.ok(state.gameResult);
+    assert.equal(state.gameResult.winnerTeam, 0);
   } finally {
     roomManager.leaveTarneeb41TableSocket("u2");
+    game.destroy();
+  }
+});
+
+test("RC-5b: reconnect replays last settlement payload", () => {
+  const game = mkGame({ allHuman: true, tableId: "rc_settle_replay" });
+  try {
+    game.clearBotTimer();
+    game.startGame();
+    game.playerScores = [41, 10, 5, 8];
+    game.endRound();
+    game._lastSettlementPayload = {
+      settlementId: "set-rc-1",
+      totalPayout: 3800,
+      totalRake: 200,
+    };
+    const state = game.getGameState(0);
+    assert.equal(state.winnerTeam, 0);
+    assert.ok(game._lastSettlementPayload);
+    assert.equal(game._lastSettlementPayload.settlementId, "set-rc-1");
+  } finally {
+    game.destroy();
+  }
+});
+
+test("RC-4b: reconnect during trick resolving includes trick and timer", () => {
+  const game = mkGame({ allHuman: true, tableId: "rc_trick" });
+  try {
+    game.clearBotTimer();
+    game.startGame();
+    playBidding(game);
+    assert.equal(game.state, "playing");
+    while (game.trick.length < 4 && game.state === "playing") {
+      const idx = game.currentPlayerIndex;
+      const hand = game.hands[idx];
+      const valid = rules.getValidCards(hand, game.ledSuit);
+      const card = (valid.length > 0 ? valid : hand)[0];
+      game.applyMove(idx, "play_card", {
+        card: { suit: rules.toApiSuit(card.suit), rank: rules.toApiRank(card.rank) },
+        moveId: nextMoveId("trick"),
+      });
+    }
+    assert.equal(game.trickResolving, true);
+    assert.equal(game.trick.length, 4);
+    const state = game.getGameState(1);
+    assert.equal(state.trickResolving, true);
+    assert.equal(state.trick.length, 4);
+    assert.ok(state.trickDisplayRemainingSeconds >= 0);
+  } finally {
     game.destroy();
   }
 });

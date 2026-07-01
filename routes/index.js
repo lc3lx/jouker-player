@@ -21,6 +21,11 @@ const parkourRoute = require("./parkourRoute");
 const timeRoute = require("./timeRoute");
 const goldenTreeRoute = require("./goldenTreeRoute");
 const luckyWheelRoute = require("./luckyWheelRoute");
+const socialRoute = require("./socialRoute");
+const chatRoute = require("./chatRoute");
+const replayRoute = require("./replayRoute");
+const platformRoute = require("./platformRoute");
+const openapiRoute = require("./openapiRoute");
 
 const mountRoutes = (app) => {
   app.get("/api/v1/games/html5", (req, res) => {
@@ -59,6 +64,11 @@ const mountRoutes = (app) => {
   app.use("/api/v1/parkour", parkourRoute);
   app.use("/api/v1/time", timeRoute);
   app.use("/api/v1/lucky-wheel", luckyWheelRoute);
+  app.use("/api/v1/social", socialRoute);
+  app.use("/api/v1/chat", chatRoute);
+  app.use("/api/v1/replay", replayRoute);
+  app.use("/api/v1/platform", platformRoute);
+  app.use("/api-docs", openapiRoute);
   app.use("/api/game", goldenTreeRoute);
 };
 

@@ -10,9 +10,9 @@ const MAX_DECLARE = 13;
 const SUM_MIN_TO_PLAY = 11;
 const WIN_SCORE = 41;
 
-/** Team: seats 0,2 vs 1,3 */
-function getTeam(seatIndex) {
-  return seatIndex % 2;
+/** Partner seat for teams 0+2 vs 1+3 */
+function partnerSeat(seatIndex) {
+  return (seatIndex + 2) % 4;
 }
 
 /** Opponent seats for player i (the two players on the other team). */
@@ -129,17 +129,20 @@ function applyRoundScores(declaredBids, tricksThisRound, playerScores) {
   }
 }
 
-/** Game over: one team has a member >= 41 AND other team's total score > 0 */
+/** Game over (Syrian 41): one partner reaches 41+ AND the other partner on the same team has score > 0. */
 function checkGameEnd(playerScores) {
-  const t0 = playerScores[0] + playerScores[2];
-  const t1 = playerScores[1] + playerScores[3];
-  const max0 = Math.max(playerScores[0], playerScores[2]);
-  const max1 = Math.max(playerScores[1], playerScores[3]);
+  const s = (i) => playerScores[i] || 0;
 
-  if (max0 >= WIN_SCORE && t1 > 0) {
+  if (s(0) >= WIN_SCORE && s(2) > 0) {
     return { ended: true, winnerTeam: 0, playerScores };
   }
-  if (max1 >= WIN_SCORE && t0 > 0) {
+  if (s(2) >= WIN_SCORE && s(0) > 0) {
+    return { ended: true, winnerTeam: 0, playerScores };
+  }
+  if (s(1) >= WIN_SCORE && s(3) > 0) {
+    return { ended: true, winnerTeam: 1, playerScores };
+  }
+  if (s(3) >= WIN_SCORE && s(1) > 0) {
     return { ended: true, winnerTeam: 1, playerScores };
   }
   return { ended: false };
@@ -163,7 +166,8 @@ module.exports = {
   MAX_DECLARE,
   SUM_MIN_TO_PLAY,
   WIN_SCORE,
-  getTeam,
+  getTeam: (seatIndex) => seatIndex % 2,
+  partnerSeat,
   opponentSeats,
   oppositeColorSuit,
   normalizeRank,

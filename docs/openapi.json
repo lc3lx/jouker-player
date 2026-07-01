@@ -1,0 +1,58 @@
+{
+  "openapi": "3.0.3",
+  "info": {
+    "title": "Play Multiplayer Platform API",
+    "version": "3.0.0",
+    "description": "Phase 3 social, competitive, audit, replay, and platform endpoints."
+  },
+  "servers": [{ "url": "/api/v1" }],
+  "paths": {
+    "/social/friends": {
+      "get": { "summary": "List friends with presence", "tags": ["Social"] },
+      "post": { "summary": "Send friend request (via REST)", "tags": ["Social"] }
+    },
+    "/social/friends/accept/{requestId}": {
+      "post": { "summary": "Accept friend request", "tags": ["Social"] }
+    },
+    "/social/invitations": {
+      "post": { "summary": "Invite friend to game/table", "tags": ["Invitations"] }
+    },
+    "/social/invitations/pending": {
+      "get": { "summary": "List pending invitations", "tags": ["Invitations"] }
+    },
+    "/chat/{channel}/{channelId}": {
+      "get": { "summary": "Chat history", "tags": ["Chat"] },
+      "post": { "summary": "Send chat message", "tags": ["Chat"] }
+    },
+    "/replay/hands/{handId}": {
+      "get": { "summary": "Hand replay payload", "tags": ["Replay"] }
+    },
+    "/replay/hands/{handId}/screenshot": {
+      "get": { "summary": "Hand screenshot metadata", "tags": ["Replay"] }
+    },
+    "/platform/leaderboards/{gameType}": {
+      "get": { "summary": "Leaderboards (daily/weekly/monthly)", "tags": ["Leaderboards"] }
+    },
+    "/platform/analytics/me": {
+      "get": { "summary": "Player analytics (VPIP, PFR, ROI)", "tags": ["Analytics"] }
+    },
+    "/tables/{id}/history": {
+      "get": { "summary": "Table hand history (existing)", "tags": ["Hand History"] }
+    }
+  },
+  "components": {
+    "securitySchemes": {
+      "bearerAuth": { "type": "http", "scheme": "bearer", "bearerFormat": "JWT" }
+    }
+  },
+  "security": [{ "bearerAuth": [] }],
+  "tags": [
+    { "name": "Social" },
+    { "name": "Invitations" },
+    { "name": "Chat" },
+    { "name": "Replay" },
+    { "name": "Leaderboards" },
+    { "name": "Analytics" },
+    { "name": "Hand History" }
+  ]
+}

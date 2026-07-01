@@ -165,6 +165,33 @@ async function finalizeCardTableVacate({ gameType, tableId, userId, nsp }) {
     player.reconnectDeadline = null;
   }
 
+  const seatIndex = player.seatIndex ?? 0;
+  const seatChips = Number(player.chips) || 0;
+
+  if (gameType === "tarneeb41") {
+    try {
+      const { recordVacatedBotSeat, notifyBotSeatAvailable } = require("./tarneeb41BotSeatService");
+      const table = await Table.findById(tableId).select("seats");
+      const mongoSeat = table?.seats?.[seatIndex];
+      const playerId =
+        mongoSeat?.player ||
+        (mongoSeat?.user && mongoSeat.user._id ? mongoSeat.user._id : mongoSeat?.user);
+      await recordVacatedBotSeat({
+        tableId,
+        userId,
+        seatIndex,
+        chips: mongoSeat?.chips ?? seatChips,
+        playerId,
+      });
+      await notifyBotSeatAvailable(nsp, tableId, seatIndex);
+    } catch (err) {
+      logger.warn("tarneeb41_vacate_record_failed", {
+        tableId: String(tableId),
+        reason: err?.message,
+      });
+    }
+  }
+
   if (gameType === "tarneeb41") {
     roomManager.userToTarneeb41TableId.delete(String(userId));
     roomManager.tarneeb41UserSocket.delete(String(userId));

@@ -69,8 +69,14 @@ const handHistorySchema = new mongoose.Schema(
   {
     handId: { type: String, index: true },
     table: { type: mongoose.Schema.ObjectId, ref: "Table", required: true },
+    gameType: { type: String, enum: ["poker", "trix", "tarneeb41"], default: "poker", index: true },
+    tableNumber: Number,
+    dealerSeatIndex: Number,
+    smallBlind: Number,
+    bigBlind: Number,
     startedAt: { type: Date, default: Date.now },
     endedAt: { type: Date },
+    durationMs: Number,
     players: [handPlayerSchema],
     actions: [handActionSchema],
     /** Human-readable chronological ledger for support / fraud analytics. */
@@ -82,6 +88,11 @@ const handHistorySchema = new mongoose.Schema(
     handCategory: String,
     potDistribution: [handPotDistributionSchema],
     seats: [seatSnapshotSchema],
+    /** Deterministic replay payload (streets + actions + stacks). */
+    replayData: { type: mongoose.Schema.Types.Mixed },
+    /** SHA-256 of canonical hand payload for dispute resolution. */
+    auditHash: { type: String, index: true },
+    screenshot: { type: mongoose.Schema.ObjectId, ref: "HandScreenshot" },
     /** Shown on Fair Play screen after hand ends (serverSeed revealed post-hand). */
     provablyFair: { type: mongoose.Schema.Types.Mixed },
   },

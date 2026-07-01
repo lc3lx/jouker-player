@@ -7,7 +7,7 @@ function parseCountdownSeconds() {
 }
 
 function parseTrickDisplayMs() {
-  const n = parseInt(process.env.TRICK_DISPLAY_SECONDS || "4", 10);
+  const n = parseInt(process.env.TRICK_DISPLAY_SECONDS || "1", 10);
   if (!Number.isFinite(n) || n < 1) return 4000;
   return Math.min(n, 15) * 1000;
 }
