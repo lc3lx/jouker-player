@@ -9,7 +9,7 @@ const Jackpot = require("../models/jackpotModel");
 const Wallet = require("../models/walletModel");
 const User = require("../models/userModel");
 const { RedisTableStateStore } = require("../utils/tableStateStore");
-const { applyLockedDelta, applyHouseSettlementDelta } = require("../services/walletLedgerService");
+const { applyLockedDelta, applyHouseSettlementDelta, withMongoTransaction } = require("../services/walletLedgerService");
 const logger = require("../utils/logger");
 const { metrics } = require("../utils/metrics");
 const { sendAlert } = require("../utils/alert");
@@ -348,6 +348,7 @@ class PokerTable {
     this.botFillDeadline = null;
     this.waitForPlayersTimer = null;
     this.waitForPlayersDeadline = null;
+    this.nextHandTimer = null;
     this.resetStateFromTable(table);
     this.turnSeconds = POKER_TIMINGS.TURN_SECONDS;
     this.reconnectTimers = new Map();
@@ -854,6 +855,56 @@ class PokerTable {
     this.waitForPlayersDeadline = null;
   }
 
+  clearNextHandTimer() {
+    if (this.nextHandTimer) {
+      clearTimeout(this.nextHandTimer);
+      this.nextHandTimer = null;
+    }
+  }
+
+  scheduleNextHand() {
+    this.clearNextHandTimer();
+    const delay = POKER_TIMINGS.NEXT_HAND_DELAY_MS;
+    this.nextHandTimer = setTimeout(() => {
+      this.nextHandTimer = null;
+      void this.beginNextHandIfPossible();
+    }, delay);
+  }
+
+  async beginNextHandIfPossible() {
+    if (this.frozen && !this.running) {
+      const probe = auditChipConservation(this, "unfreeze_probe");
+      if (probe.ok) {
+        this.frozen = false;
+        this.tableStatusOverride = null;
+      }
+    }
+    if (this.frozen || this.running || this.starting) return;
+    if (this.round !== "idle") {
+      if (!this.running) this.healStaleRoundIfNotRunning();
+      if (this.round !== "idle") return;
+    }
+
+    promoteWaitingToSeated(this.seats);
+    this.seats = this.seats.filter((s) => s.chips > 0);
+    if (this.seats.length > 0) {
+      this.dealerIndex =
+        ((this.dealerIndex % this.seats.length) + this.seats.length) % this.seats.length;
+    }
+
+    if (this.humanSeatCount() >= 1 && this.activeSeatCount() < this.botFillTarget) {
+      this.addBotsForMissingSeats();
+    }
+
+    if (this.humanSeatCount() < 1) {
+      this.scheduleWaitForPlayers();
+      await this.broadcastState();
+      return;
+    }
+
+    await this.startIfReady({ refreshFromDb: false, allowBotFill: true });
+  }
+
   scheduleWaitForPlayers() {
     if (this.running || this.frozen) return;
     if (this.eligibleHumanCount() >= POKER_MIN_PLAYERS) {
@@ -1053,6 +1104,7 @@ class PokerTable {
     this.clearActionScheduling();
     this.clearBotFillTimer();
     this.clearWaitForPlayersTimer();
+    this.clearNextHandTimer();
     for (const timer of this.reconnectTimers.values()) {
       clearTimeout(timer);
     }
@@ -2864,8 +2916,8 @@ class PokerTable {
     const auditLog = buildHandAuditLog(this.currentHandActions, this.seats, community);
     let settledHandHistoryId = null;
     try {
-      const session = await mongoose.startSession();
-      await session.withTransaction(async () => {
+      await withMongoTransaction(async (session) => {
+        const createOpts = session ? { session } : {};
         const [handDoc] = await HandHistory.create(
           [
             {
@@ -2915,12 +2967,13 @@ class PokerTable {
               },
             },
           ],
-          { session }
+          createOpts
         );
         settledHandHistoryId = handDoc?._id || null;
 
         // Persist seat chips and write ledger entries for each human player delta.
-        const table = await Table.findById(this.tableId).session(session);
+        const tableQuery = Table.findById(this.tableId);
+        const table = session ? await tableQuery.session(session) : await tableQuery;
         if (table) {
           let humanNetDelta = 0;
           for (const s of this.seats) {
@@ -2972,10 +3025,9 @@ class PokerTable {
 
             tSeat.chips = chipsAfter;
           }
-          await table.save({ session });
+          await table.save(session ? { session } : undefined);
         }
       });
-      await session.endSession();
 
       try {
         const humanIds = this.seats
@@ -3051,16 +3103,13 @@ class PokerTable {
           });
       }
     } catch (e) {
-      // financial settlement is critical: log and keep table state for retry/manual recovery
+      // Log settlement failure but keep the table running — chips are already
+      // updated in the live engine; blocking the next hand strands all players.
       this.logSuspicious("financial_settlement_failed", {
         tableId: this.tableId,
         handId: this.currentHandId,
         reason: e?.message || "unknown",
       });
-      this.running = false;
-      this.clearActionScheduling();
-      await this.broadcastState();
-      return;
     }
 
     // Prepare next hand: move dealer to next alive seat
@@ -3078,12 +3127,8 @@ class PokerTable {
       this.processedActionIds = new Set();
     }
 
-    // Small delay then attempt next hand if still enough players
-    const delay = POKER_TIMINGS.NEXT_HAND_DELAY_MS;
-    setTimeout(() => {
-      promoteWaitingToSeated(this.seats);
-      this.startIfReady();
-    }, delay);
+    // Short delay then auto-start the next hand when enough players remain.
+    this.scheduleNextHand();
   }
 
   getPublicState(forUserId) {

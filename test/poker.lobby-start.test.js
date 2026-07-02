@@ -105,3 +105,21 @@ test("rescheduleWaitForPlayersAfterRestore fires immediately when deadline passe
 
   assert.equal(windowEndCalls, 1);
 });
+
+test("beginNextHandIfPossible auto-starts with bots after solo human hand", async () => {
+  const g = mkGame();
+  g.refreshSeatsFromDb = async () => true;
+  g.round = "idle";
+  g.running = false;
+  let started = false;
+  g.startHand = async () => {
+    started = true;
+    g.running = true;
+    g.round = "preflop";
+  };
+
+  await g.beginNextHandIfPossible();
+
+  assert.ok(g.activeSeatCount() >= POKER_MIN_PLAYERS);
+  assert.equal(started, true);
+});
