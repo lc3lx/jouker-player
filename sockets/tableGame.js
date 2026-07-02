@@ -3326,6 +3326,11 @@ function initTableGame(io, options = {}) {
         } else {
           const game = await registry.get(String(tableId));
           if (game) {
+            // Ensure the wait-for-players deadline is stamped before the first
+            // state packet so the client sees the countdown immediately.
+            if (game.round === "idle" && !game.running) {
+              game.scheduleWaitForPlayers();
+            }
             const p = game.getPublicState(null);
             const m = game.getPublicState(socket.userId);
             socket.emit("table_state", p);
@@ -3346,6 +3351,15 @@ function initTableGame(io, options = {}) {
             game.seats[idx].clientSeed = clientSeed.trim().slice(0, 128);
           }
           if (game.round === "idle" && !game.running) {
+            // Reschedule the wait-for-players timer if the stored deadline has
+            // already expired (e.g. after a server restart or LRU eviction).
+            if (
+              !game.waitForPlayersTimer &&
+              game.waitForPlayersDeadline != null &&
+              game.waitForPlayersDeadline <= Date.now()
+            ) {
+              game.waitForPlayersDeadline = null;
+            }
             game.startIfReady();
           } else {
             await game.refreshSeatsFromDb();
