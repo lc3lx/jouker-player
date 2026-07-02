@@ -124,6 +124,39 @@ function statusAfterSeatChange(tableDoc, seatCount) {
  * Atomic seat + wallet lock inside caller's Mongo transaction.
  * @param {{ preferQueue?: boolean }} opts — when true and table full, FIFO queue on that table.
  */
+const POKER_OPPOSITE_DEALER_SEAT = 4;
+
+function clampSeatPosition(value, cap = POKER_CAPACITY) {
+  const n = Number(value);
+  if (!Number.isFinite(n)) return POKER_OPPOSITE_DEALER_SEAT;
+  return Math.max(0, Math.min(cap - 1, Math.floor(n)));
+}
+
+function occupiedSeatPositions(seats = []) {
+  const used = new Set();
+  for (const s of seats) {
+    if (s && s.seatPosition != null) used.add(s.seatPosition);
+  }
+  return used;
+}
+
+function nextFreeSeatPosition(seats = [], cap = POKER_CAPACITY) {
+  const used = occupiedSeatPositions(seats);
+  for (let i = 0; i < cap; i++) {
+    if (!used.has(i)) return i;
+  }
+  return null;
+}
+
+function sortSeatsByPosition(seats = []) {
+  return [...seats].sort((a, b) => {
+    const pa = a.seatPosition != null ? a.seatPosition : 999;
+    const pb = b.seatPosition != null ? b.seatPosition : 999;
+    if (pa !== pb) return pa - pb;
+    return 0;
+  });
+}
+
 async function executePokerJoinTransaction({
   userId,
   playerId,
@@ -133,6 +166,7 @@ async function executePokerJoinTransaction({
   preferQueue = false,
   clientIp = null,
   deviceId = null,
+  seatIndex = null,
 }) {
   let tableTx = await Table.findById(tableId).session(session);
   if (!tableTx) throw new Error("TABLE_NOT_FOUND");
@@ -184,7 +218,20 @@ async function executePokerJoinTransaction({
     meta: { reason: "join_table", tableNumber: tableTx.tableNumber },
   });
 
-  tableTx.seats.push({ user: userId, player: playerId, chips: buyIn });
+  const seatPosition =
+    seatIndex != null
+      ? clampSeatPosition(seatIndex, cap)
+      : nextFreeSeatPosition(tableTx.seats, cap) ?? POKER_OPPOSITE_DEALER_SEAT;
+  if (occupiedSeatPositions(tableTx.seats).has(seatPosition)) {
+    throw new Error("SEAT_TAKEN");
+  }
+
+  tableTx.seats.push({
+    user: userId,
+    player: playerId,
+    chips: buyIn,
+    seatPosition,
+  });
   if (tableTx.seats.length > cap) throw new Error("TABLE_FULL");
 
   tableTx.status = statusAfterSeatChange(tableTx, tableTx.seats.length);
@@ -194,6 +241,7 @@ async function executePokerJoinTransaction({
     tableId: String(tableTx._id),
     queued: false,
     midHandJoin: isHandActiveOnTable(tableTx._id),
+    seatIndex: seatPosition,
   };
 }
 
@@ -206,6 +254,7 @@ async function joinPokerWithRetry({
   preferQueue = false,
   clientIp = null,
   deviceId = null,
+  seatIndex = null,
 }) {
   const maxAttempts = 8;
   let targetId = String(initialTableId);
@@ -224,6 +273,7 @@ async function joinPokerWithRetry({
           preferQueue: preferQueue && attempt === 0,
           clientIp,
           deviceId,
+          seatIndex,
         });
       });
       if (!result.queued) {
@@ -298,4 +348,8 @@ module.exports = {
   deriveBlindsFromBuyIn,
   statusAfterSeatChange,
   isHandActiveOnTable,
+  POKER_OPPOSITE_DEALER_SEAT,
+  clampSeatPosition,
+  sortSeatsByPosition,
+  nextFreeSeatPosition,
 };

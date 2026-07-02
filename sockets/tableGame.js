@@ -27,6 +27,11 @@ const {
 } = require("../utils/pokerTableStatus");
 const { POKER_TIMINGS, sleep } = require("../utils/poker/timings");
 const {
+  sortSeatsByPosition,
+  nextFreeSeatPosition,
+  POKER_OPPOSITE_DEALER_SEAT,
+} = require("../services/pokerTableAllocationService");
+const {
   PLAYER_STATE,
   defaultPlayerState,
   canParticipateInNextHand,
@@ -700,6 +705,7 @@ class PokerTable {
           : null,
       seats: seats.map((s, i) => ({
         seatIndex: i,
+        seatPosition: toSafeInt(s.seatPosition, i),
         userId: s.userId,
         name: s.name,
         avatar: s.avatar,
@@ -901,9 +907,20 @@ class PokerTable {
     const isHandRunning = this.running && this.round && String(this.round) !== "idle";
     const seatDefaults = createSeatDefaults({ isHandRunning });
 
-    const mapped = table.seats
-      .filter((s) => toSafeInt(s.chips, 0) > 0)
-      .map((s) => ({
+    const mapped = [];
+    const usedChair = new Set();
+    for (const s of sortSeatsByPosition(table.seats)) {
+      if (toSafeInt(s.chips, 0) <= 0) continue;
+      let chair = s.seatPosition;
+      if (chair == null) {
+        chair = nextFreeSeatPosition(
+          mapped.map((m) => ({ seatPosition: m.seatPosition })),
+          this.capacity
+        );
+      }
+      if (chair == null) chair = mapped.length;
+      usedChair.add(chair);
+      mapped.push({
         userId: String(s.user?._id || s.user),
         name: s.user?.name || "Player",
         avatar: s.user?.profileImg || null,
@@ -917,11 +934,13 @@ class PokerTable {
         isBot: false,
         lastAction: null,
         actedThisStreet: false,
+        seatPosition: chair,
         cosmetics: { tableTheme: null, cardSkin: null },
         playerState: seatDefaults.playerState,
         disconnectedAt: null,
         reconnectDeadline: null,
-      }));
+      });
+    }
     this.seats = mapped.slice(0, this.capacity);
 
     if (this.seats.length > 0) {
@@ -1359,6 +1378,9 @@ class PokerTable {
   createBotSeat() {
     this.botSerial += 1;
     const userId = `bot:${this.tableId}:${Date.now()}:${this.botSerial}`;
+    const chair =
+      nextFreeSeatPosition(this.seats, this.capacity) ??
+      POKER_OPPOSITE_DEALER_SEAT;
     return {
       userId,
       name: `Bot ${this.botSerial}`,
@@ -1373,6 +1395,7 @@ class PokerTable {
       isBot: true,
       lastAction: null,
       actedThisStreet: false,
+      seatPosition: chair,
       cosmetics: { tableTheme: null, cardSkin: null },
     };
   }

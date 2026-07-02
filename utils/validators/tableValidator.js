@@ -35,6 +35,7 @@ exports.getTableValidator = [
 exports.joinTableValidator = [
   param("id").isMongoId().withMessage("Invalid table id"),
   body("buyIn").notEmpty().isFloat({ min: 0.01 }).withMessage("buyIn must be > 0"),
+  body("seatIndex").optional().isInt({ min: 0, max: 8 }).withMessage("seatIndex must be 0-8"),
   body("password").optional().isString(),
   validatorMiddleware,
 ];

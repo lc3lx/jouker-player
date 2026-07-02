@@ -6,6 +6,8 @@ const seatSchema = new mongoose.Schema(
     player: { type: mongoose.Schema.ObjectId, ref: "Player" },
     chips: { type: Number, required: true, min: 0 },
     joinedAt: { type: Date, default: Date.now },
+    /** Fixed chair index 0–8 around the table (4 = opposite dealer / bottom). */
+    seatPosition: { type: Number, min: 0, max: 8 },
   },
   { _id: false }
 );

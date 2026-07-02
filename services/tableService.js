@@ -765,6 +765,11 @@ exports.joinTable = asyncHandler(async (req, res, next) => {
         req.headers["x-forwarded-for"] || req.socket?.remoteAddress || ""
       );
       const deviceId = String(req.body?.deviceId || req.headers["x-device-id"] || "");
+      const reqSeatRaw = req.body.seatIndex;
+      const reqSeat =
+        reqSeatRaw != null && Number.isFinite(Number(reqSeatRaw))
+          ? Math.max(0, Math.min(8, Math.floor(Number(reqSeatRaw))))
+          : null;
       const result = await joinPokerWithRetry({
         userId: req.user._id,
         playerId: player._id,
@@ -774,12 +779,14 @@ exports.joinTable = asyncHandler(async (req, res, next) => {
         preferQueue,
         clientIp,
         deviceId: deviceId || null,
+        seatIndex: reqSeat,
       });
       joinedTableId = result.tableId || String(result);
       joinMeta = {
         queued: !!result.queued,
         queuePosition: result.queuePosition || 0,
         midHandJoin: !!result.midHandJoin,
+        seatIndex: result.seatIndex ?? reqSeat,
       };
     }
   } catch (e) {
@@ -813,6 +820,9 @@ exports.joinTable = asyncHandler(async (req, res, next) => {
         "Cannot join this table: another seated player shares your device",
         403
       );
+    }
+    if (e.message === "SEAT_TAKEN") {
+      throw new ApiError("هذا المقعد محجوز بالفعل", 400);
     }
     throw e;
   }
