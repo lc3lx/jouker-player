@@ -1326,6 +1326,41 @@ class PokerTable {
     if (seat.playerState === PLAYER_STATE.SITTING_OUT && seat.chips > 0) {
       seat.playerState = PLAYER_STATE.SEATED;
     }
+    void this.resyncTurnAfterReconnect(userId);
+  }
+
+  /**
+   * Unstick turn timer after app kill / socket drop: enforce overdue timeout or reschedule.
+   */
+  async resyncTurnAfterReconnect(userId) {
+    if (!this.running || this.frozen) return;
+
+    const now = Date.now();
+    const actorIdx = this.currentIndex;
+    const actor = this.seats[actorIdx];
+    const reconnectIdx = this.findSeatIndexByUser(userId);
+
+    const actorNeedsResync =
+      actor &&
+      !actor.isBot &&
+      actor.inHand &&
+      !actor.folded &&
+      !actor.allIn &&
+      actor.chips > 0;
+
+    if (!actorNeedsResync) return;
+
+    const overdue = this.actionDeadline != null && this.actionDeadline <= now;
+    const timerMissing = !this.turnTimer && !this.botThinkTimer;
+
+    if (overdue) {
+      await this.handleTimeout();
+      return;
+    }
+
+    if (timerMissing && (actorIdx === reconnectIdx || actor.playerState === PLAYER_STATE.DISCONNECTED)) {
+      this.scheduleCurrentTurn();
+    }
   }
 
   onPlayerSocketDisconnected(userId) {
@@ -3413,6 +3448,7 @@ function initTableGame(io, options = {}) {
         if (!game) return;
 
         game.onPlayerSocketConnected(socket.userId);
+        await game.resyncTurnAfterReconnect(socket.userId);
         const idx = game.findSeatIndexByUser(socket.userId);
         if (idx >= 0 && typeof clientSeed === "string" && clientSeed.trim()) {
           game.seats[idx].clientSeed = clientSeed.trim().slice(0, 128);
@@ -3503,6 +3539,26 @@ function initTableGame(io, options = {}) {
       const game = await registry.get(String(tableId));
       if (game) {
         await game.bootstrapLobbyStart();
+      }
+    });
+
+    socket.on("resync_turn", async ({ tableId }) => {
+      try {
+        if (!tableId) return;
+        const game = await registry.get(String(tableId));
+        if (!game) return;
+        await game.resyncTurnAfterReconnect(socket.userId);
+        const priv = game.getPublicState(socket.userId);
+        socket.emit("table_state_me", priv);
+        socket.emit("state:me", priv);
+        socket.emit("reconnect_state", priv);
+        await game.broadcastState();
+      } catch (e) {
+        logger.error("resync_turn_failed", {
+          userId: socket.userId,
+          tableId,
+          reason: e?.message || "unknown",
+        });
       }
     });
 
