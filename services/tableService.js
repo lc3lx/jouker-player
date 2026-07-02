@@ -512,6 +512,7 @@ exports.joinTable = asyncHandler(async (req, res, next) => {
       void trackJoinLeaveEvent(req.user._id, "join_table");
       emitTablesUpdated({ gameType: "poker", reason: "vacate_restore", tableId: id });
       void syncPokerTableStatusById(id);
+      void syncLivePokerTableAfterJoin(id);
       return res.status(200).json({
         status: "success",
         message: "Seat restored — return within vacate window",

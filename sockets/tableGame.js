@@ -1253,8 +1253,10 @@ class PokerTable {
 
     this.clearWaitForPlayersTimer();
     await this.applyCosmeticsToSeats();
-    await this.startIfReady({ refreshFromDb: false });
-    await this.broadcastState();
+    if (this.humanSeatCount() >= 1 && this.activeSeatCount() < this.botFillTarget) {
+      this.addBotsForMissingSeats();
+    }
+    await this.bootstrapLobbyStart();
     return true;
   }
 
@@ -1497,6 +1499,39 @@ class PokerTable {
       canStart: humans >= POKER_MIN_PLAYERS || canBotStart,
       canStartWithBots: canBotStart,
     };
+  }
+
+  async bootstrapLobbyStart() {
+    if (this.frozen) return;
+    if (this.running || this.round !== "idle") return;
+
+    await this.refreshSeatsFromDb();
+
+    if (this.humanSeatCount() >= 1 && this.activeSeatCount() < this.botFillTarget) {
+      this.addBotsForMissingSeats();
+    }
+
+    const canBotStart =
+      this.humanSeatCount() >= 1 && this.activeSeatCount() >= POKER_MIN_PLAYERS;
+
+    if (this.eligibleHumanCount() >= POKER_MIN_PLAYERS || canBotStart) {
+      this.clearWaitForPlayersTimer();
+      await this.startIfReady({ refreshFromDb: false, allowBotFill: canBotStart });
+      return;
+    }
+
+    if (
+      !this.waitForPlayersTimer &&
+      this.waitForPlayersDeadline != null &&
+      this.waitForPlayersDeadline <= Date.now()
+    ) {
+      this.waitForPlayersDeadline = null;
+      await this.onWaitForPlayersWindowEnd();
+      return;
+    }
+
+    this.scheduleWaitForPlayers();
+    await this.broadcastState();
   }
 
   async startIfReady({ refreshFromDb = true, allowBotFill = false } = {}) {
@@ -3350,63 +3385,32 @@ function initTableGame(io, options = {}) {
         const ok = table.seats.some((s) => String(s.user) === String(socket.userId));
         if (!ok) return;
         socket.join(`tg:${tableId}`);
-        const pub = await registry.getSnapshotPublicState(String(tableId), null);
-        const me = await registry.getSnapshotPublicState(String(tableId), socket.userId);
-        if (pub && me) {
-          socket.emit("table_state", pub);
-          socket.emit("state", pub);
-          socket.emit("table_state_me", me);
-          socket.emit("reconnect_state", me);
-          socket.emit("state:me", me);
-        } else {
-          const game = await registry.get(String(tableId));
-          if (game) {
-            // Ensure the wait-for-players deadline is stamped before the first
-            // state packet so the client sees the countdown immediately.
-            if (game.round === "idle" && !game.running) {
-              game.scheduleWaitForPlayers();
-            }
-            const p = game.getPublicState(null);
-            const m = game.getPublicState(socket.userId);
-            socket.emit("table_state", p);
-            socket.emit("state", p);
-            socket.emit("table_state_me", m);
-            socket.emit("reconnect_state", m);
-            socket.emit("state:me", m);
-          }
-        }
-
-        socket.emit("table_event", { type: "joined", tableId: String(tableId) });
 
         const game = await registry.get(String(tableId));
-        if (game) {
-          game.onPlayerSocketConnected(socket.userId);
-          const idx = game.findSeatIndexByUser(socket.userId);
-          if (idx >= 0 && typeof clientSeed === "string" && clientSeed.trim()) {
-            game.seats[idx].clientSeed = clientSeed.trim().slice(0, 128);
-          }
-          if (game.round === "idle" && !game.running) {
-            if (
-              !game.waitForPlayersTimer &&
-              game.waitForPlayersDeadline != null &&
-              game.waitForPlayersDeadline <= Date.now()
-            ) {
-              game.waitForPlayersDeadline = null;
-              void game.onWaitForPlayersWindowEnd();
-            } else {
-              game.scheduleWaitForPlayers();
-              await game.startIfReady({
-                refreshFromDb: true,
-                allowBotFill:
-                  game.humanSeatCount() >= 1 &&
-                  game.activeSeatCount() >= POKER_MIN_PLAYERS,
-              });
-            }
-          } else {
-            await game.refreshSeatsFromDb();
-            await game.broadcastState();
-          }
+        if (!game) return;
+
+        game.onPlayerSocketConnected(socket.userId);
+        const idx = game.findSeatIndexByUser(socket.userId);
+        if (idx >= 0 && typeof clientSeed === "string" && clientSeed.trim()) {
+          game.seats[idx].clientSeed = clientSeed.trim().slice(0, 128);
         }
+
+        if (game.round === "idle" && !game.running && !game.frozen) {
+          await game.bootstrapLobbyStart();
+        } else {
+          await game.refreshSeatsFromDb();
+          await game.broadcastState();
+        }
+
+        const p = game.getPublicState(null);
+        const m = game.getPublicState(socket.userId);
+        socket.emit("table_state", p);
+        socket.emit("state", p);
+        socket.emit("table_state_me", m);
+        socket.emit("reconnect_state", m);
+        socket.emit("state:me", m);
+
+        socket.emit("table_event", { type: "joined", tableId: String(tableId) });
       } catch (e) {
         metrics.errorsTotal.inc({ type: "subscribe_table_failed" });
         logger.error("subscribe_table_failed", {
@@ -3475,7 +3479,7 @@ function initTableGame(io, options = {}) {
       if (!tableId) return;
       const game = await registry.get(String(tableId));
       if (game) {
-        game.startIfReady();
+        await game.bootstrapLobbyStart();
       }
     });
 
@@ -3624,15 +3628,12 @@ async function syncLivePokerTableAfterJoin(tableId) {
   try {
     const game = await activeRegistry.get(String(tableId));
     if (!game) return;
-    await game.refreshSeatsFromDb();
     if (game.round === "idle" && !game.running && !game.frozen) {
-      game.scheduleWaitForPlayers();
+      await game.bootstrapLobbyStart();
+    } else {
+      await game.refreshSeatsFromDb();
+      await game.broadcastState();
     }
-    await game.startIfReady({
-      refreshFromDb: false,
-      allowBotFill:
-        game.humanSeatCount() >= 1 && game.activeSeatCount() >= POKER_MIN_PLAYERS,
-    });
   } catch (e) {
     logger.error("sync_live_poker_after_join_failed", {
       tableId: String(tableId),
@@ -3647,10 +3648,16 @@ async function syncLivePokerTableAfterLeave(tableId) {
   if (!game) return;
   await game.refreshSeatsFromDb();
   game.clearWaitForPlayersTimer();
-  if (game.eligibleHumanCount() >= POKER_MIN_PLAYERS) {
-    await game.startIfReady({ refreshFromDb: false });
+  if (game.round === "idle" && !game.running && !game.frozen) {
+    if (game.humanSeatCount() >= 1) {
+      await game.bootstrapLobbyStart();
+    } else {
+      game.scheduleWaitForPlayers();
+      await game.broadcastState();
+    }
+  } else if (game.eligibleHumanCount() >= POKER_MIN_PLAYERS) {
+    await game.startIfReady({ refreshFromDb: false, allowBotFill: true });
   } else {
-    game.scheduleWaitForPlayers();
     await game.broadcastState();
   }
 }
