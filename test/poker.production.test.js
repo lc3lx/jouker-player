@@ -101,7 +101,7 @@ function createAllocationStore() {
 test("production timings defaults", () => {
   assert.equal(POKER_TIMINGS.TURN_SECONDS, 20);
   assert.equal(POKER_TIMINGS.PREFLOP_DEAL_MS, 2000);
-  assert.equal(POKER_TIMINGS.NEXT_HAND_DELAY_MS, 5000);
+  assert.equal(POKER_TIMINGS.NEXT_HAND_DELAY_MS, 4000);
   assert.equal(POKER_TIMINGS.RECONNECT_WINDOW_MS, 90000);
 });
 
@@ -287,6 +287,36 @@ test("resetToEmptyIdle zeros pot seats and round", async () => {
   assert.equal(g.pot, 0);
   assert.equal(g.seats.length, 0);
   assert.deepEqual(g.community, []);
+});
+
+test("last human leaving aborts a bot-only hand and empties the engine", async () => {
+  const g = mkGame(3);
+  // Seat 0 stays human; the rest become bots.
+  g.seats[0].isBot = false;
+  for (let i = 1; i < g.seats.length; i++) {
+    g.seats[i].isBot = true;
+    g.seats[i].userId = `bot-${i}`;
+  }
+  g.running = true;
+  g.round = "flop";
+  g.pot = 4000;
+  g.currentBet = 1000;
+  g.currentHandId = "hand-1";
+
+  const humanId = g.seats[0].userId;
+  assert.equal(g.humanSeatCount(), 1);
+
+  await g.removeLiveHumanSeat(humanId);
+
+  // Engine must not keep running with just bots; it should be idle + empty so
+  // the table can be reset immediately after the last human leaves.
+  assert.equal(g.humanSeatCount(), 0);
+  assert.equal(g.running, false);
+  assert.equal(g.round, "idle");
+  assert.equal(g.seats.length, 0);
+  assert.equal(g.pot, 0);
+  assert.equal(g.currentBet, 0);
+  assert.equal(g.currentHandId, null);
 });
 
 console.log("poker.production.test.js: all tests registered");

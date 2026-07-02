@@ -407,10 +407,10 @@ class PokerTable {
   static get ROUND_TRANSITIONS() {
     return {
       idle: new Set(["preflop"]),
-      preflop: new Set(["flop"]),
-      flop: new Set(["turn"]),
-      turn: new Set(["river"]),
-      river: new Set(["showdown"]),
+      preflop: new Set(["flop", "idle"]),
+      flop: new Set(["turn", "idle"]),
+      turn: new Set(["river", "idle"]),
+      river: new Set(["showdown", "idle"]),
       showdown: new Set(["idle"]),
     };
   }
@@ -1387,12 +1387,23 @@ class PokerTable {
     }
 
     if (this.humanSeatCount() < 1) {
-      this.seats = this.seats.filter((s) => s.isBot);
-      if (this.seats.length === 0 && this.running) {
-        this.running = false;
-        this.round = "idle";
-        this.clearActionScheduling();
-      }
+      // Last human left the table: never let the bots keep the hand (and the
+      // table) alive on their own. Abort any in-progress bot-only hand, drop
+      // the bots and go idle so the caller can reset the table immediately.
+      this.clearActionScheduling();
+      this.clearNextHandTimer();
+      this.clearWaitForPlayersTimer();
+      this.clearBotFillTimer();
+      this.running = false;
+      this.starting = false;
+      this.round = "idle";
+      this.seats = [];
+      this.dealerIndex = 0;
+      this.pot = 0;
+      this.currentBet = 0;
+      this.currentHandId = null;
+      this.currentHandActions = [];
+      this.processedActionIds = new Set();
     }
 
     await this.syncMongoTableStatus();
@@ -2666,6 +2677,12 @@ class PokerTable {
       await sleep(dramatic ? Math.floor(gapMs * 1.35) : gapMs);
     }
 
+    // Hold all revealed cards face-up so everyone can read the showdown before
+    // chips move and the winner banner appears.
+    if (total > 0) {
+      await sleep(POKER_TIMINGS.SHOWDOWN_CARD_HOLD_MS);
+    }
+
     await this.broadcastState(true);
 
     const potBeforeSettlement = toSafeInt(this.pot, 0);
@@ -2723,6 +2740,10 @@ class PokerTable {
     this.currentHandId = null;
     this.currentHandActions = [];
     this.processedActionIds = new Set();
+
+    // Winner banner is now visible; wait NEXT_HAND_DELAY_MS before dealing again
+    // so the win display and the next hand never overlap.
+    this.scheduleNextHand();
   }
 
   async applyJackpotContribution() {
@@ -3125,10 +3146,11 @@ class PokerTable {
       this.currentHandId = null;
       this.currentHandActions = [];
       this.processedActionIds = new Set();
+      // Short delay then auto-start the next hand when enough players remain.
+      this.scheduleNextHand();
     }
-
-    // Short delay then auto-start the next hand when enough players remain.
-    this.scheduleNextHand();
+    // When the caller manages lifecycle (showdown), it schedules the next hand
+    // itself AFTER the winner banner so there is a clean gap between hands.
   }
 
   getPublicState(forUserId) {

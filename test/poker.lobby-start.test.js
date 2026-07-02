@@ -123,3 +123,12 @@ test("beginNextHandIfPossible auto-starts with bots after solo human hand", asyn
   assert.ok(g.activeSeatCount() >= POKER_MIN_PLAYERS);
   assert.equal(started, true);
 });
+
+test("setRound allows fold-win path from any street to idle", () => {
+  const g = mkGame();
+  for (const street of ["preflop", "flop", "turn", "river"]) {
+    g.round = street;
+    assert.equal(g.setRound("idle"), true, `expected ${street} -> idle`);
+    assert.equal(g.round, "idle");
+  }
+});

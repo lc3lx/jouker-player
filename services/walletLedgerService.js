@@ -63,10 +63,31 @@ async function adjustTableLock({ session, userId, tableId, delta }) {
   const row = await getOrCreateTableLock(userId, tableId, session);
   const next = toSafeInt(row.amount, 0) + d;
   if (next < 0) {
-    throw new Error("TABLE_LOCK_UNDERFLOW");
+    // Table-lock rows can drift from global lockedBalance on standalone Mongo;
+    // clamp instead of aborting hand settlement (global lock already adjusted).
+    logger.warn("table_lock_underflow_clamped", {
+      userId: String(userId),
+      tableId: String(tableId),
+      before: toSafeInt(row.amount, 0),
+      delta: d,
+    });
+    row.amount = 0;
+    await row.save(sessionOptions(session));
+    return;
   }
   row.amount = next;
   await row.save(sessionOptions(session));
+}
+
+async function applyTableLockSpend({ session, userId, tableId, spend }) {
+  const amt = toSafeInt(spend, 0);
+  if (amt <= 0 || !tableId) return;
+  const row = await getOrCreateTableLock(userId, tableId, session);
+  const tableLocked = toSafeInt(row.amount, 0);
+  const tableSpend = Math.min(amt, tableLocked);
+  if (tableSpend > 0) {
+    await adjustTableLock({ session, userId, tableId, delta: -tableSpend });
+  }
 }
 
 async function setTableLockAmount({ session, userId, tableId, amount }) {
@@ -339,7 +360,7 @@ async function applyLockedDelta({
       walletAfter: { balance: wallet.balance, lockedBalance: wallet.lockedBalance },
       meta,
     });
-    if (tableId) await adjustTableLock({ session, userId, tableId, delta: -spend });
+    await applyTableLockSpend({ session, userId, tableId, spend });
     return;
   }
 
@@ -513,7 +534,7 @@ async function applyGameSettlementDelta({
       walletAfter: { balance: wallet.balance, lockedBalance: wallet.lockedBalance },
       meta: baseMeta,
     });
-    if (tableId) await adjustTableLock({ session, userId, tableId, delta: -spend });
+    await applyTableLockSpend({ session, userId, tableId, spend });
     return;
   }
 

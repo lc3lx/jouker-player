@@ -20,8 +20,12 @@ function withOptionalSession(query, session) {
 async function getHouseWallet({ session, createIfMissing = false } = {}) {
   let wallet = await withOptionalSession(HouseWallet.findOne({ key: HOUSE_WALLET_KEY }), session);
   if (!wallet && createIfMissing) {
+    const devSeed =
+      process.env.NODE_ENV !== "production"
+        ? Math.max(0, parseInt(process.env.HOUSE_WALLET_DEV_SEED || "1000000000", 10))
+        : 0;
     [wallet] = await HouseWallet.create(
-      [{ key: HOUSE_WALLET_KEY, balance: 0, lockedBalance: 0 }],
+      [{ key: HOUSE_WALLET_KEY, balance: devSeed, lockedBalance: 0 }],
       sessionOptions(session)
     );
   }
@@ -89,7 +93,32 @@ async function applyHouseDelta({
     balance: toSafeInt(wallet.balance, 0),
     lockedBalance: toSafeInt(wallet.lockedBalance, 0),
   };
-  const nextBalance = before.balance + d;
+  let nextBalance = before.balance + d;
+  if (nextBalance < 0) {
+    const allowDevTopUp =
+      process.env.NODE_ENV !== "production" ||
+      String(process.env.HOUSE_WALLET_AUTO_TOPUP || "").toLowerCase() === "true";
+    if (allowDevTopUp) {
+      const deficit = Math.abs(nextBalance);
+      const topUp = deficit + Math.max(1_000_000, parseInt(process.env.HOUSE_WALLET_DEV_TOPUP || "100000000", 10));
+      wallet.balance = before.balance + topUp;
+      await appendHouseLedger({
+        session,
+        type: "house_dev_topup",
+        amount: topUp,
+        walletBefore: before,
+        walletAfter: {
+          balance: toSafeInt(wallet.balance, 0),
+          lockedBalance: toSafeInt(wallet.lockedBalance, 0),
+        },
+        tableId,
+        handId,
+        settlementId,
+        meta: { ...meta, reason: "insufficient_balance_auto_topup" },
+      });
+      nextBalance = wallet.balance + d;
+    }
+  }
   if (nextBalance < 0) {
     throw new Error("HOUSE_WALLET_INSUFFICIENT_BALANCE");
   }

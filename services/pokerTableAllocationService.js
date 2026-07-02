@@ -1,6 +1,5 @@
 const Table = require("../models/tableModel");
 const { withMongoTransaction, transferToLocked } = require("./walletLedgerService");
-const { getTableGameDebugSnapshot } = require("../sockets/tableGame");
 const { emitTablesUpdated } = require("../utils/lobbyRealtime");
 const {
   POKER_CAPACITY,
@@ -13,6 +12,10 @@ const {
   registerSeatPresence,
 } = require("./pokerCollusionGuard");
 const { markTableActivity } = require("./pokerTableGcService");
+
+function getTableGameBridge() {
+  return require("../sockets/pokerTableGameBridge");
+}
 
 function deriveBlindsFromBuyIn(buyIn) {
   const bigBlind = Math.max(100, Math.floor(Number(buyIn || 0) / 50));
@@ -37,8 +40,8 @@ function withPokerAllocationLock(tier, buyIn, fn) {
 }
 
 function isHandActiveOnTable(tableId) {
-  const live = getTableGameDebugSnapshot(String(tableId));
-  return !!(live && live.running && live.round && String(live.round) !== "idle");
+  const snap = getTableGameBridge().getTableGameDebugSnapshot(String(tableId));
+  return !!(snap && snap.running && snap.round && String(snap.round) !== "idle");
 }
 
 /**
@@ -106,7 +109,7 @@ async function findAvailablePokerTable(tier, buyIn, session) {
 }
 
 function liveSnapshotForTable(tableId) {
-  return getTableGameDebugSnapshot(String(tableId));
+  return getTableGameBridge().getTableGameDebugSnapshot(String(tableId));
 }
 
 function statusAfterSeatChange(tableDoc, seatCount) {

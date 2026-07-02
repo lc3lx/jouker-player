@@ -30,7 +30,7 @@ const {
   adminForceEndHandTable,
   resetLivePokerTableWhenEmpty,
   evictTableFromRegistry,
-} = require("../sockets/tableGame");
+} = require("../sockets/pokerTableGameBridge");
 
 const CARD_GAME_TYPES = ["tarneeb41", "trix"];
 const ZOMBIE_CARD_STATUSES = ["playing", "ready"];

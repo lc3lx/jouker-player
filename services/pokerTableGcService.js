@@ -2,11 +2,6 @@ const Table = require("../models/tableModel");
 const logger = require("../utils/logger");
 const { emitTablesUpdated } = require("../utils/lobbyRealtime");
 const pokerQueueRedis = require("../utils/redis/pokerQueueRedis");
-const {
-  getTableGameDebugSnapshot,
-  evictTableFromRegistry,
-  resetLivePokerTableWhenEmpty,
-} = require("../sockets/tableGame");
 
 const IDLE_MS = Math.max(
   60_000,
@@ -17,6 +12,10 @@ const GC_INTERVAL_MS = Math.max(30_000, parseInt(process.env.POKER_GC_INTERVAL_M
 /** tableId -> firstSeenEmptyAt */
 const emptySince = new Map();
 let gcTimer = null;
+
+function getTableGameBridge() {
+  return require("../sockets/pokerTableGameBridge");
+}
 
 function markTableActivity(tableId) {
   emptySince.delete(String(tableId));
@@ -46,13 +45,13 @@ async function resetPokerTableWhenEmpty(tableId) {
   if (activeVacating.length > 0) return { reset: false, reason: "vacating" };
 
   const qLen = await countQueue(tid);
-  const live = getTableGameDebugSnapshot(tid);
+  const live = getTableGameBridge().getTableGameDebugSnapshot(tid);
   if (live?.running) {
     logger.warn("poker_table_reset_skipped_hand_active", { tableId: tid });
     return { reset: false, reason: "hand_active" };
   }
 
-  await resetLivePokerTableWhenEmpty(tid);
+  await getTableGameBridge().resetLivePokerTableWhenEmpty(tid);
 
   if (pokerQueueRedis.isEnabled() && qLen === 0) {
     await pokerQueueRedis.clearQueue(tid);
@@ -85,7 +84,7 @@ async function resetPokerTableWhenEmpty(tableId) {
 
 async function destroyEmptyTable(tableId) {
   const tid = String(tableId);
-  const live = getTableGameDebugSnapshot(tid);
+  const live = getTableGameBridge().getTableGameDebugSnapshot(tid);
   if (live?.running) {
     markTableActivity(tid);
     return false;
@@ -114,7 +113,7 @@ async function destroyEmptyTable(tableId) {
     return false;
   }
 
-  await evictTableFromRegistry(tid);
+  await getTableGameBridge().evictTableFromRegistry(tid);
   if (pokerQueueRedis.isEnabled()) {
     await pokerQueueRedis.clearQueue(tid);
   }
@@ -143,6 +142,7 @@ async function gcSweep() {
       .lean();
 
     const now = Date.now();
+    const bridge = getTableGameBridge();
     for (const row of candidates) {
       const tid = String(row._id);
       const qLen = await countQueue(tid);
@@ -151,7 +151,7 @@ async function gcSweep() {
         continue;
       }
 
-      const live = getTableGameDebugSnapshot(tid);
+      const live = bridge.getTableGameDebugSnapshot(tid);
       if (live?.running) {
         markTableActivity(tid);
         continue;
