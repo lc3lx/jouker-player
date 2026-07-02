@@ -42,7 +42,7 @@ const {
   createSeatDefaults,
 } = require("../utils/poker/playerState");
 const { verifyHandChipConservation } = require("../utils/poker/chipConservation");
-const { auditOrFreeze } = require("../utils/poker/chipAuditor");
+const { auditOrFreeze, auditChipConservation } = require("../utils/poker/chipAuditor");
 const { deriveMinimumBet } = require("../utils/poker/tableBettingConfig");
 const { buildHandAuditLog } = require("../services/handHistoryAuditService");
 
@@ -1677,6 +1677,14 @@ class PokerTable {
   }
 
   async bootstrapLobbyStart() {
+    if (this.frozen && !this.running) {
+      const probe = auditChipConservation(this, "unfreeze_probe");
+      if (probe.ok) {
+        this.frozen = false;
+        this.tableStatusOverride = null;
+        this.logSuspicious("unfreeze_false_positive", { context: "bootstrap" });
+      }
+    }
     if (this.frozen) return;
     if (this.running) return;
     if (this.round !== "idle") {

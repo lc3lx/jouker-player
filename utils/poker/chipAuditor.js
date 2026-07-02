@@ -4,9 +4,12 @@ const logger = require("../logger");
 const { metrics } = require("../metrics");
 
 /**
- * Strict chip conservation:
- * Total = sum(stacks) + sum(bets) + pot + uncollectedRake
- * Must equal handStartTotal (or invested baseline at street boundaries).
+ * Strict chip conservation (immediate-pot model):
+ * Each bet/blind adds to seat.bet AND this.pot while reducing chips.
+ * Street bets must NOT be added again — they already live in pot.
+ *
+ * Total = sum(stacks) + pot + uncollectedRake
+ * Must equal handStartTotal.
  *
  * @param {object} game — PokerTable instance
  * @param {string} context — audit label
@@ -17,12 +20,14 @@ function auditChipConservation(game, context = "unknown") {
   const pot = toSafeInt(game.pot, 0);
   const rakeAcc = toSafeInt(game.uncollectedRake, 0);
 
-  let stacksAndBets = 0;
+  let stackTotal = 0;
+  let streetBets = 0;
   for (const s of seats) {
-    stacksAndBets += toSafeInt(s.chips, 0) + toSafeInt(s.bet, 0);
+    stackTotal += toSafeInt(s.chips, 0);
+    streetBets += toSafeInt(s.bet, 0);
   }
 
-  const actual = stacksAndBets + pot + rakeAcc;
+  const actual = stackTotal + pot + rakeAcc;
   const expected = toSafeInt(game.handStartTotal, actual);
   const delta = actual - expected;
 
@@ -34,7 +39,9 @@ function auditChipConservation(game, context = "unknown") {
     context,
     pot,
     rakeAcc,
-    stacksAndBets,
+    stacksAndBets: stackTotal + streetBets,
+    stackTotal,
+    streetBets,
   };
 }
 

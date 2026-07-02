@@ -160,6 +160,29 @@ test("handleAction rejects fold disguised as check path when facing bet", async 
   assert.equal(res.status, "rejected");
 });
 
+test("auditChipConservation passes after postBlind (9-handed table baseline)", () => {
+  const buyIn = 10000;
+  const smallBlind = 100;
+  const bigBlind = 200;
+  const seats = Array.from({ length: 9 }, () => ({
+    chips: buyIn,
+    bet: 0,
+    inHand: true,
+  }));
+  seats[0].chips -= smallBlind;
+  seats[0].bet = smallBlind;
+  seats[1].chips -= bigBlind;
+  seats[1].bet = bigBlind;
+  const pot = smallBlind + bigBlind;
+  const handStartTotal = buyIn * 9;
+
+  const r = auditChipConservation(
+    { seats, pot, handStartTotal, uncollectedRake: 0 },
+    "post_blinds"
+  );
+  assert.equal(r.ok, true, `delta=${r.delta} pot=${r.pot}`);
+});
+
 test("minimum bet enforced on opening raise", async () => {
   const g = mkGame({ buyIn: 100000, minimumBet: 10000 });
   g.running = true;

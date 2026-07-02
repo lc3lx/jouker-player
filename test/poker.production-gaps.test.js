@@ -43,6 +43,21 @@ test("auditChipConservation detects delta", () => {
   assert.equal(r.delta, -500);
 });
 
+test("auditChipConservation passes after blinds with immediate-pot model", () => {
+  const game = {
+    seats: [
+      { chips: 9900, bet: 100 },
+      { chips: 9800, bet: 200 },
+    ],
+    pot: 300,
+    handStartTotal: 20000,
+    uncollectedRake: 0,
+  };
+  const r = auditChipConservation(game, "post_blinds");
+  assert.equal(r.ok, true);
+  assert.equal(r.actual, 20000);
+});
+
 test("auditOrFreeze halts running game on violation", async () => {
   const broadcasts = [];
   const game = {
