@@ -1335,30 +1335,25 @@ class PokerTable {
   async resyncTurnAfterReconnect(userId) {
     if (!this.running || this.frozen) return;
 
-    const now = Date.now();
     const actorIdx = this.currentIndex;
     const actor = this.seats[actorIdx];
-    const reconnectIdx = this.findSeatIndexByUser(userId);
-
-    const actorNeedsResync =
-      actor &&
-      !actor.isBot &&
-      actor.inHand &&
-      !actor.folded &&
-      !actor.allIn &&
-      actor.chips > 0;
-
-    if (!actorNeedsResync) return;
-
-    const overdue = this.actionDeadline != null && this.actionDeadline <= now;
-    const timerMissing = !this.turnTimer && !this.botThinkTimer;
-
-    if (overdue) {
-      await this.handleTimeout();
+    if (
+      !actor ||
+      actor.isBot ||
+      !actor.inHand ||
+      actor.folded ||
+      actor.allIn ||
+      actor.chips <= 0
+    ) {
       return;
     }
 
-    if (timerMissing && (actorIdx === reconnectIdx || actor.playerState === PLAYER_STATE.DISCONNECTED)) {
+    const now = Date.now();
+    if (this.actionDeadline != null && this.actionDeadline <= now) {
+      await this.handleTimeout();
+      return;
+    }
+    if (!this.turnTimer && !this.botThinkTimer) {
       this.scheduleCurrentTurn();
     }
   }
@@ -1920,7 +1915,12 @@ class PokerTable {
 
   async handleTimeout() {
     const lockAcquired = await this.acquireActionLock();
-    if (!lockAcquired) return;
+    if (!lockAcquired) {
+      setTimeout(() => {
+        void this.handleTimeout();
+      }, 300);
+      return;
+    }
 
     try {
       const s = this.seats[this.currentIndex];
