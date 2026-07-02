@@ -18,8 +18,8 @@ const POKER_TIMINGS = {
   RECONNECT_WINDOW_MS: envMs("POKER_RECONNECT_WINDOW_MS", 90000),
   /** Seat vacate grace period before a bot replaces the leaving player. */
   VACATE_WINDOW_MS: envMs("POKER_VACATE_WINDOW_MS", 30000),
-  /** Lobby wait window while seated alone before re-checking for 2nd player. */
-  WAIT_FOR_PLAYERS_MS: envMs("POKER_WAIT_FOR_PLAYERS_MS", 30000),
+  /** Lobby wait window while seated alone before bot fill + start. */
+  WAIT_FOR_PLAYERS_MS: envMs("POKER_WAIT_FOR_PLAYERS_MS", 8000),
 };
 
 function sleep(ms) {

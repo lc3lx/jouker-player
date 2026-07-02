@@ -356,11 +356,11 @@ class PokerTable {
     this.pacingBusy = false;
 
     this.botFillDelayMs = Math.max(
-      5000,
-      toSafeInt(process.env.POKER_BOT_FILL_DELAY_MS, 50000)
+      3000,
+      toSafeInt(process.env.POKER_BOT_FILL_DELAY_MS, 8000)
     );
     this.botFillTarget = clampInt(
-      process.env.POKER_BOT_FILL_TARGET || 7,
+      process.env.POKER_BOT_FILL_TARGET || POKER_CAPACITY,
       2,
       Math.max(2, this.capacity)
     );
@@ -1450,6 +1450,7 @@ class PokerTable {
 
   buildLobbyStateFields() {
     const humans = this.humanSeatCount();
+    const active = this.activeSeatCount();
     const base = buildPokerLobbyFields({
       mongoSeatCount: humans,
       engineSeats: this.seats,
@@ -1458,10 +1459,44 @@ class PokerTable {
       round: this.round,
       frozen: this.frozen === true,
     });
-    if (this.frozen || this.tableStatusOverride === "frozen") {
-      return { ...base, tableStatus: "frozen", canStart: false };
+    const canBotStart =
+      !this.frozen &&
+      this.round === "idle" &&
+      humans >= 1 &&
+      active >= POKER_MIN_PLAYERS;
+    const playersNeeded =
+      humans >= POKER_MIN_PLAYERS || canBotStart
+        ? 0
+        : Math.max(0, POKER_MIN_PLAYERS - humans);
+    let tableStatus = base.tableStatus;
+    if (this.running || (this.round && String(this.round) !== "idle")) {
+      tableStatus = "playing";
+    } else if (canBotStart || humans >= POKER_MIN_PLAYERS) {
+      tableStatus = "ready";
     }
-    return base;
+    if (this.frozen || this.tableStatusOverride === "frozen") {
+      return {
+        ...base,
+        seatedCount: humans,
+        humanSeatedCount: humans,
+        activeSeatCount: active,
+        totalSeatedCount: active,
+        playersNeeded,
+        tableStatus: "frozen",
+        canStart: false,
+      };
+    }
+    return {
+      ...base,
+      seatedCount: humans,
+      humanSeatedCount: humans,
+      activeSeatCount: active,
+      totalSeatedCount: active,
+      playersNeeded,
+      tableStatus,
+      canStart: humans >= POKER_MIN_PLAYERS || canBotStart,
+      canStartWithBots: canBotStart,
+    };
   }
 
   async startIfReady({ refreshFromDb = true, allowBotFill = false } = {}) {
@@ -3351,16 +3386,22 @@ function initTableGame(io, options = {}) {
             game.seats[idx].clientSeed = clientSeed.trim().slice(0, 128);
           }
           if (game.round === "idle" && !game.running) {
-            // Reschedule the wait-for-players timer if the stored deadline has
-            // already expired (e.g. after a server restart or LRU eviction).
             if (
               !game.waitForPlayersTimer &&
               game.waitForPlayersDeadline != null &&
               game.waitForPlayersDeadline <= Date.now()
             ) {
               game.waitForPlayersDeadline = null;
+              void game.onWaitForPlayersWindowEnd();
+            } else {
+              game.scheduleWaitForPlayers();
+              await game.startIfReady({
+                refreshFromDb: true,
+                allowBotFill:
+                  game.humanSeatCount() >= 1 &&
+                  game.activeSeatCount() >= POKER_MIN_PLAYERS,
+              });
             }
-            game.startIfReady();
           } else {
             await game.refreshSeatsFromDb();
             await game.broadcastState();
@@ -3584,7 +3625,14 @@ async function syncLivePokerTableAfterJoin(tableId) {
     const game = await activeRegistry.get(String(tableId));
     if (!game) return;
     await game.refreshSeatsFromDb();
-    await game.startIfReady({ refreshFromDb: false });
+    if (game.round === "idle" && !game.running && !game.frozen) {
+      game.scheduleWaitForPlayers();
+    }
+    await game.startIfReady({
+      refreshFromDb: false,
+      allowBotFill:
+        game.humanSeatCount() >= 1 && game.activeSeatCount() >= POKER_MIN_PLAYERS,
+    });
   } catch (e) {
     logger.error("sync_live_poker_after_join_failed", {
       tableId: String(tableId),
