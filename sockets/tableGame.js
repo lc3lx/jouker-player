@@ -657,8 +657,88 @@ class PokerTable {
     this.clearActionScheduling();
     if (this.running) {
       this.scheduleCurrentTurn();
+    } else {
+      this.rescheduleWaitForPlayersAfterRestore();
     }
     return true;
+  }
+
+  /**
+   * After crash/restart the deadline may be restored without an active timer.
+   */
+  rescheduleWaitForPlayersAfterRestore() {
+    if (this.running || this.frozen || this.round !== "idle") return;
+    if (this.waitForPlayersTimer) return;
+    const deadline = this.waitForPlayersDeadline;
+    if (!deadline) return;
+
+    const remaining = deadline - Date.now();
+    if (remaining <= 0) {
+      this.waitForPlayersDeadline = null;
+      void this.onWaitForPlayersWindowEnd();
+      return;
+    }
+    this.waitForPlayersTimer = setTimeout(() => {
+      void this.onWaitForPlayersWindowEnd();
+    }, remaining);
+  }
+
+  /**
+   * Recover idle tables stuck in a mid-hand round after an unclean shutdown.
+   */
+  healStaleRoundIfNotRunning() {
+    if (this.running || this.round === "idle") return;
+    this.logSuspicious("heal_stale_round", { round: this.round });
+    this.community = [];
+    this.pot = 0;
+    this.currentBet = 0;
+    this.minRaise = this.bigBlind;
+    this.lastRaiseAmount = this.bigBlind;
+    this.sbSeatIndex = -1;
+    this.bbSeatIndex = -1;
+    this.currentHandId = null;
+    this.currentHandActions = [];
+    this.processedActionIds = new Set();
+    this.clearActionScheduling();
+    this.clearBotFillTimer();
+    this.clearWaitForPlayersTimer();
+    for (const s of this.seats) {
+      s.inHand = false;
+      s.hole = [];
+      s.folded = false;
+      s.allIn = false;
+      s.bet = 0;
+      s.invested = 0;
+      s.actedThisStreet = false;
+      if (s.chips > 0 && s.playerState === PLAYER_STATE.ACTIVE_HAND) {
+        s.playerState = PLAYER_STATE.SEATED;
+      }
+    }
+    this.round = "idle";
+  }
+
+  async reconcileEngineWithMongo(tableDoc) {
+    const mongoHumans = (tableDoc?.seats || []).filter(
+      (s) => toSafeInt(s.chips, 0) > 0
+    ).length;
+    const engineHumans = this.humanSeatCount();
+
+    if (!this.running) {
+      if (mongoHumans > 0 && engineHumans === 0) {
+        await this.refreshSeatsFromDb();
+        if (this.stateStore?.delete) {
+          await this.stateStore.delete(this.tableId);
+        }
+      } else if (mongoHumans === 0 && engineHumans > 0) {
+        this.resetStateFromTable(tableDoc || { seats: [] });
+        if (this.stateStore?.delete) {
+          await this.stateStore.delete(this.tableId);
+        }
+      }
+      if (this.round !== "idle") {
+        this.healStaleRoundIfNotRunning();
+      }
+    }
   }
 
   static publicStateFromSnapshot(snapshot, forUserId) {
@@ -1598,7 +1678,11 @@ class PokerTable {
 
   async bootstrapLobbyStart() {
     if (this.frozen) return;
-    if (this.running || this.round !== "idle") return;
+    if (this.running) return;
+    if (this.round !== "idle") {
+      this.healStaleRoundIfNotRunning();
+    }
+    if (this.round !== "idle") return;
 
     await this.refreshSeatsFromDb();
 
@@ -1633,8 +1717,11 @@ class PokerTable {
     if (this.frozen) return;
     if (this.running || this.starting) return;
     if (this.round !== "idle") {
-      this.logSuspicious("start_if_ready_non_idle_round", { round: this.round });
-      return;
+      if (!this.running) this.healStaleRoundIfNotRunning();
+      if (this.round !== "idle") {
+        this.logSuspicious("start_if_ready_non_idle_round", { round: this.round });
+        return;
+      }
     }
     this.starting = true;
     try {
@@ -3433,9 +3520,21 @@ class GameRegistry {
           // GC service optional during tests
         }
       }
+      await gt.reconcileEngineWithMongo(table);
     }
 
     await gt.applyCosmeticsToSeats();
+
+    if (!gt.running && gt.round === "idle" && !gt.frozen && gt.humanSeatCount() > 0) {
+      try {
+        await gt.bootstrapLobbyStart();
+      } catch (e) {
+        logger.warn("poker_registry_bootstrap_failed", {
+          tableId: String(tableId),
+          reason: e?.message || "unknown",
+        });
+      }
+    }
 
     this.map.set(tableId, { game: gt, lastAccessAt: Date.now() });
     this.prune();
