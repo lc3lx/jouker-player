@@ -27,7 +27,7 @@ async function abandonTrixTableIfNoHumans(tableId) {
     return { abandoned: false, reason: "no_game" };
   }
 
-  // Humans still seated (including 30s vacate grace before bot replacement).
+  // Humans still seated (including vacate grace before bot replacement / table reset).
   if (typeof game.humanCount === "function" && game.humanCount() > 0) {
     return { abandoned: false, reason: "humans_in_game" };
   }
@@ -36,7 +36,18 @@ async function abandonTrixTableIfNoHumans(tableId) {
     return { abandoned: false, reason: "humans_connected" };
   }
 
-  const table = await Table.findById(key);
+  let table = null;
+  if (mongoose.Types.ObjectId.isValid(key)) {
+    try {
+      table = await Table.findById(key);
+    } catch (err) {
+      logger.warn("trix_abandon_table_lookup_failed", {
+        tableId: key,
+        reason: err?.message,
+      });
+    }
+  }
+
   const needsRefund =
     table &&
     Array.isArray(table.seats) &&

@@ -140,6 +140,9 @@ function wireTrixGame(nsp, tableId, game) {
   game.setAfterMoveListener((result) => {
     void handleTrixAfterMove(nsp, { type: "trix", tableId: tid, game }, result);
   });
+  game.setStateChangedListener(() => {
+    broadcastTrixTableState(nsp, tid);
+  });
   game.setGameEventListener((event, payload) => {
     if (
       event === "turn_timer_started" ||
@@ -479,11 +482,53 @@ function registerGameHandlers(nsp, jwtVerify) {
         roomManager.setTrixUserSocket(String(userId), socket.id);
         roomManager.setUserTrixTable(String(userId), String(table._id));
         const game = getOrCreateTrixGameWired(nsp, table._id);
+
+        const liveHuman = game.players.find(
+          (p) => !p.isBot && p.userId && String(p.userId) === userIdStr
+        );
+        if (
+          liveHuman &&
+          liveHuman.reconnectDeadline &&
+          liveHuman.reconnectDeadline < Date.now()
+        ) {
+          const { finalizeCardTableVacate: finalizeVacate } = require("../../services/cardTableVacateService");
+          await finalizeVacate({
+            gameType: "trix",
+            tableId: table._id,
+            userId,
+            nsp,
+          });
+          socket.emit("invalid_move", { reason: "reconnect_expired" });
+          return;
+        }
+
         game.syncLobbyFromTable(table, (uid) => roomManager.getTrixUserSocket(String(uid)));
         if (!game.gameState) {
           game.startGame();
         }
         let seatIndex = game.getPlayerIndex(userId);
+        if (seatIndex < 0) {
+          const mongoSeatIdx = table.seats.findIndex(
+            (s) => seatUserId(s) === userIdStr
+          );
+          if (mongoSeatIdx >= 0) {
+            const seat = table.seats[mongoSeatIdx];
+            let nm = `لاعب ${mongoSeatIdx + 1}`;
+            if (seat.user && typeof seat.user === "object" && seat.user.name) {
+              nm = String(seat.user.name);
+            }
+            if (
+              game.restoreHumanAtSeat(
+                mongoSeatIdx,
+                userId,
+                socket.id,
+                nm
+              )
+            ) {
+              seatIndex = mongoSeatIdx;
+            }
+          }
+        }
         if (seatIndex < 0) {
           game.syncLobbyFromTable(table, (uid) => roomManager.getTrixUserSocket(String(uid)));
           seatIndex = game.getPlayerIndex(userId);
@@ -1091,9 +1136,9 @@ function registerGameHandlers(nsp, jwtVerify) {
         return;
       }
       const trixId = roomManager.getTrixTableIdForUser(userId);
-      if (roomId && trixId && String(trixId) === String(roomId)) {
+      if (trixId && (!roomId || String(trixId) === String(roomId))) {
         roomManager.deleteTrixUserSocket(userId);
-        socket.leave(`trix:${roomId}`);
+        if (roomId) socket.leave(`trix:${roomId}`);
         matchMaker.dequeue("trix", userId);
         scheduleCardTableVacate({
           gameType: "trix",

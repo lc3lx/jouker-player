@@ -529,20 +529,55 @@ exports.joinTable = asyncHandler(async (req, res, next) => {
 
   const existingSeatTable = await findUserSeatedTable(req.user._id, table.gameType, table.tier);
   if (existingSeatTable) {
-    const seat = existingSeatTable.seats.find(
-      (s) => String(s.user) === String(req.user._id)
-    );
-    return res.status(200).json({
-      status: "success",
-      message: "Reconnected to existing seat",
-      data: {
-        tableId: String(existingSeatTable._id),
-        tableNumber: existingSeatTable.tableNumber,
-        chips: seat?.chips ?? buyIn,
-        reconnect: true,
-        rtcRoom: { roomId: String(existingSeatTable._id), type: "table" },
-      },
-    });
+    if (existingSeatTable.gameType === "trix") {
+      const memGame = roomManager.getTrixGameForTable(String(existingSeatTable._id));
+      const memHuman = memGame?.players?.find(
+        (p) => !p.isBot && p.userId && String(p.userId) === String(req.user._id)
+      );
+      if (
+        memGame?.gameState &&
+        memHuman?.reconnectDeadline &&
+        memHuman.reconnectDeadline <= Date.now()
+      ) {
+        const { finalizeCardTableVacate } = require("./cardTableVacateService");
+        await finalizeCardTableVacate({
+          gameType: "trix",
+          tableId: existingSeatTable._id,
+          userId: req.user._id,
+          nsp: null,
+        });
+      } else {
+        const seat = existingSeatTable.seats.find(
+          (s) => String(s.user) === String(req.user._id)
+        );
+        return res.status(200).json({
+          status: "success",
+          message: "Reconnected to existing seat",
+          data: {
+            tableId: String(existingSeatTable._id),
+            tableNumber: existingSeatTable.tableNumber,
+            chips: seat?.chips ?? buyIn,
+            reconnect: true,
+            rtcRoom: { roomId: String(existingSeatTable._id), type: "table" },
+          },
+        });
+      }
+    } else {
+      const seat = existingSeatTable.seats.find(
+        (s) => String(s.user) === String(req.user._id)
+      );
+      return res.status(200).json({
+        status: "success",
+        message: "Reconnected to existing seat",
+        data: {
+          tableId: String(existingSeatTable._id),
+          tableNumber: existingSeatTable.tableNumber,
+          chips: seat?.chips ?? buyIn,
+          reconnect: true,
+          rtcRoom: { roomId: String(existingSeatTable._id), type: "table" },
+        },
+      });
+    }
   }
 
   if (table.gameType === "tarneeb41") {

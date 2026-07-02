@@ -1,5 +1,6 @@
 /**
- * 30s disconnect/leave grace for Tarneeb41 & Trix — bot replacement then table clear.
+ * Disconnect/leave grace for Tarneeb41 & Trix.
+ * Trix (sole human): 30s then full table reset (refund + clear in-memory game).
  */
 const Table = require("../models/tableModel");
 const roomManager = require("../rooms/roomManager");
@@ -9,8 +10,22 @@ const { abandonTrixTableIfNoHumans } = require("./trixRecoveryService");
 
 const VACATE_MS = Math.max(
   5000,
-  parseInt(process.env.CARD_TABLE_VACATE_MS || "30000", 10)
+  parseInt(process.env.CARD_TABLE_VACATE_MS || "60000", 10)
 );
+
+const TRIX_VACATE_MS = Math.max(
+  5000,
+  parseInt(
+    process.env.TRIX_VACATE_MS ||
+      process.env.CARD_TABLE_VACATE_MS ||
+      "30000",
+    10
+  )
+);
+
+function vacateMsFor(gameType) {
+  return gameType === "trix" ? TRIX_VACATE_MS : VACATE_MS;
+}
 
 /** @type {Map<string, NodeJS.Timeout>} */
 const vacateTimers = new Map();
@@ -36,6 +51,14 @@ function findHumanPlayer(game, userId) {
   );
 }
 
+function isWithinVacateGrace(player) {
+  return !!(
+    player &&
+    player.reconnectDeadline &&
+    player.reconnectDeadline > Date.now()
+  );
+}
+
 function cancelCardTableVacate({ gameType, tableId, userId }) {
   const key = timerKey(gameType, tableId, userId);
   const t = vacateTimers.get(key);
@@ -56,14 +79,15 @@ function scheduleCardTableVacate({ gameType, tableId, userId, nsp }) {
   const player = findHumanPlayer(game, userId);
   if (!player) return;
 
-  player.reconnectDeadline = Date.now() + VACATE_MS;
+  const vacateMs = vacateMsFor(gameType);
+  player.reconnectDeadline = Date.now() + vacateMs;
   player.socketId = null;
 
   const key = timerKey(gameType, tableId, userId);
   const timer = setTimeout(() => {
     vacateTimers.delete(key);
     void finalizeCardTableVacate({ gameType, tableId, userId, nsp });
-  }, VACATE_MS);
+  }, vacateMs);
   if (typeof timer.unref === "function") timer.unref();
   vacateTimers.set(key, timer);
 
@@ -71,7 +95,8 @@ function scheduleCardTableVacate({ gameType, tableId, userId, nsp }) {
     gameType,
     tableId: String(tableId),
     userId: String(userId),
-    vacateMs: VACATE_MS,
+    vacateMs,
+    lastHuman: gameType === "trix" && game.humanCount() === 1,
   });
 
   try {
@@ -143,6 +168,26 @@ async function abandonCardTableIfNoHumans(nsp, gameType, tableId) {
   return abandonTarneeb41IfNoHumans(tableId);
 }
 
+async function releaseTrixMongoSeatOnVacate(tableId, userId) {
+  const table = await Table.findById(tableId);
+  if (!table || table.gameType !== "trix") return false;
+  const idx = table.seats.findIndex(
+    (s) => s.user && String(s.user) === String(userId)
+  );
+  if (idx === -1) return false;
+  table.seats.splice(idx, 1);
+  if (table.seats.length < table.capacity) {
+    table.status = "open";
+  }
+  await table.save();
+  emitTablesUpdated({
+    gameType: "trix",
+    reason: "vacate",
+    tableId: String(tableId),
+  });
+  return true;
+}
+
 async function finalizeCardTableVacate({ gameType, tableId, userId, nsp }) {
   const game = getGame(gameType, tableId);
   const player = findHumanPlayer(game, userId);
@@ -151,9 +196,14 @@ async function finalizeCardTableVacate({ gameType, tableId, userId, nsp }) {
     return;
   }
 
-  if (player.reconnectDeadline && player.reconnectDeadline > Date.now()) {
+  if (isWithinVacateGrace(player)) {
     return;
   }
+
+  const wasLastTrixHuman =
+    gameType === "trix" &&
+    typeof game.humanCount === "function" &&
+    game.humanCount() === 1;
 
   if (typeof game.convertHumanToBot === "function") {
     game.convertHumanToBot(userId);
@@ -165,10 +215,9 @@ async function finalizeCardTableVacate({ gameType, tableId, userId, nsp }) {
     player.reconnectDeadline = null;
   }
 
-  const seatIndex = player.seatIndex ?? 0;
-  const seatChips = Number(player.chips) || 0;
-
   if (gameType === "tarneeb41") {
+    const seatIndex = player.seatIndex ?? 0;
+    const seatChips = Number(player.chips) || 0;
     try {
       const { recordVacatedBotSeat, notifyBotSeatAvailable } = require("./tarneeb41BotSeatService");
       const table = await Table.findById(tableId).select("seats");
@@ -190,15 +239,33 @@ async function finalizeCardTableVacate({ gameType, tableId, userId, nsp }) {
         reason: err?.message,
       });
     }
-  }
-
-  if (gameType === "tarneeb41") {
     roomManager.userToTarneeb41TableId.delete(String(userId));
     roomManager.tarneeb41UserSocket.delete(String(userId));
     if (typeof game.checkBotTurn === "function") game.checkBotTurn();
   } else {
     roomManager.userToTrixTableId.delete(String(userId));
     roomManager.trixUserSocket.delete(String(userId));
+
+    if (wasLastTrixHuman) {
+      if (typeof game.clearBotTimer === "function") game.clearBotTimer();
+      if (typeof game.clearTurnTimer === "function") game.clearTurnTimer();
+      logger.info("trix_last_human_vacate_reset", {
+        tableId: String(tableId),
+        userId: String(userId),
+      });
+      await abandonTrixTableIfNoHumans(tableId);
+      return;
+    }
+
+    try {
+      await releaseTrixMongoSeatOnVacate(tableId, userId);
+    } catch (err) {
+      logger.warn("trix_vacate_mongo_seat_release_failed", {
+        tableId: String(tableId),
+        userId: String(userId),
+        reason: err?.message,
+      });
+    }
     if (typeof game.checkBotTurn === "function") game.checkBotTurn();
   }
 
@@ -228,14 +295,32 @@ async function finalizeCardTableVacate({ gameType, tableId, userId, nsp }) {
 }
 
 function onCardTableRejoin({ gameType, tableId, userId }) {
+  const game = getGame(gameType, tableId);
+  const player = findHumanPlayer(game, userId);
+  if (!isWithinVacateGrace(player)) {
+    return;
+  }
   cancelCardTableVacate({ gameType, tableId, userId });
+}
+
+/**
+ * True when a trix player may reconnect to an in-progress table (within vacate grace).
+ */
+function isTrixVacateGraceReconnect(game, userId) {
+  if (!game) return false;
+  const player = findHumanPlayer(game, userId);
+  return isWithinVacateGrace(player);
 }
 
 module.exports = {
   VACATE_MS,
+  TRIX_VACATE_MS,
+  vacateMsFor,
   scheduleCardTableVacate,
   cancelCardTableVacate,
   finalizeCardTableVacate,
   onCardTableRejoin,
   abandonCardTableIfNoHumans,
+  isTrixVacateGraceReconnect,
+  isWithinVacateGrace,
 };

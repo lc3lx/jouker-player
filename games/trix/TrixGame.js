@@ -275,11 +275,55 @@ class TrixGame extends BaseGameEngine {
       (x) => !x.isBot && x.userId && String(x.userId) === String(userId)
     );
     if (!p) return false;
+    p.vacatedFromUserId = String(userId);
     p.isBot = true;
     p.userId = `bot_vacate_${Date.now()}_${p.seatIndex ?? 0}`;
     p.socketId = null;
     p.displayName = "بوت";
     p.reconnectDeadline = null;
+    return true;
+  }
+
+  restoreHumanAtSeat(seatIndex, userId, socketId, displayName) {
+    return this.replaceBotWithHuman(seatIndex, userId, socketId, displayName, {
+      allowTakeover: false,
+    });
+  }
+
+  replaceBotWithHuman(seatIndex, userId, socketId, displayName, opts = {}) {
+    const p = this.players.find((x) => x.seatIndex === seatIndex);
+    if (!p || !p.isBot) return false;
+
+    const uid = String(userId);
+    const allowTakeover = !!opts.allowTakeover;
+    if (
+      !allowTakeover &&
+      p.vacatedFromUserId &&
+      String(p.vacatedFromUserId) !== uid
+    ) {
+      return false;
+    }
+
+    p.isBot = false;
+    p.userId = userId;
+    p.socketId = socketId || null;
+    p.displayName = displayName || p.displayName || `لاعب ${seatIndex + 1}`;
+    if (opts.chips != null) p.chips = opts.chips;
+    p.reconnectDeadline = null;
+    delete p.vacatedFromUserId;
+
+    if (
+      (this.state === "selecting_game" || this.state === "playing") &&
+      this.gameState
+    ) {
+      const activeIdx =
+        this.state === "selecting_game"
+          ? this.gameState.currentKingIndex
+          : this.gameState.turnPlayerIndex;
+      if (activeIdx === seatIndex) {
+        this._restartTurnTimer();
+      }
+    }
     return true;
   }
 
