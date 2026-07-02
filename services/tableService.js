@@ -34,7 +34,7 @@ const waitingQueueService = require("./waitingQueueService");
 const { removeSeatPresence } = require("./pokerCollusionGuard");
 const { markTableActivity, resetPokerTableWhenEmpty } = require("./pokerTableGcService");
 const { syncLivePokerTableAfterLeave, syncLivePokerTableAfterJoin } = require("../sockets/tableGame");
-const { vacatePokerSeat, tryRestoreVacatedSeat } = require("./pokerVacateService");
+const { vacatePokerSeat, tryRestoreVacatedSeat, permanentLeavePokerTable } = require("./pokerVacateService");
 const {
   tryClaimTarneeb41BotSeat,
   tryRestoreVacatedTarneeb41Seat,
@@ -918,44 +918,29 @@ exports.leaveTable = asyncHandler(async (req, res, next) => {
   const deviceId = String(req.body?.deviceId || req.headers["x-device-id"] || "");
 
   if (table.gameType === "poker") {
-    const result = await vacatePokerSeat({
+    const result = await permanentLeavePokerTable({
       tableId: id,
       userId: req.user._id,
       clientIp,
       deviceId: deviceId || null,
-      reason: "leave",
     });
-    if (!result.vacated) {
+    if (!result.left) {
       if (result.reason === "NOT_SEATED") {
         return next(new ApiError("You are not seated at this table", 400));
       }
       return next(new ApiError("Could not leave table", 400));
     }
 
-    const afterLeave = await Table.findById(id).select("seats gameType vacatingPlayers");
-    if (
-      afterLeave &&
-      afterLeave.seats.length === 0 &&
-      (!afterLeave.vacatingPlayers || afterLeave.vacatingPlayers.length === 0)
-    ) {
-      await resetPokerTableWhenEmpty(id);
-    } else {
-      await syncLivePokerTableAfterLeave(id);
-      markTableActivity(String(id));
-    }
-
     void trackJoinLeaveEvent(req.user._id, "leave_table");
-    emitTablesUpdated({ gameType: "poker", reason: "vacate", tableId: String(id) });
+    emitTablesUpdated({ gameType: "poker", reason: "leave", tableId: String(id) });
     void syncPokerTableStatusById(String(id));
 
     return res.status(200).json({
       status: "success",
-      message: "Seat vacated — return within 30 seconds or a bot takes your place",
+      message: "Left table successfully",
       data: {
-        vacated: true,
-        chipsHeld: result.chips,
-        vacateUntil: result.vacateUntil,
-        vacateWindowMs: result.vacateWindowMs,
+        cashedOut: result.cashedOut,
+        permanentLeave: true,
         rtcRoom: { roomId: table._id, type: "table" },
       },
     });

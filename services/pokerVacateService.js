@@ -1,7 +1,7 @@
 const Table = require("../models/tableModel");
 const logger = require("../utils/logger");
 const { POKER_TIMINGS } = require("../utils/poker/timings");
-const { withMongoTransaction, forfeitTableSeatLock } = require("./walletLedgerService");
+const { withMongoTransaction, forfeitTableSeatLock, releaseTableSeatToBalance } = require("./walletLedgerService");
 const { statusAfterSeatChange } = require("./pokerTableAllocationService");
 const { seatNextFromQueue } = require("./pokerWaitingQueueService");
 const { removeSeatPresence } = require("./pokerCollusionGuard");
@@ -207,6 +207,102 @@ async function finalizeVacateWithBot({ tableId, userId, chips }) {
   return { ok: true, chips: seatChips };
 }
 
+/**
+ * Permanent leave: cash out, clear vacate window, reset table if last human.
+ */
+async function permanentLeavePokerTable({
+  tableId,
+  userId,
+  clientIp = null,
+  deviceId = null,
+}) {
+  const tid = String(tableId);
+  const uid = String(userId);
+  let cashedOut = 0;
+  let wasSeated = false;
+
+  try {
+    await withMongoTransaction(async (session) => {
+      const table = await Table.findById(tid).session(session);
+      if (!table || table.gameType !== "poker") throw new Error("NOT_POKER");
+
+      const vacEntry = findActiveVacatingEntry(table, uid);
+      if (vacEntry) {
+        wasSeated = true;
+        const chips = toSafeInt(vacEntry.chips, 0);
+        table.vacatingPlayers = (table.vacatingPlayers || []).filter(
+          (v) => String(v.user) !== uid
+        );
+        if (chips > 0) {
+          await releaseTableSeatToBalance({
+            session,
+            userId: uid,
+            seatChips: chips,
+            tableId: tid,
+            meta: { reason: "leave_table_cashout", tableNumber: table.tableNumber },
+          });
+          cashedOut += chips;
+        }
+      }
+
+      const idx = table.seats.findIndex((s) => String(s.user) === uid);
+      if (idx >= 0) {
+        wasSeated = true;
+        const chips = toSafeInt(table.seats[idx].chips, 0);
+        table.seats.splice(idx, 1);
+        if (chips > 0) {
+          await releaseTableSeatToBalance({
+            session,
+            userId: uid,
+            seatChips: chips,
+            tableId: tid,
+            meta: { reason: "leave_table_cashout", tableNumber: table.tableNumber },
+          });
+          cashedOut += chips;
+        }
+      }
+
+      if (!wasSeated) throw new Error("NOT_SEATED");
+
+      table.status = statusAfterSeatChange(table, table.seats.length);
+      await table.save({ session });
+      await seatNextFromQueue({ session, tableId: tid });
+    });
+  } catch (e) {
+    if (e.message === "NOT_SEATED" || e.message === "NOT_POKER") {
+      return { left: false, reason: e.message };
+    }
+    throw e;
+  }
+
+  await removeSeatPresence({
+    tableId: tid,
+    userId: uid,
+    ip: clientIp,
+    deviceId: deviceId || null,
+  });
+
+  await getTableGameBridge().removeLiveHumanSeat(tid, uid);
+
+  const afterLeave = await Table.findById(tid).select("seats gameType vacatingPlayers");
+  const activeVacating = (afterLeave?.vacatingPlayers || []).filter((v) => isVacateActive(v));
+  if (
+    afterLeave &&
+    afterLeave.seats.length === 0 &&
+    activeVacating.length === 0
+  ) {
+    await require("./pokerTableGcService").resetPokerTableWhenEmpty(tid);
+  } else {
+    await getTableGameBridge().syncLivePokerTableAfterLeave(tid);
+    require("./pokerTableGcService").markTableActivity(tid);
+  }
+
+  emitTablesUpdated({ gameType: "poker", reason: "leave", tableId: tid });
+  logger.info("poker_permanent_leave", { tableId: tid, userId: uid, cashedOut });
+
+  return { left: true, cashedOut };
+}
+
 function toSafeInt(value, fallback = 0) {
   const n = Number(value);
   if (!Number.isFinite(n)) return fallback;
@@ -217,6 +313,7 @@ module.exports = {
   vacatePokerSeat,
   tryRestoreVacatedSeat,
   finalizeVacateWithBot,
+  permanentLeavePokerTable,
   findUserVacatingTable,
   findActiveVacatingEntry,
   isVacateActive,

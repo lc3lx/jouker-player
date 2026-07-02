@@ -1226,6 +1226,48 @@ class PokerTable {
     return true;
   }
 
+  /**
+   * Permanent leave — remove human from engine without vacate/reconnect window.
+   */
+  async removeLiveHumanSeat(userId) {
+    const uid = String(userId);
+    this.clearVacateTimer(uid);
+    this.clearReconnectTimer(uid);
+    this.pendingVacates.delete(uid);
+
+    const idx = this.findSeatIndexByUser(uid);
+    if (idx >= 0) {
+      const seat = this.seats[idx];
+      if (seat.inHand && this.running && !seat.folded && !seat.allIn) {
+        seat.folded = true;
+        await this.broadcastState();
+        if (this.currentIndex === idx) {
+          await this.advance();
+        }
+      }
+      this.seats.splice(idx, 1);
+      if (this.seats.length > 0) {
+        this.dealerIndex =
+          ((this.dealerIndex % this.seats.length) + this.seats.length) % this.seats.length;
+      } else {
+        this.dealerIndex = 0;
+      }
+    }
+
+    if (this.humanSeatCount() < 1) {
+      this.seats = this.seats.filter((s) => s.isBot);
+      if (this.seats.length === 0 && this.running) {
+        this.running = false;
+        this.round = "idle";
+        this.clearActionScheduling();
+      }
+    }
+
+    await this.syncMongoTableStatus();
+    await this.broadcastState();
+    return true;
+  }
+
   async restoreVacatedHumanSeat(userId, { chips } = {}) {
     const uid = String(userId);
     const pending = this.pendingVacates.get(uid);
@@ -3695,6 +3737,13 @@ async function vacateLiveEngineSeat(tableId, userId, meta = {}) {
   return game.applyEngineVacate(userId, meta);
 }
 
+async function removeLiveHumanSeat(tableId, userId) {
+  if (!activeRegistry) return false;
+  const game = await activeRegistry.get(String(tableId));
+  if (!game) return false;
+  return game.removeLiveHumanSeat(userId);
+}
+
 async function restoreLiveEngineSeat(tableId, userId, meta = {}) {
   if (!activeRegistry) return false;
   const game = await activeRegistry.get(String(tableId));
@@ -3727,6 +3776,10 @@ async function syncLivePokerTableAfterLeave(tableId) {
   if (!game) return;
   await game.refreshSeatsFromDb();
   game.clearWaitForPlayersTimer();
+  if (game.humanSeatCount() < 1) {
+    await resetLivePokerTableWhenEmpty(tableId);
+    return;
+  }
   if (game.round === "idle" && !game.running && !game.frozen) {
     if (game.humanSeatCount() >= 1) {
       await game.bootstrapLobbyStart();
@@ -3791,6 +3844,7 @@ module.exports = {
   syncLivePokerTableAfterJoin,
   syncLivePokerTableAfterLeave,
   vacateLiveEngineSeat,
+  removeLiveHumanSeat,
   restoreLiveEngineSeat,
   buildAdminRealtimeTablePayload,
   getLiveTableGameForAdmin,
