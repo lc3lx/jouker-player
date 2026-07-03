@@ -39,45 +39,72 @@ function allowNonTransactionFallback() {
   );
 }
 
+function isLikelyStandaloneMongoUri() {
+  const uri =
+    process.env.DB_URI ||
+    process.env.MONGO_URI ||
+    process.env.MONGODB_URI ||
+    "mongodb://127.0.0.1:27017/game";
+  if (/replicaSet=/i.test(uri)) return false;
+  if (/mongos/i.test(uri)) return false;
+  return /localhost|127\.0\.0\.1/i.test(uri);
+}
+
 /**
  * Probe once whether this Mongo deployment supports multi-document transactions.
  * Standalone dev instances do not; replica sets and mongos do.
  */
 async function probeMongoTransactions() {
   if (_mongoTxnCapability !== "unknown") return _mongoTxnCapability;
-  if (_mongoTxnProbePromise) return _mongoTxnProbePromise;
-
-  _mongoTxnProbePromise = (async () => {
-    const session = await mongoose.startSession();
-    try {
-      await session.withTransaction(async () => {});
-      _mongoTxnCapability = "supported";
-      return _mongoTxnCapability;
-    } catch (err) {
-      if (isTransactionUnsupportedError(err)) {
-        _mongoTxnCapability = "unsupported";
-        if (allowNonTransactionFallback()) {
-          logger.warn("mongo_transactions_unsupported", {
-            reason: err?.message || "unknown",
-            mode: "standalone_mongo",
-            hint: "Wallet ops will run without Mongo transactions (dev only). Use a replica set in production.",
-          });
-        } else {
-          logger.error("mongo_transactions_required", {
-            reason: err?.message || "unknown",
-            hint: "Production requires MongoDB replica set or mongos.",
-          });
-        }
-        return _mongoTxnCapability;
-      }
-      throw err;
-    } finally {
-      await session.endSession();
-      _mongoTxnProbePromise = null;
-    }
-  })();
-
+  if (!_mongoTxnProbePromise) {
+    _mongoTxnProbePromise = _runMongoTransactionProbe();
+  }
   return _mongoTxnProbePromise;
+}
+
+async function _runMongoTransactionProbe() {
+  if (
+    allowNonTransactionFallback() &&
+    (String(process.env.MONGO_STANDALONE || "").toLowerCase() === "true" ||
+      isLikelyStandaloneMongoUri())
+  ) {
+    _mongoTxnCapability = "unsupported";
+    logger.info("mongo_standalone_mode", {
+      mode: "non_transaction_wallet",
+      hint: "Wallet ops run without Mongo transactions on local dev. Use a replica set in production.",
+    });
+    return _mongoTxnCapability;
+  }
+
+  const session = await mongoose.startSession();
+  try {
+    // Empty callbacks can falsely pass on standalone; touch the DB inside the txn.
+    await session.withTransaction(async () => {
+      await withOptionalSession(Wallet.findOne({ _id: new mongoose.Types.ObjectId() }), session)
+        .lean();
+    });
+    _mongoTxnCapability = "supported";
+    return _mongoTxnCapability;
+  } catch (err) {
+    if (isTransactionUnsupportedError(err)) {
+      _mongoTxnCapability = "unsupported";
+      if (allowNonTransactionFallback()) {
+        logger.info("mongo_standalone_mode", {
+          reason: err?.message || "unknown",
+          mode: "non_transaction_wallet",
+        });
+      } else {
+        logger.error("mongo_transactions_required", {
+          reason: err?.message || "unknown",
+          hint: "Production requires MongoDB replica set or mongos.",
+        });
+      }
+      return _mongoTxnCapability;
+    }
+    throw err;
+  } finally {
+    await session.endSession();
+  }
 }
 
 /** Test helper: reset cached probe result. */
@@ -491,16 +518,17 @@ async function withMongoTransaction(work) {
     });
     return result;
   } catch (err) {
-    metrics.errorsTotal.inc({ type: "wallet_txn_failed" });
-    logger.error("wallet_txn_failed", { reason: err?.message || "unknown" });
     if (allowFallback && isTransactionUnsupportedError(err)) {
       _mongoTxnCapability = "unsupported";
-      logger.warn("wallet_txn_fallback_non_atomic", {
+      logger.info("mongo_standalone_mode", {
         reason: err?.message || "unknown",
-        mode: "standalone_mongo",
+        mode: "non_transaction_wallet",
+        note: "late_detection",
       });
       return work(null);
     }
+    metrics.errorsTotal.inc({ type: "wallet_txn_failed" });
+    logger.error("wallet_txn_failed", { reason: err?.message || "unknown" });
     throw err;
   } finally {
     await session.endSession();

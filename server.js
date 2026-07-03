@@ -156,6 +156,8 @@ let realtimeRedis = null;
 
 async function startServer() {
   await dbConnection();
+  const { probeMongoTransactions } = require("./services/walletLedgerService");
+  await probeMongoTransactions();
   await runProductionChecks({ skipSmoke: true });
 
   realtimeRedis = await setupSocketIoRedis(io);
