@@ -27,6 +27,65 @@ function isTransactionUnsupportedError(err) {
   return msg.includes("Transaction numbers are only allowed on a replica set member or mongos");
 }
 
+/** @type {"unknown" | "supported" | "unsupported"} */
+let _mongoTxnCapability = "unknown";
+let _mongoTxnProbePromise = null;
+
+function allowNonTransactionFallback() {
+  return (
+    process.env.NODE_ENV !== "production" &&
+    String(process.env.ALLOW_NON_TRANSACTION_FALLBACK || "true").toLowerCase() !==
+      "false"
+  );
+}
+
+/**
+ * Probe once whether this Mongo deployment supports multi-document transactions.
+ * Standalone dev instances do not; replica sets and mongos do.
+ */
+async function probeMongoTransactions() {
+  if (_mongoTxnCapability !== "unknown") return _mongoTxnCapability;
+  if (_mongoTxnProbePromise) return _mongoTxnProbePromise;
+
+  _mongoTxnProbePromise = (async () => {
+    const session = await mongoose.startSession();
+    try {
+      await session.withTransaction(async () => {});
+      _mongoTxnCapability = "supported";
+      return _mongoTxnCapability;
+    } catch (err) {
+      if (isTransactionUnsupportedError(err)) {
+        _mongoTxnCapability = "unsupported";
+        if (allowNonTransactionFallback()) {
+          logger.warn("mongo_transactions_unsupported", {
+            reason: err?.message || "unknown",
+            mode: "standalone_mongo",
+            hint: "Wallet ops will run without Mongo transactions (dev only). Use a replica set in production.",
+          });
+        } else {
+          logger.error("mongo_transactions_required", {
+            reason: err?.message || "unknown",
+            hint: "Production requires MongoDB replica set or mongos.",
+          });
+        }
+        return _mongoTxnCapability;
+      }
+      throw err;
+    } finally {
+      await session.endSession();
+      _mongoTxnProbePromise = null;
+    }
+  })();
+
+  return _mongoTxnProbePromise;
+}
+
+/** Test helper: reset cached probe result. */
+function resetMongoTransactionProbeForTests() {
+  _mongoTxnCapability = "unknown";
+  _mongoTxnProbePromise = null;
+}
+
 async function getOrCreateTableLock(userId, tableId, session) {
   let row = await withOptionalSession(
     WalletTableLock.findOne({ user: userId, table: tableId }),
@@ -414,10 +473,16 @@ async function applyLockedDelta({
 }
 
 async function withMongoTransaction(work) {
-  const allowFallback =
-    process.env.NODE_ENV !== "production" &&
-    String(process.env.ALLOW_NON_TRANSACTION_FALLBACK || "true").toLowerCase() !==
-      "false";
+  const allowFallback = allowNonTransactionFallback();
+  const capability = await probeMongoTransactions();
+
+  if (capability === "unsupported") {
+    if (!allowFallback) {
+      throw new Error("MONGO_TRANSACTIONS_REQUIRED");
+    }
+    return work(null);
+  }
+
   const session = await mongoose.startSession();
   try {
     let result = null;
@@ -429,11 +494,11 @@ async function withMongoTransaction(work) {
     metrics.errorsTotal.inc({ type: "wallet_txn_failed" });
     logger.error("wallet_txn_failed", { reason: err?.message || "unknown" });
     if (allowFallback && isTransactionUnsupportedError(err)) {
+      _mongoTxnCapability = "unsupported";
       logger.warn("wallet_txn_fallback_non_atomic", {
         reason: err?.message || "unknown",
         mode: "standalone_mongo",
       });
-      // Dev/standalone compatibility path: same business logic, no Mongo transaction.
       return work(null);
     }
     throw err;
@@ -657,6 +722,8 @@ async function ledgerWithdraw({ session, userId, amount, meta = {}, ledgerType =
 
 module.exports = {
   withMongoTransaction,
+  probeMongoTransactions,
+  resetMongoTransactionProbeForTests,
   getOrCreateWallet,
   transferToLocked,
   transferToBalance,
