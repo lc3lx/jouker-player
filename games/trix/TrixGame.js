@@ -572,6 +572,13 @@ class TrixGame extends BaseGameEngine {
               this.gameState.players[forPlayerIndex].takenCards.length / 4
             )
           : 0,
+      // Provisional score for the CURRENT contract per seat (public).
+      // Resets each contract; added to cumulative `scores` at round end.
+      roundScores:
+        this.gameState.currentGameType &&
+        (this.state === 'playing' || this.state === 'round_end')
+          ? ScoreManager.computeRoundScore(this.gameState)
+          : [0, 0, 0, 0],
       validCards:
         this.state === 'playing' &&
         forPlayerIndex === this.gameState.turnPlayerIndex

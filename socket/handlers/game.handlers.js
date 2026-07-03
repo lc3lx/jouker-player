@@ -23,6 +23,7 @@ const {
   onCardTableRejoin,
 } = require("../../services/cardTableVacateService");
 const logger = require("../../utils/logger");
+const tableChat = require("../../sockets/tableChat");
 const ActionPipeline = require("../../engine/ActionPipeline");
 const spectatorService = require("../../services/spectatorService");
 const DiceEngine = require("../../games/dice/DiceEngine");
@@ -1193,6 +1194,69 @@ function registerGameHandlers(nsp, jwtVerify) {
       const tid = String(tableId);
       spectatorService.remove(tid, userId);
       socket.leave(`spec:${tid}`);
+    });
+
+    // ── In-table chat (trix + tarneeb41 share the /game namespace) ───────────
+    socket.on("table_chat", (payload, ack) => {
+      try {
+        const { tableId, body, emoji } = payload || {};
+        if (!tableId) return;
+        const tid = String(tableId);
+
+        // Figure out which game room this seated socket belongs to.
+        let room = null;
+        let game = null;
+        const gt = payload?.gameType;
+        if ((gt === "trix" || !gt) && socket.rooms.has(`trix:${tid}`)) {
+          room = `trix:${tid}`;
+          game = roomManager.getTrixGameForTable(tid);
+        } else if (
+          (gt === "tarneeb41" || !gt) &&
+          socket.rooms.has(`tarneeb41:${tid}`)
+        ) {
+          room = `tarneeb41:${tid}`;
+          game = roomManager.getTarneeb41GameForTable(tid);
+        }
+        if (!room) return;
+
+        const rate = tableChat.checkRate(userId);
+        if (!rate.ok) {
+          if (typeof ack === "function") {
+            ack({ ok: false, reason: "rate_limited", retryAfterMs: rate.retryAfterMs });
+          }
+          return;
+        }
+
+        let name = payload?.name;
+        const avatar = payload?.avatar;
+        if (game && Array.isArray(game.players)) {
+          const p = game.players.find(
+            (x) => String(x.userId) === String(userId)
+          );
+          if (p && p.name) name = p.name;
+        }
+
+        const built = tableChat.buildChatMessage({
+          userId,
+          name,
+          avatar,
+          body,
+          emoji,
+        });
+        if (!built.ok) {
+          if (typeof ack === "function") ack(built);
+          return;
+        }
+        // Broadcast to seated players and to any spectators of this table.
+        nsp.to(room).emit("table_chat", built.message);
+        nsp.to(`spec:${tid}`).emit("table_chat", built.message);
+        if (typeof ack === "function") ack({ ok: true, id: built.message.id });
+      } catch (e) {
+        logger.error("table_chat_failed", {
+          userId,
+          reason: e?.message || "unknown",
+        });
+      }
     });
 
     socket.on("disconnect", () => {

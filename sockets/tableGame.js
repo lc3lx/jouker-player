@@ -11,6 +11,7 @@ const User = require("../models/userModel");
 const { RedisTableStateStore } = require("../utils/tableStateStore");
 const { applyLockedDelta, applyHouseSettlementDelta, withMongoTransaction } = require("../services/walletLedgerService");
 const logger = require("../utils/logger");
+const tableChat = require("./tableChat");
 const { metrics } = require("../utils/metrics");
 const { sendAlert } = require("../utils/alert");
 const { trackEventServerFireAndForget } = require("../services/analyticsService");
@@ -3794,6 +3795,56 @@ function initTableGame(io, options = {}) {
         socket.emit("action_result", res);
       } else {
         socket.emit("action_result", { status: "accepted" });
+      }
+    });
+
+    socket.on("table_chat", (payload, ack) => {
+      try {
+        const { tableId, body, emoji } = payload || {};
+        if (!tableId) return;
+        const room = `tg:${tableId}`;
+        if (!socket.rooms.has(room)) return;
+
+        const rate = tableChat.checkRate(socket.userId);
+        if (!rate.ok) {
+          if (typeof ack === "function") {
+            ack({ ok: false, reason: "rate_limited", retryAfterMs: rate.retryAfterMs });
+          }
+          return;
+        }
+
+        // Resolve display identity server-side from the seated player so names
+        // can't be spoofed. Falls back to client-supplied hints for spectators.
+        let name = payload?.name;
+        let avatar = payload?.avatar;
+        const entry = registry.map.get(String(tableId));
+        const game = entry?.game;
+        if (game) {
+          const idx = game.findSeatIndexByUser(socket.userId);
+          if (idx >= 0 && game.seats[idx]) {
+            name = game.seats[idx].name || name;
+            avatar = game.seats[idx].avatar || avatar;
+          }
+        }
+
+        const built = tableChat.buildChatMessage({
+          userId: socket.userId,
+          name,
+          avatar,
+          body,
+          emoji,
+        });
+        if (!built.ok) {
+          if (typeof ack === "function") ack(built);
+          return;
+        }
+        nsp.to(room).emit("table_chat", built.message);
+        if (typeof ack === "function") ack({ ok: true, id: built.message.id });
+      } catch (e) {
+        logger.error("table_chat_failed", {
+          userId: socket.userId,
+          reason: e?.message || "unknown",
+        });
       }
     });
 
