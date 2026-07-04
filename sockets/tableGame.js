@@ -43,6 +43,7 @@ const {
   markActiveHandParticipants,
   countEligibleHumans,
   createSeatDefaults,
+  isHumanSeat,
 } = require("../utils/poker/playerState");
 const { verifyHandChipConservation } = require("../utils/poker/chipConservation");
 const { auditOrFreeze, auditChipConservation } = require("../utils/poker/chipAuditor");
@@ -912,6 +913,7 @@ class PokerTable {
     if (this.running || this.frozen) return;
     if (this.eligibleHumanCount() >= POKER_MIN_PLAYERS) {
       this.clearWaitForPlayersTimer();
+      void this.startIfReady({ refreshFromDb: false, allowBotFill: true });
       return;
     }
     if (this.waitForPlayersTimer) return;
@@ -1219,7 +1221,10 @@ class PokerTable {
     }
     await this.applyCosmeticsToSeats();
 
-    if (this.running && this.humanSeatCount() >= POKER_MIN_PLAYERS && this.activeSeatCount() < POKER_MIN_PLAYERS && previousBots.length > 0) {
+    const shouldRestoreBots =
+      this.humanSeatCount() >= 1 &&
+      this.activeSeatCount() < Math.min(this.capacity, Math.max(2, this.botFillTarget));
+    if (shouldRestoreBots && previousBots.length > 0) {
       const target = Math.min(this.capacity, Math.max(2, this.botFillTarget));
       const missing = Math.max(0, target - this.activeSeatCount());
       const freeSlots = Math.max(0, this.capacity - this.seats.length);
@@ -1834,6 +1839,16 @@ class PokerTable {
 
       this.clearWaitForPlayersTimer();
 
+      if (allowBotFill) {
+        promoteWaitingToSeated(this.seats);
+        for (const s of this.seats) {
+          if (!isHumanSeat(s) || toSafeInt(s.chips, 0) <= 0) continue;
+          if (s.playerState === PLAYER_STATE.SITTING_OUT && !s.disconnectedAt) {
+            s.playerState = PLAYER_STATE.SEATED;
+          }
+        }
+      }
+
       if (this.activeSeatCount() < POKER_MIN_PLAYERS) {
         this.running = false;
         this.clearActionScheduling();
@@ -2046,11 +2061,14 @@ class PokerTable {
     }
 
     if (sbIndex === -1 || bbIndex === -1) {
-      // Not enough players
-      this.sbSeatIndex = -1;
-      this.bbSeatIndex = -1;
+      // Not enough players — reset to lobby instead of leaving a stale preflop.
+      this.healStaleRoundIfNotRunning();
       this.running = false;
-      this.scheduleBotFillIfNeeded();
+      this.clearActionScheduling();
+      if (this.humanSeatCount() >= 1 && this.activeSeatCount() < this.botFillTarget) {
+        this.addBotsForMissingSeats();
+      }
+      this.scheduleWaitForPlayers();
       await this.broadcastState();
       return;
     }

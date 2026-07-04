@@ -124,6 +124,30 @@ test("beginNextHandIfPossible auto-starts with bots after solo human hand", asyn
   assert.equal(started, true);
 });
 
+test("scheduleWaitForPlayers starts hand when enough eligible humans", async () => {
+  const g = mkGame({
+    seats: [
+      { user: { _id: "u1", name: "A" }, chips: 100000, seatPosition: 0 },
+      { user: { _id: "u2", name: "B" }, chips: 100000, seatPosition: 1 },
+    ],
+  });
+  g.resetStateFromTable(mkTableDoc({
+    seats: [
+      { user: { _id: "u1", name: "A" }, chips: 100000, seatPosition: 0 },
+      { user: { _id: "u2", name: "B" }, chips: 100000, seatPosition: 1 },
+    ],
+  }));
+  let started = false;
+  g.startIfReady = async () => {
+    started = true;
+  };
+
+  g.scheduleWaitForPlayers();
+  await new Promise((r) => setTimeout(r, 10));
+
+  assert.equal(started, true);
+});
+
 test("setRound allows fold-win path from any street to idle", () => {
   const g = mkGame();
   for (const street of ["preflop", "flop", "turn", "river"]) {
