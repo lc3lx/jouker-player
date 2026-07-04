@@ -58,15 +58,7 @@ function seatUserId(seat) {
   return String(raw);
 }
 
-function getTokenFromHandshake(socket) {
-  const auth = socket.handshake.auth || {};
-  if (auth.token) return auth.token.replace(/^Bearer\s+/i, "");
-  const header = socket.handshake.headers?.authorization;
-  if (header?.startsWith("Bearer ")) return header.split(" ")[1];
-  const query = socket.handshake.query || {};
-  if (query.token) return String(query.token).replace(/^Bearer\s+/i, "");
-  return null;
-}
+const { getTokenFromHandshake } = require("../../utils/socketAuth");
 
 /** Broadcast game_state to all in room (each gets their own view - no opponent cards) */
 function broadcastGameState(nsp, roomId) {
@@ -451,6 +443,27 @@ function registerGameHandlers(nsp, jwtVerify) {
       socket.emit("invalid_move", { reason: "authentication_required" });
       return;
     }
+
+    // Per-socket sliding-window rate limiter: 60 events / 10 s
+    const _rl = { count: 0, windowStart: Date.now() };
+    const GAME_NS_MAX = 60;
+    const GAME_NS_WINDOW_MS = 10_000;
+    socket.use(([_event, ..._args], next) => {
+      const now = Date.now();
+      if (now - _rl.windowStart > GAME_NS_WINDOW_MS) {
+        _rl.count = 1;
+        _rl.windowStart = now;
+      } else {
+        _rl.count++;
+      }
+      if (_rl.count > GAME_NS_MAX) {
+        const cb = _args.find((a) => typeof a === "function");
+        if (cb) cb({ ok: false, code: "rate_limited" });
+        logger.warn("game_ns_rate_limited", { userId, event: _event });
+        return;
+      }
+      next();
+    });
 
     // join_trix_table — must be seated via REST on a trix Mongo table
     socket.on("join_trix_table", async (payload) => {

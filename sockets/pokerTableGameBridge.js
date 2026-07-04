@@ -18,4 +18,8 @@ module.exports = {
   resetLivePokerTableWhenEmpty: (tableId) => call("resetLivePokerTableWhenEmpty", tableId),
   syncLivePokerTableAfterJoin: (tableId) => call("syncLivePokerTableAfterJoin", tableId),
   syncLivePokerTableAfterLeave: (tableId) => call("syncLivePokerTableAfterLeave", tableId),
+  vacateLiveEngineSeat: (tableId, userId, opts) => call("vacateLiveEngineSeat", tableId, userId, opts),
+  restoreLiveEngineSeat: (tableId, userId, data) => call("restoreLiveEngineSeat", tableId, userId, data),
+  removeLiveHumanSeat: (tableId, userId) => call("removeLiveHumanSeat", tableId, userId),
+  adminForceEndHandTable: (tableId) => call("adminForceEndHandTable", tableId),
 };

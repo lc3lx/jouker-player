@@ -12,7 +12,10 @@
     "validate:production-checks": "node scripts/validateProductionChecks.js",
     "seed:house-wallet": "node scripts/seedHouseWallet.js",
     "test:unit": "node --test test",
-    "test:golden-tree": "node --test test/goldenTree.test.js"
+    "test:golden-tree": "node --test test/goldenTree.test.js",
+    "test:island-jackpot": "node --test test/islandJackpot.hand.test.js test/islandJackpot.logic.test.js test/islandJackpot.edge.test.js test/islandJackpot.integration.test.js",
+    "loadtest:island-jackpot": "node scripts/loadTestIslandJackpot.js",
+    "simulate:island-economy": "node scripts/simulateIslandEconomy.js"
   },
   "keywords": [],
   "author": "",
@@ -55,6 +58,7 @@
     "eslint-plugin-node": "^11.1.0",
     "eslint-plugin-prettier": "^4.0.0",
     "eslint-plugin-react": "^7.28.0",
+    "mongodb-memory-server": "^9.5.0",
     "nodemon": "^2.0.15",
     "prettier": "^2.5.1"
   },

@@ -151,12 +151,11 @@ async function adjustTableLock({ session, userId, tableId, delta }) {
   if (next < 0) {
     // Table-lock rows can drift from global lockedBalance on standalone Mongo;
     // clamp instead of aborting hand settlement (global lock already adjusted).
-    logger.warn("table_lock_underflow_clamped", {
-      userId: String(userId),
-      tableId: String(tableId),
-      before: toSafeInt(row.amount, 0),
-      delta: d,
-    });
+    const payload = { userId: String(userId), tableId: String(tableId), before: toSafeInt(row.amount, 0), delta: d };
+    logger.warn("table_lock_underflow_clamped", payload);
+    if (process.env.NODE_ENV === "production") {
+      void sendAlert("table_lock_underflow", payload);
+    }
     row.amount = 0;
     await row.save(sessionOptions(session));
     return;
@@ -217,12 +216,24 @@ async function releaseTableSeatToBalance({
     }
   }
 
-  const toRelease = Math.min(seatAmt, tableLocked, globalLocked);
+  // Use globalLocked (not tableLocked) so player is made whole even when table
+  // attribution has drifted. Money IS in global lock; it's just not attributed correctly.
+  const toRelease = Math.min(seatAmt, globalLocked);
   if (toRelease <= 0) {
     throw new Error("INSUFFICIENT_TABLE_LOCKED_BALANCE");
   }
 
-  row.amount = tableLocked - toRelease;
+  const attributionShortfall = seatAmt - Math.min(seatAmt, tableLocked);
+  if (attributionShortfall > 0) {
+    const shortfallPayload = { userId: String(userId), tableId: String(tableId), seatAmt, tableLocked, globalLocked, shortfall: attributionShortfall };
+    logger.warn("table_seat_release_attribution_shortfall", shortfallPayload);
+    if (process.env.NODE_ENV === "production") {
+      void sendAlert("table_seat_release_attribution_shortfall", shortfallPayload);
+    }
+    row.amount = 0;
+  } else {
+    row.amount = tableLocked - toRelease;
+  }
   await row.save(sessionOptions(session));
 
   await transferToBalance({

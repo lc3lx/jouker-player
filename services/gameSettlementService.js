@@ -239,6 +239,11 @@ function buildIdempotencyKey({ tableId, gameType, sessionId, gameResult }) {
           wt: gameResult.winnerTeam,
           sc: gameResult.scores,
           ps: gameResult.playerScores,
+          wsi: Array.isArray(gameResult.winnerSeatIndices)
+            ? [...gameResult.winnerSeatIndices].sort((a, b) => a - b)
+            : undefined,
+          pot: gameResult.pot,
+          hid: gameResult.handId,
         })
       : "unknown";
   return `${String(tableId)}:${gameType}:${sid}:${crypto.createHash("sha256").update(sig).digest("hex").slice(0, 16)}`;
@@ -644,19 +649,42 @@ async function recoverPendingSettlement(settlementId) {
 
   const reconciliation = validateReconciliation(plan);
   if (!reconciliation.balanced) {
+    // Release lock before throwing so the table is not permanently blocked.
+    await releaseSettlementLock(doc.tableId, doc.gameType).catch((e) =>
+      logger.error("settlement_recovery_lock_release_failed", {
+        settlementId,
+        reason: e?.message,
+      })
+    );
     throw new Error(`RECONCILIATION_FAILED:delta=${reconciliation.delta}`);
   }
 
-  await withMongoTransaction(async (session) => {
-    await applySettlementLedger({ session, tableId: doc.tableId, settlementId: doc.settlementId, plan });
-    await releaseSettlementLock(doc.tableId, doc.gameType, session);
-  });
+  try {
+    await withMongoTransaction(async (session) => {
+      await applySettlementLedger({ session, tableId: doc.tableId, settlementId: doc.settlementId, plan });
+      await releaseSettlementLock(doc.tableId, doc.gameType, session);
+    });
+  } catch (err) {
+    // Guarantee lock is released even if the transaction throws.
+    await releaseSettlementLock(doc.tableId, doc.gameType).catch((e) =>
+      logger.error("settlement_recovery_lock_release_failed", {
+        settlementId,
+        reason: e?.message,
+      })
+    );
+    doc.settlementStatus = "failed";
+    doc.errorMessage = err?.message || "recovery_transaction_failed";
+    await doc.save().catch(() => {});
+    logger.error("settlement_recovery_failed", { settlementId, reason: err?.message });
+    throw err;
+  }
 
   doc.settlementStatus = "completed";
   doc.settledAt = new Date();
   doc.errorMessage = undefined;
   await doc.save();
 
+  logger.info("settlement_recovered", { settlementId, tableId: String(doc.tableId), gameType: doc.gameType });
   return { recovered: true, settlement: doc };
 }
 

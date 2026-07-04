@@ -139,15 +139,21 @@ exports.rechargeWallet = asyncHandler(async (req, res, next) => {
     return next(new ApiError("Recharge code is required", 400));
   }
 
-  // Find the recharge code
-  const rechargeCode = await RechargeCode.findOne({ code: code.toUpperCase() });
+  // Atomic claim: mark isUsed=true only if it is currently false (prevents TOCTOU race).
+  // A concurrent duplicate request will see modifiedCount=0 and be rejected below.
+  const claimed = await RechargeCode.findOneAndUpdate(
+    { code: code.toUpperCase(), isUsed: false },
+    { $set: { isUsed: true, usedBy: req.user._id, usedAt: new Date() } },
+    { new: false } // return pre-update doc so we can read amount / expiry
+  );
 
-  if (!rechargeCode) {
-    return next(new ApiError("Invalid recharge code", 400));
-  }
-
-  // Check if code has already been used
-  if (rechargeCode.isUsed) {
+  if (!claimed) {
+    // Either the code doesn't exist, was already used, or a concurrent request
+    // just claimed it — all three cases are treated as "invalid or already used".
+    const existing = await RechargeCode.findOne({ code: code.toUpperCase() }).lean();
+    if (!existing) {
+      return next(new ApiError("Invalid recharge code", 400));
+    }
     return next(
       new ApiError(
         "This recharge code has already been used and cannot be used again",
@@ -156,31 +162,25 @@ exports.rechargeWallet = asyncHandler(async (req, res, next) => {
     );
   }
 
-  // Check if code is expired
-  if (rechargeCode.isExpired()) {
+  // claimed is the pre-update document; check expiry after we hold the claim.
+  if (typeof claimed.isExpired === "function" && claimed.isExpired()) {
+    // Roll back the atomic claim so the code can still be invalidated/reissued by admin.
+    await RechargeCode.findByIdAndUpdate(claimed._id, {
+      $set: { isUsed: false, usedBy: null, usedAt: null },
+    });
     return next(new ApiError("This recharge code has expired", 400));
   }
 
-  // Get user wallet
+  const rechargeCode = claimed; // alias for readability below
+
+  // Get or create user wallet
   let wallet = await Wallet.findOne({ user: req.user._id });
   if (!wallet) {
-    // Create wallet if it doesn't exist
     wallet = await Wallet.create({ user: req.user._id });
     await User.findByIdAndUpdate(req.user._id, { wallet: wallet._id });
   }
 
-  // Double-check that code hasn't been used before attempting to use it
-  if (rechargeCode.isUsed) {
-    return next(
-      new ApiError(
-        "This recharge code has already been used and cannot be used again",
-        400
-      )
-    );
-  }
-
-  // Use the recharge code
-  await rechargeCode.useCode(req.user._id);
+  // Credit wallet (the atomic claim above ensures this runs exactly once).
 
   // Add transaction to wallet
   await wallet.addTransaction(

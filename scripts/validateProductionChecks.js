@@ -21,9 +21,9 @@ function parseCorsOrigins(raw) {
     .filter(Boolean);
 }
 
-function isProduction() {
-  return process.env.NODE_ENV === "production";
-}
+// Use the canonical isProduction() that reads APP_MODE, so both
+// startup checks and runtime fraud-strictness use the same definition.
+const { isProduction } = require("../utils/appConfig");
 
 async function assertReplicaSetEnabled() {
   const admin = mongoose.connection.db.admin();

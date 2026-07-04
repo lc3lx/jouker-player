@@ -18,6 +18,8 @@ const { trackEventServerFireAndForget } = require("../services/analyticsService"
 const { evaluateHandChipDumpSuspect } = require("../services/fraudService");
 const cosmeticsService = require("../services/cosmeticsService");
 const { attachRedisClient: attachCosmeticsEquippedCache } = require("../utils/cosmeticsEquippedCache");
+const vipService = require("../services/vipService");
+const { attachRedisClient: attachVipLevelCache } = require("../utils/vipLevelCache");
 const {
   buildPokerLobbyFields,
   derivePokerTableStatus,
@@ -1237,17 +1239,21 @@ class PokerTable {
     if (humanIds.length === 0) {
       for (const s of this.seats) {
         if (!s.cosmetics) s.cosmetics = { tableTheme: null, cardSkin: null };
+        s.vipLevel = null;
       }
       return;
     }
     const map = await cosmeticsService.resolveEquippedPayloadForUsers(humanIds);
+    const vipMap = await vipService.getVipLevelsForUsers(humanIds);
     for (const s of this.seats) {
       if (s.isBot || isBotUserId(String(s.userId))) {
         s.cosmetics = { tableTheme: null, cardSkin: null };
+        s.vipLevel = null;
         continue;
       }
       const c = map.get(String(s.userId));
       s.cosmetics = c ? { ...c } : { tableTheme: null, cardSkin: null };
+      s.vipLevel = vipMap.get(String(s.userId)) || null;
     }
   }
 
@@ -1470,6 +1476,7 @@ class PokerTable {
     this.vacateTimers.delete(uid);
     const pending = this.pendingVacates.get(uid);
     if (!pending) return;
+    if (!mongoose.isValidObjectId(this.tableId)) return;
 
     this.pendingVacates.delete(uid);
 
@@ -1556,19 +1563,25 @@ class PokerTable {
     const uid = String(userId);
     const timer = setTimeout(async () => {
       this.reconnectTimers.delete(uid);
-      const i = this.findSeatIndexByUser(uid);
-      if (i < 0) return;
-      const s = this.seats[i];
-      if (s.playerState !== PLAYER_STATE.DISCONNECTED) return;
-      s.playerState = PLAYER_STATE.SITTING_OUT;
-      if (s.inHand && this.running) {
-        s.folded = true;
-        await this.broadcastState();
-        if (this.currentIndex === i) {
-          await this.advance();
+      const lockAcquired = await this.acquireActionLock();
+      if (!lockAcquired) return; // table busy — skip; turn timer will handle the fold
+      try {
+        const i = this.findSeatIndexByUser(uid);
+        if (i < 0) return;
+        const s = this.seats[i];
+        if (s.playerState !== PLAYER_STATE.DISCONNECTED) return;
+        s.playerState = PLAYER_STATE.SITTING_OUT;
+        if (s.inHand && this.running) {
+          s.folded = true;
+          await this.broadcastState();
+          if (this.currentIndex === i) {
+            await this.advance();
+          }
+        } else {
+          await this.broadcastState();
         }
-      } else {
-        await this.broadcastState();
+      } finally {
+        await this.releaseActionLock();
       }
     }, POKER_TIMINGS.RECONNECT_WINDOW_MS);
     this.reconnectTimers.set(uid, timer);
@@ -2109,21 +2122,24 @@ class PokerTable {
     }
 
     this.actionDeadline = Date.now() + this.turnSeconds * 1000;
+    const expectedIndex = this.currentIndex;
     this.turnTimer = setTimeout(() => {
-      this.handleTimeout();
+      this.handleTimeout(expectedIndex);
     }, this.turnSeconds * 1000 + 100);
   }
 
-  async handleTimeout() {
+  async handleTimeout(expectedIndex) {
     const lockAcquired = await this.acquireActionLock();
     if (!lockAcquired) {
       setTimeout(() => {
-        void this.handleTimeout();
+        void this.handleTimeout(expectedIndex);
       }, 300);
       return;
     }
 
     try {
+      // Guard: if turn already advanced to a different player, skip
+      if (expectedIndex !== undefined && this.currentIndex !== expectedIndex) return;
       const s = this.seats[this.currentIndex];
       if (!s || !s.inHand || s.folded || s.allIn || s.chips <= 0) {
         await this.advance();
@@ -3115,6 +3131,7 @@ class PokerTable {
             seats: seatSummaries,
             actions: this.lastHand?.actions || [...this.currentHandActions],
             auditLog,
+            reason: meta.reason || (showdownRanks ? "showdown" : "fold"),
           })
           .catch((archiveErr) => {
             logger.warn("phase3_hand_archive_failed", {
@@ -3381,7 +3398,7 @@ class PokerTable {
       const normalizedAction = String(action || "").toLowerCase();
       const normalizedActionId =
         typeof actionId === "string" && actionId.trim().length > 0
-          ? actionId.trim()
+          ? actionId.trim().slice(0, 128)
           : null;
 
       if (!normalizedActionId) {
@@ -3655,10 +3672,14 @@ function initTableGame(io, options = {}) {
     async function handleJoinTable({ tableId, clientSeed }) {
       try {
         if (!tableId) return;
-        const table = await Table.findById(tableId).select("seats");
+        const table = await Table.findById(tableId).select("seats vacatingPlayers");
         if (!table) return;
-        const ok = table.seats.some((s) => String(s.user) === String(socket.userId));
-        if (!ok) return;
+        const uid = String(socket.userId);
+        const isSeated = table.seats.some((s) => String(s.user) === uid);
+        const isVacating = (table.vacatingPlayers || []).some(
+          (v) => String(v.user) === uid && new Date(v.vacateUntil).getTime() > Date.now()
+        );
+        if (!isSeated && !isVacating) return;
         socket.join(`tg:${tableId}`);
 
         const game = await registry.get(String(tableId));
@@ -3753,6 +3774,14 @@ function initTableGame(io, options = {}) {
 
     socket.on("start-if-ready", async ({ tableId }) => {
       if (!tableId) return;
+      const tbl = await Table.findById(tableId).select("seats vacatingPlayers").lean();
+      if (!tbl) return;
+      const uid = String(socket.userId);
+      const isSeated = tbl.seats.some((s) => String(s.user) === uid);
+      const isVacating = (tbl.vacatingPlayers || []).some(
+        (v) => String(v.user) === uid && new Date(v.vacateUntil).getTime() > Date.now()
+      );
+      if (!isSeated && !isVacating) return;
       const game = await registry.get(String(tableId));
       if (game) {
         await game.bootstrapLobbyStart();

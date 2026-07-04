@@ -32,6 +32,8 @@ const walletTransactionSchema = new mongoose.Schema(
         "game_win",
         "game_loss",
         "settlement",
+        "island_jackpot_entry",
+        "island_jackpot_win",
       ],
       required: true,
       index: true,

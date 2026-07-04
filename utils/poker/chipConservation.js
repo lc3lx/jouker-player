@@ -8,11 +8,12 @@ const { toSafeInt } = require("../pokerTableStatus");
 function verifyHandChipConservation(game) {
   const seats = Array.isArray(game.seats) ? game.seats : [];
   const pot = toSafeInt(game.pot, 0);
-  let stacksAndBets = 0;
+  let stacksOnly = 0;
   for (const s of seats) {
-    stacksAndBets += toSafeInt(s.chips, 0) + toSafeInt(s.bet, 0);
+    // s.bet is physically inside pot — do not double-count it
+    stacksOnly += toSafeInt(s.chips, 0);
   }
-  const actual = stacksAndBets + pot;
+  const actual = stacksOnly + pot;
   const expected =
     game.handStartTotal != null
       ? toSafeInt(game.handStartTotal, actual)

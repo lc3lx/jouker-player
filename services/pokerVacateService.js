@@ -8,7 +8,7 @@ const { removeSeatPresence } = require("./pokerCollusionGuard");
 const { emitTablesUpdated } = require("../utils/lobbyRealtime");
 
 function getTableGameBridge() {
-  return require("../sockets/tableGame");
+  return require("../sockets/pokerTableGameBridge");
 }
 
 function vacateUntilDate() {

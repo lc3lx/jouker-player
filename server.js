@@ -70,7 +70,17 @@ app.post(
 
 // Middlewares
 app.use(express.json({ limit: "20kb" }));
-app.use(express.static(path.join(__dirname, "uploads")));
+const ALLOWED_UPLOAD_EXTS = new Set([
+  ".jpg", ".jpeg", ".png", ".gif", ".webp", ".avif",
+  ".mp4", ".webm", ".mov", ".avi",
+  ".mp3", ".ogg", ".wav", ".aac",
+  ".pdf", ".svg",
+]);
+app.use("/uploads", (req, res, next) => {
+  const ext = path.extname(req.path).toLowerCase();
+  if (!ALLOWED_UPLOAD_EXTS.has(ext)) return res.status(404).end();
+  next();
+}, express.static(path.join(__dirname, "uploads"), { dotfiles: "deny", index: false }));
 app.use("/games", express.static(path.join(__dirname, "games")));
 app.use(mongoSanitize());
 app.use(xss());
@@ -149,7 +159,9 @@ const io = new Server(httpServer, {
 });
 
 const { setMainIo } = require("./utils/lobbyRealtime");
+const { setMainIo: setIslandJackpotIo } = require("./utils/islandJackpotRealtime");
 setMainIo(io);
+setIslandJackpotIo(io);
 
 let server;
 let realtimeRedis = null;
@@ -167,6 +179,8 @@ async function startServer() {
     const pokerCollusionGuard = require("./services/pokerCollusionGuard");
     pokerQueueRedis.setRedisClient(realtimeRedis.commandClient);
     pokerCollusionGuard.setRedisClient(realtimeRedis.commandClient);
+    const islandJackpotCache = require("./utils/islandJackpotCache");
+    islandJackpotCache.attachRedisClient(realtimeRedis.commandClient);
   }
 
   const { startPokerTableGc } = require("./services/pokerTableGcService");
@@ -188,6 +202,12 @@ async function startServer() {
   startTournamentEngine();
 
   startTableGc(io, { redis: realtimeRedis?.commandClient || null });
+
+  // VIP membership: expiration sweep + Monday cashback precompute.
+  const vipLevelCache = require("./utils/vipLevelCache");
+  vipLevelCache.attachRedisClient(realtimeRedis?.commandClient || null);
+  const { startVipEngine } = require("./services/vipService");
+  startVipEngine();
 
   const PORT = process.env.PORT || 1099;
   server = httpServer.listen(PORT, () => {

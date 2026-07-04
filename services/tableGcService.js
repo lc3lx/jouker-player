@@ -540,8 +540,16 @@ async function sweepPokerRecoveredTables() {
 }
 
 async function gcSweep() {
-  await sweepCardIdleTables();
-  await sweepPokerRecoveredTables();
+  try {
+    await sweepCardIdleTables();
+  } catch (err) {
+    logger.error("table_gc_card_sweep_failed", { reason: (err && err.message) || "unknown" });
+  }
+  try {
+    await sweepPokerRecoveredTables();
+  } catch (err) {
+    logger.error("table_gc_poker_sweep_failed", { reason: (err && err.message) || "unknown" });
+  }
 }
 
 function startTableGc(io, { redis = null } = {}) {

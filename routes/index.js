@@ -27,6 +27,10 @@ const replayRoute = require("./replayRoute");
 const platformRoute = require("./platformRoute");
 const historyRoute = require("./historyRoute");
 const openapiRoute = require("./openapiRoute");
+const vipRoute = require("./vipRoute");
+const adminVipRoute = require("./adminVipRoute");
+const islandJackpotRoute = require("./islandJackpotRoute");
+const adminIslandJackpotRoute = require("./adminIslandJackpotRoute");
 
 const mountRoutes = (app) => {
   app.get("/api/v1/games/html5", (req, res) => {
@@ -50,12 +54,16 @@ const mountRoutes = (app) => {
   app.use("/api/v1/tables", tableRoute);
   app.use("/api/v1/tournaments", tournamentRoute);
   app.use("/api/v1/jackpot", jackpotRoute);
+  app.use("/api/v1/poker/island", islandJackpotRoute);
   app.use("/api/v1/side-games", sideGamesRoute);
   app.use("/api/v1/stats", statsRoute);
   app.use("/api/v1/rtc", rtcRoute);
   app.use("/api/v1/recharge-codes", rechargeCodeRoute);
   app.use("/api/v1/agents", agentRoute);
+  app.use("/api/v1/admin/vip", adminVipRoute);
+  app.use("/api/v1/admin/island-jackpot", adminIslandJackpotRoute);
   app.use("/api/v1/admin", adminRoute);
+  app.use("/api/v1/vip", vipRoute);
   app.use("/api/v1/analytics", analyticsRoute);
   app.use("/api/v1/cosmetics", cosmeticsRoute);
   app.use("/api/v1/video", videoRoute);

@@ -30,6 +30,7 @@ async function onHandSettled({
   seats = [],
   actions = [],
   potDistribution = [],
+  reason = null,
 }) {
   const ended = endedAt ? new Date(endedAt) : new Date();
   const started = startedAt ? new Date(startedAt) : ended;
@@ -163,6 +164,21 @@ async function onHandSettled({
     })
     .catch((e) => {
       logger.warn("achievement_hook_failed", { handId, reason: e?.message });
+    });
+
+  void require("./islandJackpotService")
+    .onHandSettled({
+      handId,
+      tableId,
+      gameType,
+      community,
+      seats,
+      winners,
+      handCategory,
+      reason,
+    })
+    .catch((e) => {
+      logger.warn("island_jackpot_hook_failed", { handId, reason: e?.message });
     });
 
   await auditService.logEvent({
