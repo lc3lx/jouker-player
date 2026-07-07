@@ -11,7 +11,9 @@
 const crypto = require("crypto");
 const { roundMoney } = require("./constants");
 
-const MODE = process.env.GOLDEN_TREE_WALLET_MODE || "stub";
+const MODE =
+  process.env.GOLDEN_TREE_WALLET_MODE ||
+  (process.env.NODE_ENV === "test" ? "stub" : "mongo");
 
 /** @type {Map<string, { balance: number, version: number }>} */
 const stubBalances = new Map();
@@ -155,6 +157,16 @@ async function atomicSpinWallet(userId, { betAmount, winAmount, meta = {} }) {
     const win = roundMoney(winAmount);
 
     if (bet > 0) {
+      const currentBalance =
+        MODE === "mongo"
+          ? await getBalanceMongo(userId)
+          : roundMoney(ensureStubUser(userId).balance);
+      if (currentBalance < bet) {
+        const err = new Error("INSUFFICIENT_BALANCE");
+        err.code = "INSUFFICIENT_BALANCE";
+        throw err;
+      }
+
       if (MODE === "mongo") {
         await deductBalanceMongo(userId, bet, { ...meta, leg: "bet" });
       } else {
@@ -167,6 +179,44 @@ async function atomicSpinWallet(userId, { betAmount, winAmount, meta = {} }) {
         await creditBalanceMongo(userId, win, { ...meta, leg: "win" });
       } else {
         await creditBalanceStub(userId, win, { ...meta, leg: "win" });
+      }
+    }
+
+    return getBalance(userId);
+  });
+}
+
+/**
+ * Gamble stake + optional payout in one locked wallet transaction.
+ */
+async function atomicGambleWallet(userId, { stake, winAmount, meta = {} }) {
+  return withUserLock(userId, async () => {
+    const stakeAmt = roundMoney(stake);
+    const win = roundMoney(winAmount);
+
+    if (stakeAmt > 0) {
+      const currentBalance =
+        MODE === "mongo"
+          ? await getBalanceMongo(userId)
+          : roundMoney(ensureStubUser(userId).balance);
+      if (currentBalance < stakeAmt) {
+        const err = new Error("INSUFFICIENT_BALANCE");
+        err.code = "INSUFFICIENT_BALANCE";
+        throw err;
+      }
+
+      if (MODE === "mongo") {
+        await deductBalanceMongo(userId, stakeAmt, { ...meta, leg: "gamble_stake" });
+      } else {
+        await deductBalanceStub(userId, stakeAmt, { ...meta, leg: "gamble_stake" });
+      }
+    }
+
+    if (win > 0) {
+      if (MODE === "mongo") {
+        await creditBalanceMongo(userId, win, { ...meta, leg: "gamble_win" });
+      } else {
+        await creditBalanceStub(userId, win, { ...meta, leg: "gamble_win" });
       }
     }
 
@@ -189,6 +239,7 @@ module.exports = {
   deductBalance,
   creditBalance,
   atomicSpinWallet,
+  atomicGambleWallet,
   withUserLock,
   seedStubBalance,
   clearStubForTests,

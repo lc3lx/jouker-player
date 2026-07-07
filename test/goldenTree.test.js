@@ -1,3 +1,5 @@
+process.env.GOLDEN_TREE_WALLET_MODE = "stub";
+
 const { test } = require("node:test");
 const assert = require("node:assert/strict");
 

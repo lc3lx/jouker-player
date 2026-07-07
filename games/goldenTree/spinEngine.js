@@ -23,6 +23,34 @@ function pickFromArray(arr) {
 }
 
 /**
+ * Pick a visible 3-row window — resample when all three rows match
+ * (plum/plum/plum columns) while keeping strip weights / RTP intact.
+ */
+function pickColumnWindow(strip) {
+  const len = strip.length;
+  let stop = secureRandomInt(len);
+  let column = windowAtStop(strip, stop);
+
+  for (let attempt = 0; attempt < 20; attempt += 1) {
+    if (column[0] !== column[1] || column[1] !== column[2]) {
+      return { column, stop };
+    }
+    stop = secureRandomInt(len);
+    column = windowAtStop(strip, stop);
+  }
+
+  for (let offset = 1; offset < len; offset += 1) {
+    const shifted = (stop + offset) % len;
+    const candidate = windowAtStop(strip, shifted);
+    if (candidate[0] !== candidate[1] || candidate[1] !== candidate[2]) {
+      return { column: candidate, stop: shifted };
+    }
+  }
+
+  return { column, stop };
+}
+
+/**
  * Read 3 consecutive symbols from a cyclic reel strip at stopIndex.
  * Returns [row0, row1, row2] top → bottom.
  */
@@ -88,9 +116,8 @@ function generateSpin({ bonusMode = false, guaranteedWilds = 0 } = {}) {
 
   for (let col = 0; col < REEL_COUNT; col += 1) {
     const strip = strips[col];
-    const stop = secureRandomInt(strip.length);
+    const { column, stop } = pickColumnWindow(strip);
     stopIndices.push(stop);
-    const column = windowAtStop(strip, stop);
     for (let row = 0; row < ROW_COUNT; row += 1) {
       matrix[col][row] = column[row];
     }
@@ -111,5 +138,6 @@ module.exports = {
   windowAtStop,
   secureRandomInt,
   pickFromArray,
+  pickColumnWindow,
   sanitizeWildPlacements,
 };

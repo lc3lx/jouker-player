@@ -13,6 +13,16 @@ const { calculateWins } = require("./winCalculator");
 const roundManager = require("./roundManager");
 const wallet = require("./goldenTreeWalletAdapter");
 
+function mapWalletError(err) {
+  if (
+    err?.code === "INSUFFICIENT_BALANCE" ||
+    err?.message === "INSUFFICIENT_BALANCE"
+  ) {
+    throw new ApiError("Insufficient wallet balance", 402);
+  }
+  throw err;
+}
+
 function validateBet(betAmount) {
   const bet = roundMoney(betAmount);
   if (!Number.isFinite(bet) || bet < BET_MIN || bet > BET_MAX) {
@@ -67,12 +77,16 @@ async function executeSpin(userId, betAmountInput) {
     if (balance < betAmount) {
       throw new ApiError("Insufficient wallet balance", 402);
     }
+  } else if (
+    !bonusSession ||
+    bonusSession.freeSpinsRemaining <= 0
+  ) {
+    throw new ApiError("No bonus spins remaining", 400);
   }
 
   let guaranteedWilds = 0;
   if (isBonusSpin) {
     guaranteedWilds = BONUS_GUARANTEED_WILDS;
-    roundManager.consumeBonusSpin(userKey);
   }
 
   const { matrix, wildMultipliers } = generateSpin({
@@ -82,6 +96,19 @@ async function executeSpin(userId, betAmountInput) {
 
   const winResult = calculateWins(matrix, wildMultipliers, betAmount);
   const { totalWin, capped, cap } = capWin(winResult.totalWin, betAmount);
+
+  let balanceAfter;
+  try {
+    balanceAfter = await wallet.atomicSpinWallet(userKey, {
+      betAmount: isBonusSpin ? 0 : betAmount,
+      winAmount: totalWin,
+      meta: {
+        type: isBonusSpin ? "bonus_spin" : "main_spin",
+      },
+    });
+  } catch (err) {
+    mapWalletError(err);
+  }
 
   const round = roundManager.createRound({
     userId: userKey,
@@ -100,14 +127,9 @@ async function executeSpin(userId, betAmountInput) {
     roundManager.settleRound(round.roundId);
   }
 
-  const balanceAfter = await wallet.atomicSpinWallet(userKey, {
-    betAmount: isBonusSpin ? 0 : betAmount,
-    winAmount: totalWin,
-    meta: {
-      roundId: round.roundId,
-      type: isBonusSpin ? "bonus_spin" : "main_spin",
-    },
-  });
+  if (isBonusSpin) {
+    roundManager.consumeBonusSpin(userKey);
+  }
 
   const remainingBonus = roundManager.getBonusSession(userKey);
 
@@ -133,21 +155,20 @@ async function executeGamble(userId, roundId, choice) {
   }
 
   const stake = round.currentWin;
-  await wallet.deductBalance(String(userId), stake, {
-    roundId,
-    leg: "gamble_stake",
-  });
-
   const cardIsRed = secureRandomInt(2) === 0;
   const cardColor = cardIsRed ? "Red" : "Black";
   const won = cardColor === normalizedChoice;
   const newWin = won ? roundMoney(stake * 2) : 0;
 
-  if (newWin > 0) {
-    await wallet.creditBalance(String(userId), newWin, {
-      roundId,
-      leg: "gamble_win",
+  let balance;
+  try {
+    balance = await wallet.atomicGambleWallet(String(userId), {
+      stake,
+      winAmount: newWin,
+      meta: { roundId, leg: "gamble" },
     });
+  } catch (err) {
+    mapWalletError(err);
   }
 
   const updated = roundManager.recordGamble(roundId, {
@@ -158,8 +179,6 @@ async function executeGamble(userId, roundId, choice) {
     newWin,
     at: Date.now(),
   });
-
-  const balance = await wallet.getBalance(String(userId));
 
   return {
     roundId,
@@ -194,11 +213,15 @@ async function executeBuyBonus(userId, _bonusTypeInput, currentBetInput) {
   const bonusType = BUY_BONUS_TYPE;
   const resolvedType = BUY_BONUS_TYPE;
 
-  await wallet.deductBalance(String(userId), cost, {
-    leg: "buy_bonus",
-    bonusType,
-    resolvedType,
-  });
+  try {
+    await wallet.deductBalance(String(userId), cost, {
+      leg: "buy_bonus",
+      bonusType,
+      resolvedType,
+    });
+  } catch (err) {
+    mapWalletError(err);
+  }
 
   const session = roundManager.createBonusSession(String(userId), {
     bonusType,
