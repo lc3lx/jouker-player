@@ -24,8 +24,8 @@ test("payline parser — left-to-right with wild substitution", () => {
 });
 
 test("seven pays from 2-of-a-kind", () => {
-  const pay = basePayout(SYMBOLS.SEVEN, 2, 1);
-  assert.equal(pay, 0.2);
+  const pay = basePayout(SYMBOLS.SEVEN, 2, 10000);
+  assert.equal(pay, 2000);
 });
 
 test("wild multipliers add on line win", () => {
@@ -54,14 +54,14 @@ test("max win cap at 10,000x bet", () => {
 test("spin deducts bet and credits win (stub wallet)", async () => {
   wallet.clearStubForTests();
   roundManager.clearAllForTests();
-  wallet.seedStubBalance("u1", 1000);
+  wallet.seedStubBalance("u1", 500000);
 
   const before = await wallet.getBalance("u1");
-  const result = await goldenTreeService.executeSpin("u1", 0.2);
+  const result = await goldenTreeService.executeSpin("u1", 10000);
   const after = await wallet.getBalance("u1");
 
-  assert.equal(result.betAmount, 0.2);
-  assert.equal(roundMoney(after - before), roundMoney(result.totalWin - 0.2));
+  assert.equal(result.betAmount, 10000);
+  assert.equal(roundMoney(after - before), roundMoney(result.totalWin - 10000));
   assert.ok(result.roundId);
   assert.ok(result.roundHash);
   assert.equal(result.matrix.length, 5);
@@ -71,9 +71,9 @@ test("spin deducts bet and credits win (stub wallet)", async () => {
 test("gamble doubles or zeroes win", async () => {
   wallet.clearStubForTests();
   roundManager.clearAllForTests();
-  wallet.seedStubBalance("u2", 1000);
+  wallet.seedStubBalance("u2", 500000);
 
-  const spin = await goldenTreeService.executeSpin("u2", 1);
+  const spin = await goldenTreeService.executeSpin("u2", 10000);
   if (spin.totalWin <= 0 || !spin.gambleEligible) {
     return;
   }
@@ -98,16 +98,16 @@ test("gamble doubles or zeroes win", async () => {
 test("buy bonus creates 5 free spins session", async () => {
   wallet.clearStubForTests();
   roundManager.clearAllForTests();
-  wallet.seedStubBalance("u3", 10000);
+  wallet.seedStubBalance("u3", 10000000);
 
-  const purchase = await goldenTreeService.executeBuyBonus("u3", "Triple", 1);
-  assert.equal(purchase.cost, 350);
+  const purchase = await goldenTreeService.executeBuyBonus("u3", "Triple", 10000);
+  assert.equal(purchase.cost, 3500000);
   assert.equal(purchase.freeSpinsRemaining, 5);
   assert.equal(purchase.resolvedType, "Triple");
 
-  const spin1 = await goldenTreeService.executeSpin("u3", 1);
+  const spin1 = await goldenTreeService.executeSpin("u3", 10000);
   assert.equal(spin1.isFreeSpin, true);
-  assert.equal(spin1.betAmount, 1);
+  assert.equal(spin1.betAmount, 10000);
   assert.equal(spin1.freeSpinsRemaining, 4);
 });
 
@@ -115,11 +115,11 @@ test("bet validation rejects out-of-range amounts", async () => {
   wallet.clearStubForTests();
   roundManager.clearAllForTests();
   await assert.rejects(
-    () => goldenTreeService.executeSpin("u4", 0.001),
+    () => goldenTreeService.executeSpin("u4", 9999),
     (err) => err.statusCode === 400,
   );
   await assert.rejects(
-    () => goldenTreeService.executeSpin("u4", 200),
+    () => goldenTreeService.executeSpin("u4", 40000001),
     (err) => err.statusCode === 400,
   );
 });

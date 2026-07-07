@@ -2693,6 +2693,8 @@ class PokerTable {
       revealSteps.push({ seatIndex, s });
     }
     const total = revealSteps.length;
+
+    // When the showdown pause timer ends, reveal everyone's cards together.
     for (let step = 0; step < total; step++) {
       const { seatIndex, s } = revealSteps[step];
       this.showdownRevealedSeats.add(seatIndex);
@@ -2707,14 +2709,11 @@ class PokerTable {
         step: step + 1,
         total,
         handCategory: cat,
+        batch: true,
       });
-      await this.broadcastState(false);
-      await sleep(dramatic ? Math.floor(gapMs * 1.35) : gapMs);
     }
-
-    // Hold all revealed cards face-up so everyone can read the showdown before
-    // chips move and the winner banner appears.
     if (total > 0) {
+      await this.broadcastState(false);
       await sleep(POKER_TIMINGS.SHOWDOWN_CARD_HOLD_MS);
     }
 

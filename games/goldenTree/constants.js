@@ -6,8 +6,8 @@
 const REEL_COUNT = 5;
 const ROW_COUNT = 3;
 
-const BET_MIN = 0.02;
-const BET_MAX = 100;
+const BET_MIN = 10000;
+const BET_MAX = 40000000;
 const MAX_WIN_MULTIPLIER = 10000;
 const REFERENCE_BET = 1;
 const TARGET_RTP = 0.9649;
@@ -106,7 +106,9 @@ function isScatter(symbol) {
 }
 
 function roundMoney(value) {
-  return Math.round(Number(value) * 100) / 100;
+  const n = Number(value);
+  if (!Number.isFinite(n)) return 0;
+  return Math.round(n);
 }
 
 module.exports = {

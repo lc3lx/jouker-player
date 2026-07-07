@@ -12,14 +12,24 @@ const { trackEventServerFireAndForget } = require("./analyticsService");
 const SPIN_COOLDOWN_MS = 4 * 60 * 60 * 1000;
 const STREAK_BASE_TOKENS = 5000;
 const STREAK_MAX_GUARANTEE = 100000;
-const MAX_BANKED_SPINS = 5;
+/** Max spins earnable per UTC day (every 4h → up to 6). Unused spins expire at midnight UTC. */
+const MAX_SPINS_PER_DAY = 6;
 
-const REWARD_WEIGHTS = [0.5, 0.25, 0.15, 0.07, 0.025, 0.005];
+const REWARD_WEIGHTS = [0.40, 0.26, 0.17, 0.10, 0.045, 0.008];
 const TIER_NAMES = ["minimum", "next", "mid", "high", "rare", "jackpot"];
 
-const TIER_MULTIPLIERS_LOW = [1, 1.5, 2, 3, 4, 5];
-const TIER_MULTIPLIERS_MID = [1, 1.2, 1.5, 2, 3, 4];
-const TIER_MULTIPLIERS_HIGH = [1, 1.25, 1.5, 2, 3, 5];
+const TIER_MULTIPLIERS_LOW = [1, 1.5, 2, 3, 4, 6];
+const TIER_MULTIPLIERS_MID = [1, 1.25, 1.6, 2.2, 3.5, 5];
+const TIER_MULTIPLIERS_HIGH = [1, 1.3, 1.7, 2.5, 4, 7];
+
+const TIER_LABELS_AR = {
+  minimum: "الحد الأدنى",
+  next: "جيد",
+  mid: "ممتاز",
+  high: "عالي",
+  rare: "نادر 🔥",
+  jackpot: "جاكبوت 💎",
+};
 
 /** Visual wheel segments — display only; rewards are server-generated. */
 const WHEEL_DISPLAY_SEGMENTS = [
@@ -33,6 +43,14 @@ function utcDayStr(d) {
 function yesterdayUtcStrFrom(now) {
   const t = Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate() - 1);
   return new Date(t).toISOString().slice(0, 10);
+}
+
+function nextUtcMidnightMs(now) {
+  return Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate() + 1);
+}
+
+function secondsUntilUtcMidnight(now) {
+  return Math.max(0, Math.ceil((nextUtcMidnightMs(now) - now.getTime()) / 1000));
 }
 
 function guaranteedMinimumForStreak(streakDay) {
@@ -73,11 +91,42 @@ function resolveStreakOnSpin(wheel, now) {
   return 1;
 }
 
+/**
+ * At UTC midnight unused spins are lost. Each new day starts with 1 free spin
+ * (if under daily cap), then +1 every 4 hours up to MAX_SPINS_PER_DAY.
+ */
+function ensureAccrualDay(wheel, now) {
+  const today = utcDayStr(now);
+  if (wheel.accrualDayUtc === today) return false;
+
+  wheel.accrualDayUtc = today;
+  wheel.availableSpins = 0;
+  wheel.spinsGrantedToday = 0;
+  wheel.lastAccrualAt = now;
+  wheel.nextSpinAt = new Date(now.getTime() + SPIN_COOLDOWN_MS);
+
+  if (wheel.spinsGrantedToday < MAX_SPINS_PER_DAY) {
+    wheel.availableSpins = 1;
+    wheel.spinsGrantedToday = 1;
+  }
+  return true;
+}
+
 function syncAccruedSpins(wheel, now) {
+  ensureAccrualDay(wheel, now);
+
   if (!wheel.lastAccrualAt) {
     wheel.lastAccrualAt = now;
-    wheel.availableSpins = Math.max(1, wheel.availableSpins || 0);
+    if ((wheel.spinsGrantedToday || 0) < MAX_SPINS_PER_DAY && (wheel.availableSpins || 0) === 0) {
+      wheel.availableSpins = 1;
+      wheel.spinsGrantedToday = 1;
+    }
     wheel.nextSpinAt = new Date(now.getTime() + SPIN_COOLDOWN_MS);
+    return;
+  }
+
+  if ((wheel.spinsGrantedToday || 0) >= MAX_SPINS_PER_DAY) {
+    wheel.nextSpinAt = new Date(nextUtcMidnightMs(now));
     return;
   }
 
@@ -90,20 +139,26 @@ function syncAccruedSpins(wheel, now) {
   const accrued = Math.floor(elapsed / SPIN_COOLDOWN_MS);
   if (accrued <= 0) return;
 
-  const room = Math.max(0, MAX_BANKED_SPINS - (wheel.availableSpins || 0));
-  const toGrant = Math.min(accrued, room);
+  const roomInDay = Math.max(0, MAX_SPINS_PER_DAY - (wheel.spinsGrantedToday || 0));
+  const toGrant = Math.min(accrued, roomInDay);
   if (toGrant > 0) {
     wheel.availableSpins = (wheel.availableSpins || 0) + toGrant;
+    wheel.spinsGrantedToday = (wheel.spinsGrantedToday || 0) + toGrant;
     wheel.lastAccrualAt = new Date(
       new Date(wheel.lastAccrualAt).getTime() + toGrant * SPIN_COOLDOWN_MS
     );
   }
-  wheel.nextSpinAt = new Date(new Date(wheel.lastAccrualAt).getTime() + SPIN_COOLDOWN_MS);
+
+  if ((wheel.spinsGrantedToday || 0) >= MAX_SPINS_PER_DAY) {
+    wheel.nextSpinAt = new Date(nextUtcMidnightMs(now));
+  } else {
+    wheel.nextSpinAt = new Date(new Date(wheel.lastAccrualAt).getTime() + SPIN_COOLDOWN_MS);
+  }
 }
 
 function remainingSecondsUntilNextSpin(wheel, now) {
   if ((wheel.availableSpins || 0) > 0) return 0;
-  if (!wheel.nextSpinAt) return 0;
+  if (!wheel.nextSpinAt) return secondsUntilUtcMidnight(now);
   const diff = new Date(wheel.nextSpinAt).getTime() - now.getTime();
   return Math.max(0, Math.ceil(diff / 1000));
 }
@@ -137,6 +192,34 @@ function nearestWheelSegment(reward) {
   return best;
 }
 
+function buildStatusPayload(wheel, now) {
+  const previewStreak = previewNextStreak(wheel, now);
+  const guaranteedReward = guaranteedMinimumForStreak(previewStreak);
+  const canSpin = (wheel.availableSpins || 0) > 0;
+  const rewardPreview = buildRewardTable(guaranteedReward, previewStreak);
+
+  return {
+    canSpin,
+    availableSpins: wheel.availableSpins || 0,
+    spinsGrantedToday: wheel.spinsGrantedToday || 0,
+    maxSpinsPerDay: MAX_SPINS_PER_DAY,
+    secondsUntilDayReset: secondsUntilUtcMidnight(now),
+    currentStreak: Math.max(0, wheel.currentStreak || 0),
+    previewStreak,
+    guaranteedReward,
+    rewardPreview,
+    tierLabels: TIER_LABELS_AR,
+    nextSpinAt: wheel.nextSpinAt ? wheel.nextSpinAt.toISOString() : null,
+    remainingSeconds: remainingSecondsUntilNextSpin(wheel, now),
+    wheelSegments: WHEEL_DISPLAY_SEGMENTS,
+    lifetimeSpins: wheel.lifetimeSpins || 0,
+    lifetimeTokensWon: wheel.lifetimeTokensWon || 0,
+    highestRewardWon: wheel.highestRewardWon || 0,
+    serverTime: now.toISOString(),
+    accrualDayUtc: wheel.accrualDayUtc || utcDayStr(now),
+  };
+}
+
 async function loadAndSyncWheel(userId, session) {
   const wheel = await LuckyWheel.getOrCreateByUser(userId, session);
   const now = new Date();
@@ -155,26 +238,9 @@ exports.getLuckyWheelStatus = asyncHandler(async (req, res, next) => {
   const { wheel, now } = await loadAndSyncWheel(userId);
   await wheel.save();
 
-  const previewStreak = previewNextStreak(wheel, now);
-  const guaranteedReward = guaranteedMinimumForStreak(previewStreak);
-  const canSpin = (wheel.availableSpins || 0) > 0;
-
   res.status(200).json({
     status: "success",
-    data: {
-      canSpin,
-      availableSpins: wheel.availableSpins || 0,
-      currentStreak: Math.max(0, wheel.currentStreak || 0),
-      previewStreak,
-      guaranteedReward,
-      nextSpinAt: wheel.nextSpinAt ? wheel.nextSpinAt.toISOString() : null,
-      remainingSeconds: remainingSecondsUntilNextSpin(wheel, now),
-      wheelSegments: WHEEL_DISPLAY_SEGMENTS,
-      lifetimeSpins: wheel.lifetimeSpins || 0,
-      lifetimeTokensWon: wheel.lifetimeTokensWon || 0,
-      highestRewardWon: wheel.highestRewardWon || 0,
-      serverTime: now.toISOString(),
-    },
+    data: buildStatusPayload(wheel, now),
   });
 });
 
@@ -249,12 +315,16 @@ exports.spinLuckyWheel = asyncHandler(async (req, res, next) => {
     spinResult = {
       reward,
       rewardTier,
+      rewardTierLabel: TIER_LABELS_AR[rewardTier] || rewardTier,
       wheelSegment,
       currentStreak: nextStreak,
       guaranteedMinimum: guaranteedMin,
       nextSpinAt: wheel.nextSpinAt ? wheel.nextSpinAt.toISOString() : null,
       availableSpins: wheel.availableSpins || 0,
+      spinsGrantedToday: wheel.spinsGrantedToday || 0,
+      maxSpinsPerDay: MAX_SPINS_PER_DAY,
       remainingSeconds: remainingSecondsUntilNextSpin(wheel, now),
+      secondsUntilDayReset: secondsUntilUtcMidnight(now),
       spinId: String(history._id),
     };
   });
@@ -317,3 +387,11 @@ exports.getLuckyWheelHistory = asyncHandler(async (req, res) => {
 });
 
 exports.WHEEL_DISPLAY_SEGMENTS = WHEEL_DISPLAY_SEGMENTS;
+exports.MAX_SPINS_PER_DAY = MAX_SPINS_PER_DAY;
+exports.SPIN_COOLDOWN_MS = SPIN_COOLDOWN_MS;
+exports.ensureAccrualDay = ensureAccrualDay;
+exports.syncAccruedSpins = syncAccruedSpins;
+exports.buildRewardTable = buildRewardTable;
+exports.guaranteedMinimumForStreak = guaranteedMinimumForStreak;
+exports.secondsUntilUtcMidnight = secondsUntilUtcMidnight;
+exports.utcDayStr = utcDayStr;

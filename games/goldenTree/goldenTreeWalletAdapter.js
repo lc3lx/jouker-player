@@ -42,7 +42,7 @@ async function withUserLock(userId, fn) {
 function ensureStubUser(userId) {
   const key = String(userId);
   if (!stubBalances.has(key)) {
-    stubBalances.set(key, { balance: 100000, version: 0 });
+    stubBalances.set(key, { balance: 50000000, version: 0 });
   }
   return stubBalances.get(key);
 }
@@ -99,7 +99,7 @@ async function deductBalanceMongo(userId, amount, meta = {}) {
     await ledgerWithdraw({
       session,
       userId,
-      amount: Math.round(amt * 100),
+      amount: Math.round(amt),
       ledgerType: "game_loss",
       meta: { source: "golden_tree", ...meta },
     });
@@ -118,7 +118,7 @@ async function creditBalanceMongo(userId, amount, meta = {}) {
     await ledgerDeposit({
       session,
       userId,
-      amount: Math.round(amt * 100),
+      amount: Math.round(amt),
       ledgerType: "game_win",
       meta: { source: "golden_tree", ...meta },
     });

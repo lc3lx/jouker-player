@@ -14,6 +14,8 @@ const luckyWheelSchema = new mongoose.Schema(
     lastSpinDayUtc: { type: String, default: null, index: true },
     lastAccrualAt: { type: Date, default: null },
     nextSpinAt: { type: Date, default: null },
+    accrualDayUtc: { type: String, default: null, index: true },
+    spinsGrantedToday: { type: Number, default: 0, min: 0 },
     availableSpins: { type: Number, default: 1, min: 0 },
     lifetimeSpins: { type: Number, default: 0, min: 0 },
     lifetimeTokensWon: { type: Number, default: 0, min: 0 },
@@ -29,10 +31,13 @@ luckyWheelSchema.statics.getOrCreateByUser = async function getOrCreateByUser(us
 
   const now = new Date();
   const SPIN_COOLDOWN_MS = 4 * 60 * 60 * 1000;
+  const today = now.toISOString().slice(0, 10);
   const payload = {
     userId,
     currentStreak: 0,
     availableSpins: 1,
+    spinsGrantedToday: 1,
+    accrualDayUtc: today,
     lastAccrualAt: now,
     nextSpinAt: new Date(now.getTime() + SPIN_COOLDOWN_MS),
   };

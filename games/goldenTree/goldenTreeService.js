@@ -16,7 +16,7 @@ const wallet = require("./goldenTreeWalletAdapter");
 function validateBet(betAmount) {
   const bet = roundMoney(betAmount);
   if (!Number.isFinite(bet) || bet < BET_MIN || bet > BET_MAX) {
-    throw new ApiError(`Bet must be between ${BET_MIN} and ${BET_MAX} FUN`, 400);
+    throw new ApiError(`Bet must be between ${BET_MIN} and ${BET_MAX} coins`, 400);
   }
   return bet;
 }
