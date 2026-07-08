@@ -1,6 +1,6 @@
 const crypto = require("crypto");
 const { v4: uuidv4 } = require("uuid");
-const { FREE_SPINS_AWARD, roundMoney } = require("./constants");
+const { FREE_SPINS_NATURAL, roundMoney } = require("./constants");
 
 /** In-memory round + bonus session store (swap for Redis/Mongo in production). */
 const rounds = new Map();
@@ -56,13 +56,12 @@ function getRound(roundId) {
   return rounds.get(roundId) || null;
 }
 
-function createBonusSession(userId, { betAmount, freeSpins = FREE_SPINS_AWARD }) {
+function createBonusSession(userId, { betAmount, freeSpins = FREE_SPINS_NATURAL }) {
   const session = {
     sessionId: uuidv4(),
     userId: String(userId),
     betAmount: roundMoney(betAmount),
     freeSpinsRemaining: freeSpins,
-    totalMultiplier: 0,
     totalWon: 0,
     createdAt: Date.now(),
   };

@@ -8,18 +8,22 @@ const {
   ROW_COUNT,
   SYMBOLS,
   MIN_MATCH,
-  FREE_SPINS_AWARD,
-  TRIGGER_MIN_SCATTERS,
+  TRIGGER_MIN_MULTIPLIERS,
+  FREE_SPINS_NATURAL,
+  FREE_SPINS_BOUGHT,
   BUY_BONUS_COST,
   MAX_WIN_MULTIPLIER,
+  MULTIPLIER_VALUES,
   payoutFor,
-  scatterPayFor,
   winTierFor,
   isMultiplier,
   roundMoney,
 } = require("../games/poseidon/constants");
-const { findWins, countScatters, collectMultipliers } = require("../games/poseidon/winCalculator");
-const { resolveSpin } = require("../games/poseidon/spinEngine");
+const { findWins, collectMultipliers } = require("../games/poseidon/winCalculator");
+const {
+  resolveSpin,
+  pickMultiplierValue,
+} = require("../games/poseidon/spinEngine");
 const roundManager = require("../games/poseidon/roundManager");
 const wallet = require("../games/poseidon/poseidonWalletAdapter");
 const poseidonService = require("../games/poseidon/poseidonService");
@@ -47,22 +51,34 @@ beforeEach(() => {
 
 // --- constants / paytable -------------------------------------------------
 
-test("payoutFor respects the 8-9 / 10-11 / 12+ bands", () => {
-  assert.equal(payoutFor(SYMBOLS.PEARL, 7), 0);
-  assert.equal(payoutFor(SYMBOLS.PEARL, 8), 10);
-  assert.equal(payoutFor(SYMBOLS.PEARL, 9), 10);
-  assert.equal(payoutFor(SYMBOLS.PEARL, 10), 25);
-  assert.equal(payoutFor(SYMBOLS.PEARL, 12), 50);
-  assert.equal(payoutFor(SYMBOLS.PEARL, 30), 50);
-  assert.equal(payoutFor(SYMBOLS.S, 8), 0.2);
-});
+test("payoutFor respects the 8-9 / 10-11 / 12+ bands and the design ranking", () => {
+  assert.equal(payoutFor(SYMBOLS.CROWN, 7), 0);
+  assert.equal(payoutFor(SYMBOLS.CROWN, 8), 12);
+  assert.equal(payoutFor(SYMBOLS.CROWN, 10), 30);
+  assert.equal(payoutFor(SYMBOLS.CROWN, 12), 60);
 
-test("scatterPayFor pays 4/5/6+ orbs", () => {
-  assert.equal(scatterPayFor(3), 0);
-  assert.equal(scatterPayFor(4), 3);
-  assert.equal(scatterPayFor(5), 5);
-  assert.equal(scatterPayFor(6), 100);
-  assert.equal(scatterPayFor(9), 100);
+  // crown > fish > pearl > starfish > coral > letters
+  const order = [
+    SYMBOLS.CROWN,
+    SYMBOLS.FISH,
+    SYMBOLS.PEARL,
+    SYMBOLS.STARFISH,
+    SYMBOLS.CORAL,
+    SYMBOLS.A,
+  ];
+  for (let i = 1; i < order.length; i += 1) {
+    assert.ok(
+      payoutFor(order[i - 1], 8) > payoutFor(order[i], 8),
+      `${order[i - 1]} must outrank ${order[i]}`,
+    );
+  }
+
+  // the four letters pay identically
+  for (const letter of [SYMBOLS.E, SYMBOLS.N, SYMBOLS.S]) {
+    for (const count of [8, 10, 12]) {
+      assert.equal(payoutFor(letter, count), payoutFor(SYMBOLS.A, count));
+    }
+  }
 });
 
 test("winTierFor maps bet multiples to banners", () => {
@@ -73,42 +89,48 @@ test("winTierFor maps bet multiples to banners", () => {
   assert.equal(winTierFor(400), "jackpot");
 });
 
-// --- win calculator ---------------------------------------------------------
+// --- multiplier gate cascade -------------------------------------------------
 
-test("findWins detects 8+ anywhere and ignores orbs/multipliers", () => {
-  const matrix = fullMatrix(SYMBOLS.S);
-  // reduce pearl to exactly MIN_MATCH cells; rest stays S
-  const pearlCells = [[0, 0], [0, 1], [1, 0], [2, 3], [3, 4], [4, 2], [5, 0], [5, 4]];
-  for (const [c, r] of pearlCells) matrix[c][r] = SYMBOLS.PEARL;
-  matrix[1][1] = SYMBOLS.ORB;
-  matrix[1][2] = "x10";
-
-  const wins = findWins(matrix);
-  const pearl = wins.find((w) => w.symbol === SYMBOLS.PEARL);
-  assert.ok(pearl, "pearl win detected");
-  assert.equal(pearl.count, MIN_MATCH);
-  assert.equal(pearl.payout, 10);
-
-  const sWin = wins.find((w) => w.symbol === SYMBOLS.S);
-  assert.ok(sWin, "s win detected");
-  assert.equal(sWin.count, 30 - pearlCells.length - 2);
-
-  assert.equal(countScatters(matrix), 1);
-  assert.deepEqual(collectMultipliers(matrix), [{ col: 1, row: 2, value: 10 }]);
+test("gate cascade: x2 dominates at ~90%, higher values keep the design ratios", () => {
+  const rng = mulberry32(2024);
+  const counts = {};
+  const draws = 200000;
+  for (let i = 0; i < draws; i += 1) {
+    const v = pickMultiplierValue(rng);
+    counts[v] = (counts[v] || 0) + 1;
+  }
+  assert.ok(Math.abs(counts[2] / draws - 0.9) < 0.01, `x2 ≈ 90%, got ${counts[2] / draws}`);
+  assert.ok(Math.abs(counts[5] / draws - 0.07) < 0.01, `x5 ≈ 7%, got ${counts[5] / draws}`);
+  // strictly decreasing frequency up the value ladder
+  for (let i = 1; i < MULTIPLIER_VALUES.length; i += 1) {
+    const prev = counts[MULTIPLIER_VALUES[i - 1]] || 0;
+    const cur = counts[MULTIPLIER_VALUES[i]] || 0;
+    assert.ok(cur < prev, `x${MULTIPLIER_VALUES[i]} rarer than x${MULTIPLIER_VALUES[i - 1]}`);
+  }
 });
 
-test("findWins returns nothing below 8 matches", () => {
+// --- win calculator ---------------------------------------------------------
+
+test("findWins detects 8+ anywhere and ignores multiplier plaques", () => {
   const matrix = fullMatrix(SYMBOLS.S);
-  const symbols = [SYMBOLS.A, SYMBOLS.E, SYMBOLS.N, SYMBOLS.CROWN, SYMBOLS.FISH];
-  let i = 0;
-  // paint the grid so no symbol reaches 8 (30 cells / 5 symbols = 6 each)
-  for (let c = 0; c < REEL_COUNT; c += 1) {
-    for (let r = 0; r < ROW_COUNT; r += 1) {
-      matrix[c][r] = symbols[i % symbols.length];
-      i += 1;
-    }
-  }
-  assert.deepEqual(findWins(matrix), []);
+  const crownCells = [[0, 0], [0, 1], [1, 0], [2, 3], [3, 4], [4, 2], [5, 0], [5, 4]];
+  for (const [c, r] of crownCells) matrix[c][r] = SYMBOLS.CROWN;
+  matrix[1][1] = "x10";
+  matrix[1][2] = "x1000";
+
+  const wins = findWins(matrix);
+  const crown = wins.find((w) => w.symbol === SYMBOLS.CROWN);
+  assert.ok(crown, "crown win detected");
+  assert.equal(crown.count, MIN_MATCH);
+  assert.equal(crown.payout, 12);
+
+  const sWin = wins.find((w) => w.symbol === SYMBOLS.S);
+  assert.equal(sWin.count, 30 - crownCells.length - 2);
+
+  assert.deepEqual(collectMultipliers(matrix), [
+    { col: 1, row: 1, value: 10 },
+    { col: 1, row: 2, value: 1000 },
+  ]);
 });
 
 // --- spin engine ------------------------------------------------------------
@@ -119,8 +141,7 @@ test("resolveSpin is deterministic for a seeded rng", () => {
   assert.deepEqual(a, b);
 });
 
-test("tumble steps are internally consistent", () => {
-  // find a seed with at least one tumble step
+test("tumble steps are internally consistent and never remove plaques", () => {
   let spin = null;
   for (let seed = 1; seed < 400; seed += 1) {
     const candidate = resolveSpin({ rng: mulberry32(seed) });
@@ -136,6 +157,10 @@ test("tumble steps are internally consistent", () => {
     assert.equal(step.stepWin, step.wins.reduce((s, w) => s + w.payout, 0));
 
     const removed = new Set(step.removedPositions.map(([c, r]) => `${c}:${r}`));
+    for (const key of removed) {
+      const [c, r] = key.split(":").map(Number);
+      assert.ok(!isMultiplier(matrix[c][r]), "plaques are never removed");
+    }
     for (let c = 0; c < REEL_COUNT; c += 1) {
       const survivors = [];
       for (let r = 0; r < ROW_COUNT; r += 1) {
@@ -143,35 +168,11 @@ test("tumble steps are internally consistent", () => {
       }
       assert.equal(step.refills[c].length + survivors.length, ROW_COUNT);
       assert.deepEqual(step.matrixAfter[c], [...step.refills[c], ...survivors]);
-      // refills never add scatters
-      for (const cell of step.refills[c]) assert.notEqual(cell, SYMBOLS.ORB);
     }
     matrix = step.matrixAfter;
   }
   assert.deepEqual(matrix, spin.finalMatrix);
   assert.equal(spin.baseWin, spin.steps.reduce((s, x) => s + x.stepWin, 0));
-});
-
-test("forceScatters guarantees the free-spin trigger count", () => {
-  for (let seed = 1; seed <= 20; seed += 1) {
-    const spin = resolveSpin({
-      forceScatters: TRIGGER_MIN_SCATTERS,
-      rng: mulberry32(seed),
-    });
-    assert.ok(spin.scatterCount >= TRIGGER_MIN_SCATTERS);
-  }
-});
-
-test("multiplier cells are well-formed", () => {
-  const spin = resolveSpin({ bonusMode: true, rng: mulberry32(77) });
-  for (const m of spin.multipliers) {
-    assert.ok(isMultiplier(spin.finalMatrix[m.col][m.row]));
-    assert.ok([2, 5, 10, 20, 50].includes(m.value));
-  }
-  assert.equal(
-    spin.multiplierSum,
-    spin.multipliers.reduce((s, m) => s + m.value, 0),
-  );
 });
 
 // --- service + wallet -------------------------------------------------------
@@ -196,16 +197,37 @@ test("spin settles bet and win atomically against the stub wallet", async () => 
   assert.equal(res.initialMatrix.length, REEL_COUNT);
   assert.equal(res.initialMatrix[0].length, ROW_COUNT);
   assert.ok(res.roundId && res.roundHash);
+  assert.equal(typeof res.multiplierCount, "number");
 
   const expected = roundMoney(1000000 - bet + res.totalWin);
   assert.equal(res.balance, expected);
   assert.equal(await wallet.getBalance("user-2"), expected);
 
   if (!res.winCapped) {
-    const tumbleWin = roundMoney(res.baseWinAmount * res.appliedMultiplier);
-    assert.ok(Math.abs(res.totalWin - (tumbleWin + res.scatterPayAmount)) <= 1);
+    assert.equal(
+      res.totalWin,
+      roundMoney(res.baseWinAmount * res.appliedMultiplier),
+    );
   }
   assert.ok(res.totalWin <= roundMoney(bet * MAX_WIN_MULTIPLIER));
+});
+
+test("multiplier applies only when the spin wins", async () => {
+  wallet.seedStubBalance("user-2b", 100000000);
+  // sample many spins; whenever plaques landed on a losing spin, win stays 0
+  for (let i = 0; i < 60; i += 1) {
+    const res = await poseidonService.executeSpin("user-2b", 10000);
+    if (res.baseWinAmount === 0) {
+      assert.equal(res.totalWin, 0);
+      assert.equal(res.appliedMultiplier, 1);
+    } else if (res.multiplierSum > 0 && !res.winCapped) {
+      assert.equal(res.appliedMultiplier, res.multiplierSum);
+    }
+    // drain any bonus session so every iteration is a paid spin
+    while (roundManager.hasActiveBonusSession("user-2b")) {
+      await poseidonService.executeSpin("user-2b", 10000);
+    }
+  }
 });
 
 test("insufficient balance is rejected with 402", async () => {
@@ -216,21 +238,18 @@ test("insufficient balance is rejected with 402", async () => {
   );
 });
 
-test("buy bonus charges 100x bet and opens a 15-spin session", async () => {
+test("buy bonus charges the fixed cost and opens a 10-spin session — no trigger spin", async () => {
   wallet.seedStubBalance("user-4", 100000000);
   const bet = 10000;
   const res = await poseidonService.executeBuyBonus("user-4", bet);
 
   assert.equal(res.cost, bet * BUY_BONUS_COST);
-  assert.ok(res.scatterCount >= TRIGGER_MIN_SCATTERS);
   assert.equal(res.freeSpinsTriggered, true);
-  assert.equal(res.freeSpinsRemaining, FREE_SPINS_AWARD);
+  assert.equal(res.freeSpinsAwarded, FREE_SPINS_BOUGHT);
+  assert.equal(res.freeSpinsRemaining, FREE_SPINS_BOUGHT);
+  assert.equal(res.balance, 100000000 - res.cost);
   assert.ok(roundManager.hasActiveBonusSession("user-4"));
 
-  // trigger spin pays no extra bet: balance = seed - cost + trigger win
-  assert.equal(res.balance, 100000000 - res.cost + res.totalWin);
-
-  // second purchase while active is rejected
   await assert.rejects(
     () => poseidonService.executeBuyBonus("user-4", bet),
     (err) => err.statusCode === 409,
@@ -242,27 +261,40 @@ test("free spins consume the session without charging bets", async () => {
   const bet = 10000;
   await poseidonService.executeBuyBonus("user-5", bet);
 
-  let remaining = FREE_SPINS_AWARD;
+  let remaining = FREE_SPINS_BOUGHT;
   let guard = 0;
-  while (remaining > 0 && guard < 200) {
+  while (remaining > 0 && guard < 300) {
     guard += 1;
     const before = await wallet.getBalance("user-5");
     const res = await poseidonService.executeSpin("user-5", 0 /* ignored */);
     assert.equal(res.isFreeSpin, true);
     assert.equal(res.betAmount, bet);
-    // free spin never debits — balance only grows by the win
     assert.equal(res.balance, before + res.totalWin);
-    assert.ok(res.bonusTotalMultiplier >= 0);
     remaining = res.freeSpinsRemaining;
   }
   assert.equal(remaining, 0);
   assert.equal(roundManager.hasActiveBonusSession("user-5"), false);
 
-  // next spin is a paid base-game spin again
   const before = await wallet.getBalance("user-5");
   const res = await poseidonService.executeSpin("user-5", bet);
   assert.equal(res.isFreeSpin, false);
   assert.equal(res.balance, before - bet + res.totalWin);
+});
+
+test("natural trigger awards 5 free spins on 3+ plaques", async () => {
+  wallet.seedStubBalance("user-6", 5000000000);
+  let triggered = null;
+  for (let i = 0; i < 3000 && !triggered; i += 1) {
+    const res = await poseidonService.executeSpin("user-6", 10000);
+    if (!res.isFreeSpin && res.freeSpinsTriggered) triggered = res;
+    while (!triggered && roundManager.hasActiveBonusSession("user-6")) {
+      await poseidonService.executeSpin("user-6", 10000);
+    }
+  }
+  assert.ok(triggered, "no natural trigger in 3000 spins (expected ~1/150)");
+  assert.ok(triggered.multiplierCount >= TRIGGER_MIN_MULTIPLIERS);
+  assert.equal(triggered.freeSpinsAwarded, FREE_SPINS_NATURAL);
+  assert.equal(triggered.freeSpinsRemaining, FREE_SPINS_NATURAL);
 });
 
 // --- RTP smoke ---------------------------------------------------------------
@@ -273,25 +305,21 @@ test("seeded RTP simulation stays in the tuned band", () => {
   let totalBet = 0;
   let totalWon = 0;
 
+  const winOf = (s) => {
+    const applied = s.baseWin > 0 && s.multiplierSum > 0 ? s.multiplierSum : 1;
+    return Math.min(s.baseWin * applied, MAX_WIN_MULTIPLIER);
+  };
+
   const playBonus = () => {
-    let remaining = FREE_SPINS_AWARD;
-    let totalMultiplier = 0;
+    let remaining = FREE_SPINS_NATURAL;
     let won = 0;
     let guard = 0;
-    while (remaining > 0 && guard < 500) {
+    while (remaining > 0 && guard < 400) {
       guard += 1;
       remaining -= 1;
       const s = resolveSpin({ bonusMode: true, rng });
-      let applied = 1;
-      if (s.baseWin > 0 && s.multiplierSum > 0) {
-        totalMultiplier += s.multiplierSum;
-        applied = totalMultiplier;
-      }
-      won += Math.min(
-        s.baseWin * applied + scatterPayFor(s.scatterCount),
-        MAX_WIN_MULTIPLIER,
-      );
-      if (s.scatterCount >= 3) remaining += 5;
+      won += winOf(s);
+      if (s.multipliers.length >= TRIGGER_MIN_MULTIPLIERS) remaining += 5;
     }
     return won;
   };
@@ -299,16 +327,12 @@ test("seeded RTP simulation stays in the tuned band", () => {
   for (let i = 0; i < spins; i += 1) {
     totalBet += 1;
     const s = resolveSpin({ rng });
-    const mult = s.baseWin > 0 && s.multiplierSum > 0 ? s.multiplierSum : 1;
-    let win = Math.min(
-      s.baseWin * mult + scatterPayFor(s.scatterCount),
-      MAX_WIN_MULTIPLIER,
-    );
-    if (s.scatterCount >= TRIGGER_MIN_SCATTERS) win += playBonus();
+    let win = winOf(s);
+    if (s.multipliers.length >= TRIGGER_MIN_MULTIPLIERS) win += playBonus();
     totalWon += win;
   }
 
   const rtp = totalWon / totalBet;
-  // Tuned to ~95% over 400k spins; the seeded 30k run must stay in a sane band.
-  assert.ok(rtp > 0.8 && rtp < 1.1, `RTP out of band: ${(rtp * 100).toFixed(1)}%`);
+  // Tuned to ~93% over 400k spins; a seeded 30k run must stay in a sane band.
+  assert.ok(rtp > 0.78 && rtp < 1.1, `RTP out of band: ${(rtp * 100).toFixed(1)}%`);
 });

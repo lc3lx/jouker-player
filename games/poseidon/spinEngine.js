@@ -10,14 +10,12 @@ const crypto = require("crypto");
 const {
   REEL_COUNT,
   ROW_COUNT,
-  SYMBOLS,
   BASE_WEIGHTS,
   BONUS_WEIGHTS,
-  REFILL_EXCLUDES,
   MULTIPLIER_VALUES,
-  MULTIPLIER_WEIGHTS,
+  MULTIPLIER_GATES,
 } = require("./constants");
-const { findWins, countScatters, collectMultipliers } = require("./winCalculator");
+const { findWins, collectMultipliers } = require("./winCalculator");
 
 /** Hard stop — a legit sequence exhausts long before this. */
 const MAX_TUMBLES = 40;
@@ -31,10 +29,8 @@ function secureRandomInt(maxExclusive) {
   return crypto.randomInt(0, maxExclusive);
 }
 
-function buildPicker(weightTable, rng, { excludes } = {}) {
-  const entries = excludes
-    ? weightTable.filter(([symbol]) => !excludes.has(symbol))
-    : [...weightTable];
+function buildPicker(weightTable, rng) {
+  const entries = [...weightTable];
   const total = entries.reduce((sum, [, w]) => sum + w, 0);
   return () => {
     let roll = rng() * total;
@@ -46,12 +42,13 @@ function buildPicker(weightTable, rng, { excludes } = {}) {
   };
 }
 
+/**
+ * Gate cascade: try x2 at 90%, on miss x5 at 70%, … x1000 at 0.5%.
+ * Falls back to x2 if every gate misses (~0.2% of draws).
+ */
 function pickMultiplierValue(rng) {
-  const total = MULTIPLIER_WEIGHTS.reduce((a, b) => a + b, 0);
-  let roll = rng() * total;
   for (let i = 0; i < MULTIPLIER_VALUES.length; i += 1) {
-    roll -= MULTIPLIER_WEIGHTS[i];
-    if (roll < 0) return MULTIPLIER_VALUES[i];
+    if (rng() < MULTIPLIER_GATES[i]) return MULTIPLIER_VALUES[i];
   }
   return MULTIPLIER_VALUES[0];
 }
@@ -62,31 +59,15 @@ function drawCell(pick, rng) {
   return symbol === "mult" ? `x${pickMultiplierValue(rng)}` : symbol;
 }
 
-function generateGrid(weights, rng, { forceScatters = 0 } = {}) {
-  const pickAny = buildPicker(weights, rng);
-  const pickNoOrb = buildPicker(weights, rng, { excludes: REFILL_EXCLUDES });
-
+function generateGrid(pick, rng) {
   const matrix = [];
   for (let col = 0; col < REEL_COUNT; col += 1) {
     const column = [];
     for (let row = 0; row < ROW_COUNT; row += 1) {
-      column.push(drawCell(forceScatters > 0 ? pickNoOrb : pickAny, rng));
+      column.push(drawCell(pick, rng));
     }
     matrix.push(column);
   }
-
-  if (forceScatters > 0) {
-    // Spread the guaranteed orbs across distinct columns for a natural look.
-    const cols = [...Array(REEL_COUNT).keys()];
-    for (let i = cols.length - 1; i > 0; i -= 1) {
-      const j = Math.floor(rng() * (i + 1));
-      [cols[i], cols[j]] = [cols[j], cols[i]];
-    }
-    for (let k = 0; k < Math.min(forceScatters, REEL_COUNT); k += 1) {
-      matrix[cols[k]][Math.floor(rng() * ROW_COUNT)] = SYMBOLS.ORB;
-    }
-  }
-
   return matrix;
 }
 
@@ -94,7 +75,7 @@ function generateGrid(weights, rng, { forceScatters = 0 } = {}) {
  * Remove the given positions, slide survivors down, refill from the top.
  * Returns { matrix, refills } where refills[col] lists new symbols top-down.
  */
-function tumble(matrix, removedPositions, pickRefill, rng) {
+function tumble(matrix, removedPositions, pick, rng) {
   const removed = new Set(removedPositions.map(([c, r]) => `${c}:${r}`));
   const next = [];
   const refills = [];
@@ -105,7 +86,7 @@ function tumble(matrix, removedPositions, pickRefill, rng) {
     }
     const incoming = [];
     while (survivors.length + incoming.length < ROW_COUNT) {
-      incoming.push(drawCell(pickRefill, rng));
+      incoming.push(drawCell(pick, rng));
     }
     refills.push(incoming);
     next.push([...incoming, ...survivors]);
@@ -123,14 +104,13 @@ function tumble(matrix, removedPositions, pickRefill, rng) {
  *   baseWin,          // sum of tumble step wins, before any multiplier
  *   multipliers,      // plaques on the final screen [{col,row,value}]
  *   multiplierSum,
- *   scatterCount,
  * }
  */
-function resolveSpin({ bonusMode = false, forceScatters = 0, rng = secureRandom } = {}) {
+function resolveSpin({ bonusMode = false, rng = secureRandom } = {}) {
   const weights = bonusMode ? BONUS_WEIGHTS : BASE_WEIGHTS;
-  const pickRefill = buildPicker(weights, rng, { excludes: REFILL_EXCLUDES });
+  const pick = buildPicker(weights, rng);
 
-  let matrix = generateGrid(weights, rng, { forceScatters });
+  let matrix = generateGrid(pick, rng);
   const initialMatrix = matrix.map((col) => [...col]);
 
   const steps = [];
@@ -142,7 +122,7 @@ function resolveSpin({ bonusMode = false, forceScatters = 0, rng = secureRandom 
     const stepWin = wins.reduce((sum, w) => sum + w.payout, 0);
     baseWin += stepWin;
     const removedPositions = wins.flatMap((w) => w.positions);
-    const result = tumble(matrix, removedPositions, pickRefill, rng);
+    const result = tumble(matrix, removedPositions, pick, rng);
     matrix = result.matrix;
 
     steps.push({
@@ -162,7 +142,6 @@ function resolveSpin({ bonusMode = false, forceScatters = 0, rng = secureRandom 
     baseWin,
     multipliers,
     multiplierSum: multipliers.reduce((sum, m) => sum + m.value, 0),
-    scatterCount: countScatters(matrix),
   };
 }
 
@@ -170,6 +149,7 @@ module.exports = {
   resolveSpin,
   generateGrid,
   tumble,
+  pickMultiplierValue,
   secureRandom,
   secureRandomInt,
 };

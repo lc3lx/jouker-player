@@ -6,7 +6,6 @@
 const {
   REEL_COUNT,
   ROW_COUNT,
-  SYMBOLS,
   MIN_MATCH,
   PAYING_SYMBOLS,
   isMultiplier,
@@ -23,7 +22,7 @@ function findWins(matrix) {
   for (let col = 0; col < REEL_COUNT; col += 1) {
     for (let row = 0; row < ROW_COUNT; row += 1) {
       const cell = matrix[col][row];
-      if (cell === SYMBOLS.ORB || isMultiplier(cell)) continue;
+      if (isMultiplier(cell)) continue;
       let list = positionsBySymbol.get(cell);
       if (!list) positionsBySymbol.set(cell, (list = []));
       list.push([col, row]);
@@ -45,16 +44,6 @@ function findWins(matrix) {
   return wins;
 }
 
-function countScatters(matrix) {
-  let count = 0;
-  for (let col = 0; col < REEL_COUNT; col += 1) {
-    for (let row = 0; row < ROW_COUNT; row += 1) {
-      if (matrix[col][row] === SYMBOLS.ORB) count += 1;
-    }
-  }
-  return count;
-}
-
 /** Multiplier plaques visible on screen: [{ col, row, value }]. */
 function collectMultipliers(matrix) {
   const found = [];
@@ -69,6 +58,5 @@ function collectMultipliers(matrix) {
 
 module.exports = {
   findWins,
-  countScatters,
   collectMultipliers,
 };

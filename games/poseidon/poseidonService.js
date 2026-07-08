@@ -4,11 +4,10 @@ const {
   BET_MAX,
   MAX_WIN_MULTIPLIER,
   BUY_BONUS_COST,
-  FREE_SPINS_AWARD,
+  FREE_SPINS_NATURAL,
+  FREE_SPINS_BOUGHT,
   RETRIGGER_AWARD,
-  TRIGGER_MIN_SCATTERS,
-  RETRIGGER_MIN_SCATTERS,
-  scatterPayFor,
+  TRIGGER_MIN_MULTIPLIERS,
   winTierFor,
   roundMoney,
 } = require("./constants");
@@ -46,12 +45,8 @@ function stepsWithAmounts(steps, betAmount) {
   }));
 }
 
-/**
- * Execute one round. `chargeBet: false` + `forceScatters` is the buy-bonus
- * trigger spin (already paid for by the bonus purchase).
- */
-async function executeSpin(userId, betAmountInput, options = {}) {
-  const { chargeBet = true, forceScatters = 0 } = options;
+/** Execute one round (paid spin or free spin from an active session). */
+async function executeSpin(userId, betAmountInput) {
   const userKey = String(userId);
 
   const bonusSession = roundManager.getBonusSession(userKey);
@@ -62,65 +57,54 @@ async function executeSpin(userId, betAmountInput, options = {}) {
     ? bonusSession.betAmount
     : validateBet(betAmountInput);
 
-  const paysBet = !isFreeSpin && chargeBet;
-  if (paysBet) {
+  if (!isFreeSpin) {
     const balance = await wallet.getBalance(userKey);
     if (balance < betAmount) {
       throw new ApiError("Insufficient wallet balance", 402);
     }
   }
 
-  const spin = resolveSpin({ bonusMode: isFreeSpin, forceScatters });
+  const spin = resolveSpin({ bonusMode: isFreeSpin });
 
   // --- win math (bet multiples) ---
-  let appliedMultiplier = 1;
-  if (spin.baseWin > 0) {
-    if (isFreeSpin) {
-      // Gates-style: orbs landing on a winning free spin grow the session
-      // multiplier, and the grown total applies to this spin's win. Winning
-      // spins without orbs pay unmultiplied.
-      if (spin.multiplierSum > 0) {
-        bonusSession.totalMultiplier += spin.multiplierSum;
-        appliedMultiplier = bonusSession.totalMultiplier;
-      }
-    } else if (spin.multiplierSum > 0) {
-      appliedMultiplier = spin.multiplierSum;
-    }
-  }
-  const tumbleWinX = spin.baseWin * appliedMultiplier;
-  const scatterPayX = scatterPayFor(spin.scatterCount);
+  // Plaques multiply the sequence win when it exists — per spin, in both
+  // modes. Plaques on a losing spin do nothing (they still count for the
+  // free-spins trigger below).
+  const appliedMultiplier =
+    spin.baseWin > 0 && spin.multiplierSum > 0 ? spin.multiplierSum : 1;
 
-  let totalWinX = tumbleWinX + scatterPayX;
+  let totalWinX = spin.baseWin * appliedMultiplier;
   const winCapped = totalWinX > MAX_WIN_MULTIPLIER;
   if (winCapped) totalWinX = MAX_WIN_MULTIPLIER;
 
   const totalWin = roundMoney(totalWinX * betAmount);
 
-  // --- free spins trigger / retrigger ---
+  // --- free spins trigger / retrigger (3+ plaques on the final screen) ---
+  const multiplierCount = spin.multipliers.length;
   let freeSpinsTriggered = false;
   let freeSpinsAwarded = 0;
   if (isFreeSpin) {
-    if (spin.scatterCount >= RETRIGGER_MIN_SCATTERS) {
+    if (multiplierCount >= TRIGGER_MIN_MULTIPLIERS) {
       roundManager.addRetriggerSpins(userKey, RETRIGGER_AWARD);
       freeSpinsAwarded = RETRIGGER_AWARD;
     }
   } else if (
-    spin.scatterCount >= TRIGGER_MIN_SCATTERS &&
+    multiplierCount >= TRIGGER_MIN_MULTIPLIERS &&
     !roundManager.hasActiveBonusSession(userKey)
   ) {
     roundManager.createBonusSession(userKey, {
       betAmount,
-      freeSpins: FREE_SPINS_AWARD,
+      freeSpins: FREE_SPINS_NATURAL,
     });
     freeSpinsTriggered = true;
-    freeSpinsAwarded = FREE_SPINS_AWARD;
+    freeSpinsAwarded = FREE_SPINS_NATURAL;
   }
 
   // --- settlement ---
   let balanceAfter;
   try {
     balanceAfter = await wallet.atomicSpinWallet(userKey, {
-      betAmount: paysBet ? betAmount : 0,
+      betAmount: isFreeSpin ? 0 : betAmount,
       winAmount: totalWin,
       meta: { type: isFreeSpin ? "free_spin" : "main_spin" },
     });
@@ -143,9 +127,6 @@ async function executeSpin(userId, betAmountInput, options = {}) {
     bonusSessionId: bonusSession?.sessionId || null,
   });
 
-  const session = roundManager.getBonusSession(userKey) ||
-    (isFreeSpin ? bonusSession : null);
-
   return {
     roundId: round.roundId,
     roundHash: round.roundHash,
@@ -155,27 +136,26 @@ async function executeSpin(userId, betAmountInput, options = {}) {
     finalMatrix: spin.finalMatrix,
     multipliers: spin.multipliers,
     multiplierSum: spin.multiplierSum,
+    multiplierCount,
     appliedMultiplier,
     baseWinAmount: roundMoney(spin.baseWin * betAmount),
-    scatterPayAmount: roundMoney(scatterPayX * betAmount),
     totalWin,
     winCapped,
     maxWinCap: roundMoney(MAX_WIN_MULTIPLIER * betAmount),
     winTier: winTierFor(totalWinX),
-    scatterCount: spin.scatterCount,
     isFreeSpin,
     freeSpinsTriggered,
     freeSpinsAwarded,
-    freeSpinsRemaining: roundManager.getBonusSession(userKey)?.freeSpinsRemaining ?? 0,
-    bonusTotalMultiplier: session?.totalMultiplier ?? 0,
+    freeSpinsRemaining:
+      roundManager.getBonusSession(userKey)?.freeSpinsRemaining ?? 0,
     bonusTotalWon: isFreeSpin ? bonusSession.totalWon : 0,
     balance: roundMoney(balanceAfter),
   };
 }
 
 /**
- * Buy bonus: pay 100× bet, then run the (free) trigger spin with guaranteed
- * scatters — it creates the free-spins session like a natural trigger.
+ * Buy bonus: pay the fixed cost and open a 10-free-spin session directly —
+ * no forced trigger spin, the outcome is whatever the spins deal.
  */
 async function executeBuyBonus(userId, currentBetInput) {
   const userKey = String(userId);
@@ -197,12 +177,22 @@ async function executeBuyBonus(userId, currentBetInput) {
     mapWalletError(err);
   }
 
-  const triggerSpin = await executeSpin(userKey, betAmount, {
-    chargeBet: false,
-    forceScatters: TRIGGER_MIN_SCATTERS,
+  const session = roundManager.createBonusSession(userKey, {
+    betAmount,
+    freeSpins: FREE_SPINS_BOUGHT,
   });
 
-  return { cost, ...triggerSpin };
+  const balanceAfter = await wallet.getBalance(userKey);
+
+  return {
+    sessionId: session.sessionId,
+    cost,
+    betAmount,
+    freeSpinsTriggered: true,
+    freeSpinsAwarded: FREE_SPINS_BOUGHT,
+    freeSpinsRemaining: session.freeSpinsRemaining,
+    balance: roundMoney(balanceAfter),
+  };
 }
 
 module.exports = {
