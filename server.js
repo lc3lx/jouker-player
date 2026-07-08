@@ -150,6 +150,7 @@ const { Server } = require("socket.io");
 const { initRTC } = require("./sockets/rtc");
 const { initTableGame } = require("./sockets/tableGame");
 const { initSocial } = require("./sockets/social");
+const { initSupport } = require("./sockets/support");
 const { initGameServer } = require("./socket");
 const { setupSocketIoRedis } = require("./utils/realtimeRedis");
 
@@ -196,6 +197,7 @@ async function startServer() {
   initRTC(io);
   initTableGame(io, { redis: realtimeRedis?.commandClient || null });
   initSocial(io, { redis: realtimeRedis?.commandClient || null });
+  initSupport(io);
   initGameServer(io, { redis: realtimeRedis?.commandClient || null });
 
   const { startEngine: startTournamentEngine } = require("./services/tournamentEngineService");
