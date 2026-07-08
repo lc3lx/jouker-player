@@ -20,6 +20,7 @@ const taskRoute = require("./taskRoute");
 const parkourRoute = require("./parkourRoute");
 const timeRoute = require("./timeRoute");
 const goldenTreeRoute = require("./goldenTreeRoute");
+const poseidonRoute = require("./poseidonRoute");
 const luckyWheelRoute = require("./luckyWheelRoute");
 const socialRoute = require("./socialRoute");
 const chatRoute = require("./chatRoute");
@@ -80,6 +81,7 @@ const mountRoutes = (app) => {
   app.use("/api/v1/history", historyRoute);
   app.use("/api-docs", openapiRoute);
   app.use("/api/game", goldenTreeRoute);
+  app.use("/api/poseidon", poseidonRoute);
 };
 
 module.exports = mountRoutes;
