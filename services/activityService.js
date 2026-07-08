@@ -155,16 +155,18 @@ async function recordActivityFromTransaction(tx) {
   const mapped = mapTxToActivity(tx, tableName);
   if (!mapped) return;
 
-  try {
-    await Activity.create({
-      userId: tx.userId,
-      ...mapped,
-      sourceType: "wallet_tx",
-      sourceId,
-      meta: { txType: tx.type, tableId: tx.tableId || null, handId: tx.handId || null },
-      createdAt: tx.createdAt || new Date(),
-    });
-  } catch (err) {
+    try {
+      const created = await Activity.create({
+        userId: tx.userId,
+        ...mapped,
+        sourceType: "wallet_tx",
+        sourceId,
+        meta: { txType: tx.type, tableId: tx.tableId || null, handId: tx.handId || null },
+        createdAt: tx.createdAt || new Date(),
+      });
+      const { recordNotificationFromActivity } = require("./notificationService");
+      recordNotificationFromActivity(created.toObject?.() || created).catch(() => {});
+    } catch (err) {
     if (err?.code !== 11000) throw err;
   }
 }
@@ -284,7 +286,10 @@ exports.recordActivity = async (payload) => {
     if (existing) return existing;
   }
   try {
-    return await Activity.create(payload);
+    const created = await Activity.create(payload);
+    const { recordNotificationFromActivity } = require("./notificationService");
+    recordNotificationFromActivity(created.toObject?.() || created).catch(() => {});
+    return created;
   } catch (err) {
     if (err?.code === 11000) {
       return Activity.findOne({ userId, sourceType, sourceId }).lean();

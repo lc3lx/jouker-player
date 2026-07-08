@@ -32,6 +32,7 @@ const vipRoute = require("./vipRoute");
 const adminVipRoute = require("./adminVipRoute");
 const islandJackpotRoute = require("./islandJackpotRoute");
 const adminIslandJackpotRoute = require("./adminIslandJackpotRoute");
+const notificationRoute = require("./notificationRoute");
 
 const mountRoutes = (app) => {
   app.get("/api/v1/games/html5", (req, res) => {
@@ -71,6 +72,7 @@ const mountRoutes = (app) => {
   app.use("/api/v1/king-arth", kingArthRoute);
   app.use("/api/v1/activities", activityRoute);
   app.use("/api/v1/tasks", taskRoute);
+  app.use("/api/v1/notifications", notificationRoute);
   app.use("/api/v1/parkour", parkourRoute);
   app.use("/api/v1/time", timeRoute);
   app.use("/api/v1/lucky-wheel", luckyWheelRoute);

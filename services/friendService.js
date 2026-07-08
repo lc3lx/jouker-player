@@ -58,6 +58,10 @@ async function sendFriendRequest(fromId, toId, message = "") {
     meta: { requestId: String(req._id) },
   });
 
+  const fromUser = await User.findById(fromId).select("name").lean();
+  const { recordFriendRequestNotification } = require("./notificationService");
+  recordFriendRequestNotification(req.toObject?.() || req, fromUser).catch(() => {});
+
   return req;
 }
 

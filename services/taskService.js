@@ -402,7 +402,21 @@ exports.claimAllTasks = asyncHandler(async (req, res, next) => {
 
   const snapshot = await buildTasksForUser(req.user._id, period);
   const toClaim = snapshot.tasks.filter((t) => t.isCompleted && !t.isClaimed);
-  if (!toClaim.length) return next(new ApiError("No claimable task rewards", 400));
+  if (!toClaim.length) {
+    const wallet = await Wallet.findOne({ user: req.user._id }).lean();
+    const player = await Player.findOne({ user: req.user._id }).lean();
+    return res.status(200).json({
+      status: "success",
+      data: {
+        claimed: [],
+        totalChips: 0,
+        totalXp: 0,
+        balance: wallet?.balance || 0,
+        level: player?.stats?.level || 1,
+        experience: player?.stats?.experience || 0,
+      },
+    });
+  }
 
   let totalChips = 0;
   let totalXp = 0;

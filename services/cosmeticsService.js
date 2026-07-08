@@ -4,6 +4,7 @@ const Cosmetic = require("../models/cosmeticModel");
 const UserCosmetics = require("../models/userCosmeticsModel");
 const { withMongoTransaction, ledgerWithdraw } = require("./walletLedgerService");
 const equippedCache = require("../utils/cosmeticsEquippedCache");
+const DEFAULT_CATALOG = require("../data/defaultCosmeticsCatalog");
 
 function toObjectId(id) {
   if (!id) return null;
@@ -119,7 +120,46 @@ async function addBundleDerivedFields(publicList, leanRows) {
   });
 }
 
+async function ensureDefaultCatalog() {
+  const count = await Cosmetic.countDocuments({ isActive: true });
+  if (count > 0) return;
+
+  for (const row of DEFAULT_CATALOG) {
+    await Cosmetic.updateOne(
+      { type: row.type, assetKey: row.assetKey },
+      { $setOnInsert: row },
+      { upsert: true }
+    );
+  }
+
+  const midnight = await Cosmetic.findOne({
+    type: "table_theme",
+    assetKey: "midnight_royal",
+  }).select("_id");
+  const ruby = await Cosmetic.findOne({ type: "card_skin", assetKey: "ruby" }).select("_id");
+  if (midnight && ruby) {
+    await Cosmetic.updateOne(
+      { type: "bundle", assetKey: "starter_mogul_pack" },
+      {
+        $set: {
+          type: "bundle",
+          name: "باقة المبتدئ المميزة",
+          assetKey: "starter_mogul_pack",
+          price: 3200,
+          rarity: "rare",
+          isActive: true,
+          featured: true,
+          featuredOrder: 0,
+          promoMeta: { items: [midnight._id, ruby._id] },
+        },
+      },
+      { upsert: true }
+    );
+  }
+}
+
 async function listCatalog() {
+  await ensureDefaultCatalog();
   const rows = await Cosmetic.find({ isActive: true })
     .sort({ type: 1, rarity: 1, name: 1 })
     .lean();
@@ -128,6 +168,7 @@ async function listCatalog() {
 }
 
 async function listFeatured(limit = 24) {
+  await ensureDefaultCatalog();
   const rows = await Cosmetic.find({ isActive: true, featured: true })
     .sort({ featuredOrder: 1, name: 1 })
     .limit(limit)
@@ -137,6 +178,7 @@ async function listFeatured(limit = 24) {
 }
 
 async function listRecommended(userId, limit = 16) {
+  await ensureDefaultCatalog();
   const row = await UserCosmetics.findOne({ user: userId }).lean();
   const owned = new Set((row?.ownedItems || []).map((x) => String(x)));
   const rows = await Cosmetic.find({ isActive: true }).lean();
