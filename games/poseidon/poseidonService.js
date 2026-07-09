@@ -127,6 +127,9 @@ async function executeSpin(userId, betAmountInput) {
     bonusSessionId: bonusSession?.sessionId || null,
   });
 
+  const { publishSpinCompleted } = require("../../domain/publishers/playerActivityPublishers");
+  publishSpinCompleted(userKey, { sourceId: round.roundId, game: "poseidon" });
+
   return {
     roundId: round.roundId,
     roundHash: round.roundHash,

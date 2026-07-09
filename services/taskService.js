@@ -8,6 +8,7 @@ const WalletTransaction = require("../models/walletTransactionModel");
 const UserTaskClaim = require("../models/userTaskClaimModel");
 const ApiError = require("../utils/apiError");
 const { withMongoTransaction, ledgerDeposit } = require("./walletLedgerService");
+const playerProgressService = require("../modules/playerProgress/services/playerProgressService");
 
 const XP_PER_LEVEL = 2500;
 
@@ -290,13 +291,10 @@ async function grantTaskRewards(userId, chips, xp) {
   }
 
   if (xp > 0) {
-    const player = await Player.getOrCreateByUser(userId);
-    player.stats.experience = (player.stats.experience || 0) + xp;
-    while (player.stats.experience >= XP_PER_LEVEL) {
-      player.stats.experience -= XP_PER_LEVEL;
-      player.stats.level = (player.stats.level || 1) + 1;
-    }
-    await player.save();
+    await playerProgressService.grantXp(userId, xp, {
+      source: "task",
+      sourceId: "task_reward",
+    });
   }
 }
 

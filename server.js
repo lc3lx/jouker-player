@@ -151,6 +151,7 @@ const { initRTC } = require("./sockets/rtc");
 const { initTableGame } = require("./sockets/tableGame");
 const { initSocial } = require("./sockets/social");
 const { initSupport } = require("./sockets/support");
+const { initDeposit } = require("./sockets/deposit");
 const { initGameServer } = require("./socket");
 const { setupSocketIoRedis } = require("./utils/realtimeRedis");
 
@@ -169,6 +170,8 @@ let realtimeRedis = null;
 
 async function startServer() {
   await dbConnection();
+  const { registerDomainListeners } = require("./domain/listeners/registerDomainListeners");
+  registerDomainListeners();
   const { probeMongoTransactions } = require("./services/walletLedgerService");
   await probeMongoTransactions();
   await runProductionChecks({ skipSmoke: true });
@@ -198,6 +201,7 @@ async function startServer() {
   initTableGame(io, { redis: realtimeRedis?.commandClient || null });
   initSocial(io, { redis: realtimeRedis?.commandClient || null });
   initSupport(io);
+  initDeposit(io);
   initGameServer(io, { redis: realtimeRedis?.commandClient || null });
 
   const { startEngine: startTournamentEngine } = require("./services/tournamentEngineService");

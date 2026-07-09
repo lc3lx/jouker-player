@@ -578,7 +578,7 @@ async function ledgerDeposit({ session, userId, amount, meta = {}, ledgerType = 
   wallet.balance = before.balance + amt;
   await wallet.save(sessionOptions(session));
 
-  await appendWalletTransaction({
+  const tx = await appendWalletTransaction({
     session,
     userId,
     type: ledgerType,
@@ -587,6 +587,19 @@ async function ledgerDeposit({ session, userId, amount, meta = {}, ledgerType = 
     walletAfter: { balance: wallet.balance, lockedBalance: wallet.lockedBalance || 0 },
     meta: { ...meta, channel: meta.channel || "simulated" },
   });
+
+  const { DEPOSIT_XP_TYPES } = require("../modules/playerProgress/config/playerProgressConfig");
+  if (DEPOSIT_XP_TYPES.has(ledgerType)) {
+    const { publish } = require("../domain/events/domainEventBus");
+    const Events = require("../domain/events/eventTypes");
+    publish(Events.PLAYER_DEPOSIT_COMPLETED, {
+      userId: String(userId),
+      amount: amt,
+      ledgerType,
+      txId: tx?._id ? String(tx._id) : "",
+    });
+  }
+
   return wallet;
 }
 

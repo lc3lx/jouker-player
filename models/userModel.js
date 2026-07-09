@@ -76,11 +76,25 @@ const userSchema = new mongoose.Schema(
       type: mongoose.Schema.ObjectId,
       ref: "Wallet",
     },
-    // Referred by (agent/promoter user)
+    // Referred by (agent/promoter user or friend invite)
     referredBy: {
       type: mongoose.Schema.ObjectId,
       ref: "User",
       index: true,
+    },
+    /** Friend invite code — every user gets one at signup. */
+    inviteCode: {
+      type: String,
+      unique: true,
+      sparse: true,
+      uppercase: true,
+      index: true,
+    },
+    referralMeta: {
+      linkedAt: Date,
+      source: String,
+      deviceFingerprint: String,
+      appInstanceId: String,
     },
     /** Poker retention / stats (authoritative increments on hand settlement). */
     pokerHandsPlayed: { type: Number, default: 0, min: 0 },

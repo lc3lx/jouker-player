@@ -192,6 +192,14 @@ async function handleTrixAfterMove(nsp, ctx, result) {
           const winner = game.players[gameResult.winnerIndex];
           if (winner && !winner.isBot && winner.userId) {
             trackTrixWin(winner.userId, { tableId: ctx.tableId });
+            try {
+              const { publish } = require("../../domain/events/domainEventBus");
+              const Events = require("../../domain/events/eventTypes");
+              publish(Events.PLAYER_COMPLETED_GAME, {
+                userId: String(winner.userId),
+                gameType: "trix",
+              });
+            } catch (_) {}
           }
         }
         emitTablesUpdated({ gameType: "trix", reason: "game_end", tableId: String(tableId) });
@@ -863,6 +871,8 @@ function registerGameHandlers(nsp, jwtVerify) {
 
         wallet = await Wallet.findOne({ user: userId });
 
+        const { publishSpinCompleted } = require("../../domain/publishers/playerActivityPublishers");
+
         const play = await MiniGamePlay.create({
           user: userId,
           type: "king-arth",
@@ -887,6 +897,11 @@ function registerGameHandlers(nsp, jwtVerify) {
 
         const freeSpinsRemaining =
           await kingArthRoundState.peekFreeSpinRemaining(userId, tableId);
+
+        publishSpinCompleted(userId, {
+          sourceId: String(play._id),
+          game: "king-arth",
+        });
 
         const fairness = {
           serverSeedHash,
@@ -1075,6 +1090,14 @@ function registerGameHandlers(nsp, jwtVerify) {
               const winner = game.players[gameResult.winnerIndex];
               if (winner && !winner.isBot && winner.userId) {
                 trackTrixWin(winner.userId, { tableId: ctx.tableId });
+            try {
+              const { publish } = require("../../domain/events/domainEventBus");
+              const Events = require("../../domain/events/eventTypes");
+              publish(Events.PLAYER_COMPLETED_GAME, {
+                userId: String(winner.userId),
+                gameType: "trix",
+              });
+            } catch (_) {}
               }
             }
             void runGameSettlement(nsp, ctx, gameResult);

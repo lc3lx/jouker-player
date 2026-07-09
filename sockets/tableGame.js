@@ -3117,6 +3117,20 @@ class PokerTable {
         for (const uid of humanIds) {
           trackEventServerFireAndForget("hand_played", uid, { tableId: tid, handId: hid }, "server");
         }
+
+        try {
+          const { publish } = require("../domain/events/domainEventBus");
+          const Events = require("../domain/events/eventTypes");
+          const { XP_RATES } = require("../modules/playerProgress/config/playerProgressConfig");
+          for (const uid of humanIds) {
+            publish(Events.PLAYER_COMPLETED_GAME, {
+              userId: String(uid),
+              gameType: "poker",
+              handsPlayed: 1,
+              xp: XP_RATES.pokerHand,
+            });
+          }
+        } catch (_) {}
         for (const wid of wonIds) {
           trackEventServerFireAndForget("hand_won", wid, { tableId: tid, handId: hid }, "server");
         }

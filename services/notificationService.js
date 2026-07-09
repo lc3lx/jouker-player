@@ -80,7 +80,25 @@ async function createNotification(payload) {
   }
 
   try {
-    return await Notification.create(payload);
+    const created = await Notification.create(payload);
+    // Mirror every new in-app notification as an FCM push (no-op when
+    // Firebase credentials are absent; never blocks or throws).
+    try {
+      // eslint-disable-next-line global-require
+      const { sendPushToUser } = require("./pushService");
+      sendPushToUser(userId, {
+        title: payload.title,
+        body: payload.subtitle || "",
+        data: {
+          category: payload.category || "other",
+          sourceType: sourceType || "",
+          sourceId: sourceId || "",
+        },
+      });
+    } catch (_) {
+      /* push is best-effort */
+    }
+    return created;
   } catch (err) {
     if (err?.code === 11000 && sourceType && sourceId) {
       return Notification.findOne({ userId, sourceType, sourceId }).lean();

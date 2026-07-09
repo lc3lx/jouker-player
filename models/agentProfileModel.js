@@ -45,6 +45,19 @@ const agentProfileSchema = new mongoose.Schema(
       totalVolume: { type: Number, default: 0 },
       totalCommission: { type: Number, default: 0 },
     },
+    // --- agent deposit system (country agents crediting users via chat) ---
+    deposit: {
+      enabled: { type: Boolean, default: false, index: true },
+      displayName: { type: String, default: "", trim: true, maxlength: 80 },
+      countries: [{ type: String, uppercase: true, trim: true }],
+      paymentMethods: [{ type: String, trim: true, maxlength: 60 }],
+      workingHours: { type: String, default: "", trim: true, maxlength: 120 },
+      rating: { type: Number, default: 5, min: 0, max: 5 },
+      stats: {
+        totalDeposits: { type: Number, default: 0 },
+        totalVolume: { type: Number, default: 0 },
+      },
+    },
     createdBy: { type: mongoose.Schema.ObjectId, ref: "User" },
   },
   { timestamps: true }

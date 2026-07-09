@@ -213,6 +213,15 @@ exports.rechargeWallet = asyncHandler(async (req, res, next) => {
     // do not block recharge on referral errors
   }
 
+  const { publish } = require("../domain/events/domainEventBus");
+  const Events = require("../domain/events/eventTypes");
+  publish(Events.PLAYER_DEPOSIT_COMPLETED, {
+    userId: String(req.user._id),
+    amount: rechargeCode.amount,
+    ledgerType: "recharge",
+    txId: String(rechargeCode._id),
+  });
+
   res.status(200).json({
     status: "success",
     message: `Wallet recharged successfully with ${rechargeCode.amount} USD`,

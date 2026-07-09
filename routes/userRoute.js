@@ -30,12 +30,18 @@ const {
 } = require('../services/settingsService');
 
 const authService = require('../services/authService');
+const {
+  registerMyDeviceToken,
+  unregisterMyDeviceToken,
+} = require('../services/pushService');
 
 const router = express.Router();
 
 router.use(authService.protect);
 
 router.get('/getMe', getLoggedUserData, getUser);
+router.post('/device-token', registerMyDeviceToken);
+router.delete('/device-token', unregisterMyDeviceToken);
 router.get('/profile', authService.allowedTo('user'), getProfileSummary);
 router.get('/settings', authService.allowedTo('user'), getUserSettings);
 router.patch('/settings', authService.allowedTo('user'), updateUserSettings);

@@ -11,32 +11,84 @@ const createToken = require("../utils/createToken");
 const User = require("../models/userModel");
 const Wallet = require("../models/walletModel");
 const AgentProfile = require("../models/agentProfileModel");
+const referralInviteService = require("../modules/referral/services/referralInviteService");
+const { publish } = require("../domain/events/domainEventBus");
+const Events = require("../domain/events/eventTypes");
 
 // @desc    Signup
 // @route   GET /api/v1/auth/signup
 // @access  Public
 exports.signup = asyncHandler(async (req, res, next) => {
-  // Optional referral code
   let referredBy = undefined;
-  const rc = (req.body.referralCode || "").toString().trim().toUpperCase();
-  if (rc) {
-    const profile = await AgentProfile.findOne({ referralCode: rc, status: "approved" });
-    if (profile) referredBy = profile.user;
+  const inviteRaw = (req.body.inviteCode || req.body.referralCode || "")
+    .toString()
+    .trim()
+    .toUpperCase();
+
+  const clientSignals = {
+    deviceFingerprint: req.body.deviceFingerprint || null,
+    appInstanceId: req.body.appInstanceId || null,
+    emulator: !!req.body.emulator,
+    rooted: !!req.body.rooted,
+  };
+
+  if (inviteRaw) {
+    const resolved = await referralInviteService.resolveInviteCode(inviteRaw);
+    if (resolved.ok) referredBy = resolved.referrerId;
+    else {
+      const profile = await AgentProfile.findOne({
+        referralCode: inviteRaw,
+        status: "approved",
+      });
+      if (profile) referredBy = profile.user;
+    }
   }
 
-  // 1- Create user
-  const user = await User.create({
-    name: req.body.name,
-    email: req.body.email,
-    password: req.body.password,
-    referredBy,
-  });
+  const inviteCode = referralInviteService.generateInviteCode();
+
+  let user;
+  for (let attempt = 0; attempt < 5; attempt++) {
+    try {
+      user = await User.create({
+        name: req.body.name,
+        email: req.body.email,
+        password: req.body.password,
+        referredBy,
+        inviteCode: attempt === 0 ? inviteCode : referralInviteService.generateInviteCode(),
+        referralMeta: referredBy
+          ? {
+              linkedAt: new Date(),
+              source: inviteRaw ? "invite" : "agent",
+              deviceFingerprint: clientSignals.deviceFingerprint,
+              appInstanceId: clientSignals.appInstanceId,
+            }
+          : undefined,
+      });
+      break;
+    } catch (err) {
+      if (err?.code === 11000 && String(err.message).includes("inviteCode") && attempt < 4) {
+        continue;
+      }
+      throw err;
+    }
+  }
+  if (!user) return next(new ApiError("Could not create user", 500));
 
   // 2- Create wallet for the user
   const wallet = await Wallet.create({ user: user._id });
 
   // 3- Update user with wallet reference
   await User.findByIdAndUpdate(user._id, { wallet: wallet._id });
+
+  if (referredBy && inviteRaw) {
+    await referralInviteService.linkReferralOnSignup(user._id, inviteRaw, clientSignals);
+  }
+
+  publish(Events.PLAYER_REGISTERED, {
+    userId: String(user._id),
+    referredBy: referredBy ? String(referredBy) : null,
+    clientSignals,
+  });
 
   // 4- Generate token
   const token = createToken(user._id, user.sessionVersion);
