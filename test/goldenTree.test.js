@@ -45,6 +45,56 @@ test("wild multipliers add on line win", () => {
   assert.equal(result.lineWins[0].wildMultiplier, 5);
 });
 
+test("payline parser — all-wild run defaults to seven", () => {
+  const match = matchPayline(Array(5).fill(SYMBOLS.WILD));
+  assert.equal(match.count, 5);
+  assert.equal(match.symbol, SYMBOLS.SEVEN);
+});
+
+test("expanding wild substitutes the whole reel — top-row line pays", () => {
+  const matrix = [
+    [SYMBOLS.BELL, SYMBOLS.PLUM, SYMBOLS.ORANGE],
+    [SYMBOLS.GRAPES, SYMBOLS.WILD, SYMBOLS.BANANA],
+    [SYMBOLS.BELL, SYMBOLS.GRAPES, SYMBOLS.WATERMELON],
+    [SYMBOLS.PLUM, SYMBOLS.ORANGE, SYMBOLS.GRAPES],
+    [SYMBOLS.ORANGE, SYMBOLS.WATERMELON, SYMBOLS.PLUM],
+  ];
+
+  const result = calculateWins(matrix, { 1: 3 }, 10000);
+
+  assert.equal(result.lineWins.length, 1);
+  const win = result.lineWins[0];
+  assert.equal(win.lineIndex, 1); // top row [0,0,0,0,0]
+  assert.equal(win.symbol, SYMBOLS.BELL);
+  assert.equal(win.count, 3);
+  assert.deepEqual(win.positions[1], { col: 1, row: 0 });
+  assert.equal(win.baseAmount, 4000); // bell 3x = 0.4 × bet
+  assert.equal(win.wildMultiplier, 3);
+  assert.equal(win.amount, 12000);
+  assert.equal(result.expandedMatrix[1][0], SYMBOLS.WILD);
+  assert.equal(result.expandedMatrix[1][2], SYMBOLS.WILD);
+});
+
+test("expanding wild preserves scatters on the same reel", () => {
+  const matrix = [
+    [SYMBOLS.BELL, SYMBOLS.PLUM, SYMBOLS.ORANGE],
+    [SYMBOLS.DOLLAR, SYMBOLS.WILD, SYMBOLS.BANANA],
+    [SYMBOLS.BELL, SYMBOLS.GRAPES, SYMBOLS.WATERMELON],
+    [SYMBOLS.PLUM, SYMBOLS.ORANGE, SYMBOLS.DOLLAR],
+    [SYMBOLS.DOLLAR, SYMBOLS.WATERMELON, SYMBOLS.PLUM],
+  ];
+
+  const result = calculateWins(matrix, { 1: 2 }, 10000);
+
+  assert.equal(result.expandedMatrix[1][0], SYMBOLS.DOLLAR);
+  assert.equal(result.expandedMatrix[1][2], SYMBOLS.WILD);
+  assert.equal(result.lineWins.length, 0);
+  assert.equal(result.scatterWins.length, 1);
+  assert.equal(result.scatterWins[0].kind, SYMBOLS.DOLLAR);
+  assert.equal(result.scatterWins[0].count, 3);
+  assert.equal(result.scatterWins[0].amount, 10000); // dollar 3x = 1 × bet
+});
+
 test("max win cap at 10,000x bet", () => {
   const { capWin } = require("../games/goldenTree/goldenTreeService");
   const { totalWin, capped, cap } = capWin(2_000_000, 100);

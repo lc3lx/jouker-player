@@ -15,14 +15,24 @@ const {
 } = require("./constants");
 
 /**
- * Wild trees stay in a single middle-row cell — no column expansion.
+ * Each landed wild tree expands over its whole reel (all rows) for win
+ * evaluation, substituting every symbol on that reel except Scatters.
  */
 function applyExpandingWilds(matrix, wildMultipliers) {
   const expandedReels = new Set(Object.keys(wildMultipliers).map(Number));
-  return {
-    matrix: matrix.map((col) => [...col]),
-    expandedReels,
-  };
+  const expanded = matrix.map((col) => [...col]);
+
+  for (const reel of expandedReels) {
+    const column = expanded[reel];
+    if (!column) continue;
+    for (let row = 0; row < column.length; row += 1) {
+      if (!isScatter(column[row])) {
+        column[row] = SYMBOLS.WILD;
+      }
+    }
+  }
+
+  return { matrix: expanded, expandedReels };
 }
 
 /**

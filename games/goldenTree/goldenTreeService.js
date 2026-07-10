@@ -110,10 +110,12 @@ async function executeSpin(userId, betAmountInput) {
     mapWalletError(err);
   }
 
+  // Client receives the landed matrix; wild expansion is math-only and
+  // presented via expandedWilds VFX.
   const round = roundManager.createRound({
     userId: userKey,
     betAmount,
-    matrix: winResult.expandedMatrix,
+    matrix,
     expandedWilds: winResult.expandedWilds,
     lineWins: winResult.lineWins,
     scatterWins: winResult.scatterWins,

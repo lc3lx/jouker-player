@@ -40,6 +40,16 @@ const MAX_TUMBLES = 12;
 const BET_MIN = 0.2;
 const BET_MAX = 300;
 
+// Ante ("double chance"): +25% stake for a higher free-spins trigger rate.
+// RTP is stake-invariant (the 1.25× cost cancels in the win/bet ratio), so a
+// higher trigger rate must be paid for by a correspondingly weaker bonus — the
+// ante boosts base-game scatters (more triggers) AND dampens the free-spins
+// multiplier orbs (smaller bonuses), netting to the same ~96.5% RTP. Scatters
+// are never boosted inside free spins (that would cause runaway retriggers).
+const ANTE_STAKE_MULT = 1.25;
+const ANTE_SCATTER_BOOST = 1.2; // base-game scatter multiplier (more triggers)
+const ANTE_FS_MULT_FACTOR = 0.45; // free-spins orb-weight damping (holds RTP)
+
 // Symbol indices (frontend/backend contract — do not reorder):
 // 0 ruby, 1 sunstone, 2 amethyst, 3 emerald, 4 sapphire (gems)
 // 5 crown, 6 hourglass, 7 ring, 8 chalice (premium)
@@ -87,7 +97,7 @@ const BASE_WEIGHTS = [
   8.5, // 6 hourglass
   10.5, // 7 ring
   13, // 8 chalice
-  3.5, // 9 scatter
+  3.55, // 9 scatter
   0.8, // 10 multiplier
 ];
 
@@ -106,7 +116,7 @@ const FREESPIN_WEIGHTS = [
   10.5, // 7 ring
   13, // 8 chalice
   4.0, // 9 scatter (more retriggers)
-  4.45, // 10 multiplier (orbs rain in the bonus)
+  4.1, // 10 multiplier (orbs rain in the bonus)
 ];
 
 const VOLATILITY = {
@@ -145,9 +155,14 @@ function normalizeVolatility(v) {
 function buildSymbolWeights(volatility, doubleChance = false, isFreeSpin = false) {
   const v = VOLATILITY[normalizeVolatility(volatility)];
   const base = isFreeSpin ? FREESPIN_WEIGHTS : BASE_WEIGHTS;
+  // Ante boosts base-game scatters only (more triggers, never during free
+  // spins) and dampens the free-spins multiplier orbs (weaker bonus) so the
+  // extra triggers keep the theoretical RTP at ~96.5%.
+  const scatterAnte = doubleChance && !isFreeSpin ? ANTE_SCATTER_BOOST : 1;
+  const multAnte = doubleChance && isFreeSpin ? ANTE_FS_MULT_FACTOR : 1;
   return base.map((x, i) => {
-    if (i === SCATTER) return x * v.scatter * (doubleChance ? 1.65 : 1);
-    if (i === MULTIPLIER) return x * v.multiplier;
+    if (i === SCATTER) return x * v.scatter * scatterAnte;
+    if (i === MULTIPLIER) return x * v.multiplier * multAnte;
     if (i <= 4) return x * v.gem;
     return x * v.high;
   });
@@ -456,7 +471,7 @@ function calculateWins(grid, stake, freeSpinMultiplier = 0) {
  */
 function spin(baseBet, options = {}) {
   const doubleChance = !!options.doubleChance;
-  const stake = roundMoney(baseBet * (doubleChance ? 1.25 : 1));
+  const stake = roundMoney(baseBet * (doubleChance ? ANTE_STAKE_MULT : 1));
   const isFreeSpin = !!options.isFreeSpin;
   const volatility = normalizeVolatility(options.volatility);
   const freeSpinMultiplier = Number(options.freeSpinMultiplier || 0);

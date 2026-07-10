@@ -991,6 +991,113 @@ function registerGameHandlers(nsp, jwtVerify) {
       }
     });
 
+    // King Earth — buy free spins (100× the total bet; disabled while ante is on)
+    socket.on("dice_buy_bonus", async (payload) => {
+      const tableId = (payload && payload.tableId) || "king-arth";
+      if (!(await kingArthRoundState.tryAcquireLock(userId, tableId))) {
+        socket.emit("dice_buy_result", { ok: false, code: "already_spinning" });
+        return;
+      }
+      try {
+        const rawBet = Number(payload && payload.bet);
+        const doubleChance = !!(payload && payload.doubleChance);
+        if (Number.isNaN(rawBet) || !Number.isFinite(rawBet)) {
+          socket.emit("dice_buy_result", { ok: false, code: "invalid_bet" });
+          return;
+        }
+        // Ante (double chance) disables the buy feature.
+        if (doubleChance) {
+          socket.emit("dice_buy_result", { ok: false, code: "buy_disabled_ante" });
+          return;
+        }
+        if (rawBet < DICE_MIN_BET || rawBet > DICE_MAX_BET) {
+          socket.emit("dice_buy_result", { ok: false, code: "invalid_bet" });
+          return;
+        }
+
+        const existing = await kingArthRoundState.getFreeSpinSession(userId, tableId);
+        if (existing && existing.remaining > 0) {
+          socket.emit("dice_buy_result", { ok: false, code: "free_spins_active" });
+          return;
+        }
+
+        const bet = rawBet;
+        const stake = Math.round(bet * 100) / 100;
+        const cost = Math.round(bet * DiceEngine.BUY_COST_MULT * 100) / 100;
+
+        const user = await User.findById(userId);
+        if (!user) {
+          socket.emit("dice_buy_result", { ok: false, code: "user_not_found" });
+          return;
+        }
+
+        let wallet = await Wallet.findOne({ user: userId });
+        if (!wallet) wallet = await Wallet.create({ user: userId });
+        if (!wallet.hasSufficientBalance(cost)) {
+          socket.emit("dice_buy_result", { ok: false, code: "insufficient_balance" });
+          return;
+        }
+
+        await wallet.addTransaction(
+          "debit",
+          cost,
+          `King Earth buy free spins (${tableId})`
+        );
+
+        await kingArthRoundState.startFreeSpinSession(userId, tableId, {
+          lockedBaseBet: bet,
+          lockedDoubleChance: false,
+          spins: DiceEngine.FREE_SPINS_AWARD,
+          roundCap: DiceEngine.MAX_WIN_MULTIPLIER * stake,
+          initialWin: 0,
+        });
+
+        await recordSpin(cost, 0);
+
+        wallet = await Wallet.findOne({ user: userId });
+
+        const play = await MiniGamePlay.create({
+          user: userId,
+          type: "king-arth",
+          bet: cost,
+          payout: 0,
+          profit: -cost,
+          result: JSON.stringify({
+            buyFreeSpins: true,
+            betPerSpin: bet,
+            cost,
+            tableId,
+          }),
+        });
+
+        const {
+          publishSpinCompleted,
+        } = require("../../domain/publishers/playerActivityPublishers");
+        publishSpinCompleted(userId, {
+          sourceId: String(play._id),
+          game: "king-arth",
+        });
+
+        const freeSpinsRemaining =
+          await kingArthRoundState.peekFreeSpinRemaining(userId, tableId);
+
+        socket.emit("dice_buy_result", {
+          ok: true,
+          tableId,
+          cost,
+          betPerSpin: bet,
+          freeSpinsRemaining,
+          freeSpinsAwarded: DiceEngine.FREE_SPINS_AWARD,
+          balance: wallet.balance,
+          playId: String(play._id),
+        });
+      } catch (_err) {
+        socket.emit("dice_buy_result", { ok: false, code: "server_error" });
+      } finally {
+        await kingArthRoundState.releaseLock(userId, tableId);
+      }
+    });
+
     // bid
     socket.on("bid", (payload) => {
       const { roomId, value } = payload || {};
