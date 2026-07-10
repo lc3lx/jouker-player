@@ -38,6 +38,7 @@ const walletTransactionSchema = new mongoose.Schema(
         "agent_deposit_out",
         "admin_agent_credit",
         "admin_agent_debit",
+        "referral_reward",
       ],
       required: true,
       index: true,
@@ -61,6 +62,7 @@ const walletTransactionSchema = new mongoose.Schema(
 
 walletTransactionSchema.index({ userId: 1, createdAt: -1 });
 walletTransactionSchema.index({ tableId: 1, handId: 1, createdAt: 1 });
+walletTransactionSchema.index({ userId: 1, "meta.rewardId": 1 }, { sparse: true });
 
 module.exports = mongoose.model("WalletTransaction", walletTransactionSchema);
 

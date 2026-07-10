@@ -4,8 +4,8 @@ const { v4: uuidv4 } = require("uuid");
 const User = require("../../../models/userModel");
 const AgentProfile = require("../../../models/agentProfileModel");
 const ReferralInviteeSnapshot = require("../models/referralInviteeSnapshotModel");
-const ReferralAnalytics = require("../models/referralAnalyticsModel");
 const referralProgressService = require("./referralProgressService");
+const referralAuditService = require("./referralAuditService");
 const { publish } = require("../../../domain/events/domainEventBus");
 const Events = require("../../../domain/events/eventTypes");
 
@@ -57,6 +57,14 @@ async function linkReferralOnSignup(newUserId, code, meta = {}) {
   if (!resolved.ok) return null;
   if (String(resolved.referrerId) === String(newUserId)) return null;
 
+  const existingUser = await User.findById(newUserId).select("referredBy").lean();
+  if (
+    existingUser?.referredBy &&
+    String(existingUser.referredBy) === String(resolved.referrerId)
+  ) {
+    return resolved;
+  }
+
   await User.findByIdAndUpdate(newUserId, {
     referredBy: resolved.referrerId,
     referralMeta: {
@@ -64,6 +72,7 @@ async function linkReferralOnSignup(newUserId, code, meta = {}) {
       source: resolved.source,
       deviceFingerprint: meta.deviceFingerprint || null,
       appInstanceId: meta.appInstanceId || null,
+      registrationIp: meta.registrationIp || null,
     },
   });
 
@@ -80,17 +89,14 @@ async function linkReferralOnSignup(newUserId, code, meta = {}) {
     { upsert: true }
   );
 
-  await ReferralAnalytics.findOneAndUpdate(
-    { referrerId: resolved.referrerId },
-    {
-      $inc: { totalInvited: 1 },
-      $set: { lastInviteActivityAt: new Date() },
-      $setOnInsert: { registrationDate: new Date() },
-    },
-    { upsert: true }
-  );
-
   await referralProgressService.ensureProgress(resolved.referrerId);
+
+  void referralAuditService.append({
+    action: "invitation_linked",
+    referrerId: resolved.referrerId,
+    inviteeId: newUserId,
+    meta: { source: resolved.source, code },
+  });
 
   publish(Events.REFERRAL_LINKED, {
     referrerId: String(resolved.referrerId),

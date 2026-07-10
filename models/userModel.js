@@ -95,6 +95,7 @@ const userSchema = new mongoose.Schema(
       source: String,
       deviceFingerprint: String,
       appInstanceId: String,
+      registrationIp: String,
     },
     /** Poker retention / stats (authoritative increments on hand settlement). */
     pokerHandsPlayed: { type: Number, default: 0, min: 0 },
@@ -123,6 +124,10 @@ userSchema.pre("save", async function (next) {
   this.password = await bcrypt.hash(this.password, 12);
   next();
 });
+
+userSchema.index({ referredBy: 1, createdAt: -1 });
+userSchema.index({ "referralMeta.deviceFingerprint": 1 }, { sparse: true });
+userSchema.index({ "referralMeta.registrationIp": 1 }, { sparse: true });
 
 const User = mongoose.model("User", userSchema);
 

@@ -1,12 +1,22 @@
 /**
- * King Arth — 6×5 scatter-pay slot, deterministic RNG
+ * King Earth (Zeus) — 6×5 pay-anywhere tumble slot, deterministic RNG
  * (serverSeed + clientSeed + nonce).
  *
- * Inspired by "pay anywhere" tumble slots:
- * - 8+ matching regular symbols anywhere pay.
- * - Winning symbols disappear and new symbols fall from the top.
- * - Multiplier orbs can land during winning tumbles.
- * - 4+ scatters award 15 free spins.
+ * Matches the reference "Gates of Olympus"-style rules:
+ * - 8+ matching regular symbols anywhere pay (per-symbol paytable, bet multiples).
+ * - Winning symbols disappear and new symbols fall from the top (tumble).
+ * - Multiplier orbs land during winning tumbles: base game sums the orbs of the
+ *   whole sequence; free spins accumulate a persistent total for the round.
+ * - 4+ scatters award 15 free spins; 3+ scatters during free spins add 5 more.
+ * - Total round win is capped at 4000× the stake.
+ *
+ * Data-driven config lives at the top of this file (paytable / scatter pays /
+ * symbol weights / multiplier distribution). RTP is tuned to ~96.5% at the
+ * default "medium" volatility via the seeded simulation in test/kingEarth.rtp.js.
+ *
+ * NOTE: the `dice` folder name and the `spin`/grid integer-index contract are
+ * legacy — this is the King Earth slot engine consumed by the `dice_spin`
+ * socket handler and the provable-fairness verify endpoint.
  */
 
 const { createSeededRng } = require("./seededRng");
@@ -17,15 +27,87 @@ const REGULAR_SYMBOLS = 9;
 const SCATTER = 9;
 const MULTIPLIER = 10;
 const SYMBOL_COUNT = 11;
-const FREE_SPINS_AWARD = 15;
+
+// Free spins / feature economy
+const FREE_SPINS_AWARD = 15; // initial trigger (4+ scatters)
+const RETRIGGER_AWARD = 5; // extra spins when 3+ scatters land during free spins
+const RETRIGGER_MIN_SCATTER = 3;
+const BUY_COST_MULT = 100; // buy free spins costs 100× the total bet
+const MAX_WIN_MULTIPLIER = 4000; // round win cap, in stake multiples
 const MAX_TUMBLES = 12;
+
+// Bet limits (total bet, in currency units)
+const BET_MIN = 0.2;
+const BET_MAX = 300;
+
+// Symbol indices (frontend/backend contract — do not reorder):
+// 0 ruby, 1 sunstone, 2 amethyst, 3 emerald, 4 sapphire (gems)
+// 5 crown, 6 hourglass, 7 ring, 8 chalice (premium)
+// 9 scatter (Zeus), 10 multiplier orb
+const GEM_SYMBOLS = [0, 1, 2, 3, 4];
+
+/**
+ * Per-symbol paytable, as multiples of the TOTAL bet.
+ * Bands: [8–9 of a kind, 10–11 of a kind, 12+ of a kind].
+ * Values transcribed from the reference screenshots (shown $ at a $0.25 bet,
+ * divided by 0.25 → bet multiplier).
+ */
+const PAYTABLE = {
+  5: [8, 20, 40], // CROWN
+  6: [2, 8, 20], // HOURGLASS
+  7: [1.6, 4, 12], // RING
+  8: [1.2, 1.6, 9.6], // CHALICE
+  0: [0.8, 1.2, 8], // RUBY (red)
+  2: [0.64, 0.96, 6.4], // AMETHYST (purple)
+  1: [0.4, 0.8, 4], // SUNSTONE (yellow)
+  3: [0.32, 0.72, 3.2], // EMERALD (green)
+  4: [0.2, 0.6, 1.6], // SAPPHIRE (blue)
+};
+
+/** Scatter (Zeus) pay-anywhere, as multiples of the total bet. 6 means 6+. */
+const SCATTER_PAYS = { 4: 2.4, 5: 4, 6: 80 };
 
 const MULTIPLIER_VALUES = [
   2, 3, 4, 5, 6, 8, 10, 12, 15, 20, 25, 50, 100, 250, 500,
 ];
 
-/** Five gems, four premium symbols, scatter, multiplier orb. */
-const BASE_WEIGHTS = [22, 22, 22, 22, 22, 11, 9, 8, 7, 1.8, 1.45];
+/**
+ * Per-symbol draw weights (independent weighted pick per cell).
+ * Order matches the symbol indices above (11 entries).
+ * Lower-paying symbols are common, premiums rare. Tuned to ~96.5% RTP
+ * at the default "medium" volatility (see test/kingEarth.rtp.js).
+ */
+const BASE_WEIGHTS = [
+  15.5, // 0 ruby
+  22, // 1 sunstone
+  17, // 2 amethyst
+  24, // 3 emerald
+  26, // 4 sapphire
+  6.2, // 5 crown
+  8.5, // 6 hourglass
+  10.5, // 7 ring
+  13, // 8 chalice
+  3.5, // 9 scatter
+  0.8, // 10 multiplier
+];
+
+/**
+ * Free-spins "special reels": richer scatter + multiplier presence so the
+ * bonus carries most of the volatility, mirroring the reference game.
+ */
+const FREESPIN_WEIGHTS = [
+  15.5, // 0 ruby
+  22, // 1 sunstone
+  17, // 2 amethyst
+  24, // 3 emerald
+  26, // 4 sapphire
+  6.2, // 5 crown
+  8.5, // 6 hourglass
+  10.5, // 7 ring
+  13, // 8 chalice
+  4.0, // 9 scatter (more retriggers)
+  4.5, // 10 multiplier (orbs rain in the bonus)
+];
 
 const VOLATILITY = {
   low: { gem: 1.12, high: 0.9, scatter: 0.7, multiplier: 0.82 },
@@ -39,9 +121,11 @@ const NEAR_MISS_CHANCE = {
   high: 0.048,
 };
 
-const PAY_TABLE = {
-  gem: { 8: 0.25, 10: 0.75, 12: 2 },
-  high: { 8: 0.5, 10: 1.5, 12: 5 },
+/** Multiplier-orb value distribution (parallel to MULTIPLIER_VALUES). */
+const MULTIPLIER_WEIGHTS = {
+  high: [28, 24, 18, 14, 10, 8, 7, 5, 4, 3, 2.2, 1.15, 0.45, 0.16, 0.06],
+  low: [40, 26, 18, 11, 8, 5, 3.2, 2.2, 1.2, 0.8, 0.45, 0.16, 0.05, 0.01, 0.004],
+  medium: [34, 25, 18, 12, 9, 6, 4.5, 3, 1.8, 1.2, 0.7, 0.28, 0.09, 0.025, 0.008],
 };
 
 function roundMoney(n) {
@@ -58,9 +142,10 @@ function normalizeVolatility(v) {
   return "medium";
 }
 
-function buildSymbolWeights(volatility, doubleChance = false) {
+function buildSymbolWeights(volatility, doubleChance = false, isFreeSpin = false) {
   const v = VOLATILITY[normalizeVolatility(volatility)];
-  return BASE_WEIGHTS.map((x, i) => {
+  const base = isFreeSpin ? FREESPIN_WEIGHTS : BASE_WEIGHTS;
+  return base.map((x, i) => {
     if (i === SCATTER) return x * v.scatter * (doubleChance ? 1.65 : 1);
     if (i === MULTIPLIER) return x * v.multiplier;
     if (i <= 4) return x * v.gem;
@@ -79,13 +164,8 @@ function pickWeightedSymbol(rng, weights) {
 }
 
 function pickMultiplierValue(rng, volatility) {
-  const v = normalizeVolatility(volatility);
   const weights =
-    v === "high"
-      ? [28, 24, 18, 14, 10, 8, 7, 5, 4, 3, 2.2, 1.15, 0.45, 0.16, 0.06]
-      : v === "low"
-        ? [40, 26, 18, 11, 8, 5, 3.2, 2.2, 1.2, 0.8, 0.45, 0.16, 0.05, 0.01, 0.004]
-        : [34, 25, 18, 12, 9, 6, 4.5, 3, 1.8, 1.2, 0.7, 0.28, 0.09, 0.025, 0.008];
+    MULTIPLIER_WEIGHTS[normalizeVolatility(volatility)] || MULTIPLIER_WEIGHTS.medium;
   const total = weights.reduce((a, b) => a + b, 0);
   let r = rng() * total;
   for (let i = 0; i < MULTIPLIER_VALUES.length; i++) {
@@ -132,8 +212,8 @@ function maybeNearMiss(grid, rng, volatility) {
 }
 
 /** @returns {number[][]} grid[col][row] */
-function generateGrid(rng, volatility, doubleChance = false) {
-  const weights = buildSymbolWeights(volatility, doubleChance);
+function generateGrid(rng, volatility, doubleChance = false, isFreeSpin = false) {
+  const weights = buildSymbolWeights(volatility, doubleChance, isFreeSpin);
   const grid = [];
   for (let c = 0; c < COLS; c++) {
     grid[c] = [];
@@ -144,18 +224,19 @@ function generateGrid(rng, volatility, doubleChance = false) {
   return grid;
 }
 
-function payBucket(count) {
-  if (count >= 12) return 12;
-  if (count >= 10) return 10;
-  if (count >= 8) return 8;
-  return 0;
+function payBand(count) {
+  if (count >= 12) return 2;
+  if (count >= 10) return 1;
+  if (count >= 8) return 0;
+  return -1;
 }
 
 function symbolMultiplier(symbol, count) {
-  const bucket = payBucket(count);
-  if (!bucket) return 0;
-  const tier = symbol <= 4 ? "gem" : "high";
-  return PAY_TABLE[tier][bucket] || 0;
+  const band = payBand(count);
+  if (band < 0) return 0;
+  const bands = PAYTABLE[symbol];
+  if (!bands) return 0;
+  return bands[band] || 0;
 }
 
 function findScatterCells(grid) {
@@ -211,7 +292,9 @@ function findPayAnywhereWins(grid, stake) {
 function scatterWin(scatterCells, stake) {
   const count = scatterCells.length;
   if (count < 4) return null;
-  const multiplier = count >= 6 ? 100 : count === 5 ? 5 : 3;
+  const key = count >= 6 ? 6 : count;
+  const multiplier = SCATTER_PAYS[key] || 0;
+  if (multiplier <= 0) return null;
   return {
     type: "scatter",
     count,
@@ -221,8 +304,8 @@ function scatterWin(scatterCells, stake) {
   };
 }
 
-function collapseGrid(grid, removedKeys, rng, volatility, doubleChance) {
-  const weights = buildSymbolWeights(volatility, doubleChance);
+function collapseGrid(grid, removedKeys, rng, volatility, doubleChance, isFreeSpin) {
+  const weights = buildSymbolWeights(volatility, doubleChance, isFreeSpin);
   const next = [];
 
   for (let c = 0; c < COLS; c++) {
@@ -284,7 +367,14 @@ function runTumbles(initialGrid, rng, options) {
     for (const key of stepWinningKeys) winningCells.add(key);
     lineWins.push(...wins);
 
-    const afterGrid = collapseGrid(grid, removedKeys, rng, volatility, doubleChance);
+    const afterGrid = collapseGrid(
+      grid,
+      removedKeys,
+      rng,
+      volatility,
+      doubleChance,
+      isFreeSpin
+    );
     cascadeSteps.push({
       phase: "tumble",
       index: tumble,
@@ -303,6 +393,8 @@ function runTumbles(initialGrid, rng, options) {
     grid = afterGrid;
   }
 
+  // Base game: sum all orbs collected in the sequence and multiply the sequence
+  // win. Free spins: carry a persistent accumulator across the whole round.
   const nextFreeSpinMultiplier = isFreeSpin
     ? freeSpinMultiplier + collectedMultiplier
     : 0;
@@ -374,7 +466,7 @@ function spin(baseBet, options = {}) {
     options.clientSeed,
     options.nonce
   );
-  const initialGrid = generateGrid(rng, volatility, doubleChance);
+  const initialGrid = generateGrid(rng, volatility, doubleChance, isFreeSpin);
   const nearMiss = maybeNearMiss(initialGrid, rng, volatility);
   const scatterCells = findScatterCells(initialGrid);
   const sWin = scatterWin(scatterCells, stake);
@@ -397,6 +489,14 @@ function spin(baseBet, options = {}) {
     for (const cell of scatterCells) winningCells.add(`${cell.col},${cell.row}`);
   }
 
+  // Cap the per-spin win at 4000× the stake.
+  const winCap = roundMoney(MAX_WIN_MULTIPLIER * stake);
+  let capped = false;
+  if (totalWin > winCap) {
+    totalWin = winCap;
+    capped = true;
+  }
+
   const winType = classifyWinType(totalWin, stake);
   const scatterCount = scatterCells.length;
   const freeSpinsAwarded = scatterCount >= 4 ? FREE_SPINS_AWARD : 0;
@@ -413,6 +513,8 @@ function spin(baseBet, options = {}) {
     volatility,
     nearMiss: nearMiss.applied,
     almostBonus: scatterCount === 3,
+    capped,
+    maxWin: winCap,
     totalWin: roundMoney(totalWin),
     baseWin: tumble.baseWin,
     winningCells: [...winningCells].map((s) => {
@@ -439,8 +541,23 @@ module.exports = {
   SYMBOL_COUNT,
   SCATTER,
   MULTIPLIER,
+  GEM_SYMBOLS,
   FREE_SPINS_AWARD,
+  RETRIGGER_AWARD,
+  RETRIGGER_MIN_SCATTER,
+  BUY_COST_MULT,
+  MAX_WIN_MULTIPLIER,
+  BET_MIN,
+  BET_MAX,
+  PAYTABLE,
+  SCATTER_PAYS,
+  MULTIPLIER_VALUES,
+  BASE_WEIGHTS,
+  FREESPIN_WEIGHTS,
   normalizeVolatility,
+  buildSymbolWeights,
+  pickMultiplierValue,
+  symbolMultiplier,
   generateGrid,
   calculateWins,
   spin,

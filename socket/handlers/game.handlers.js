@@ -192,14 +192,6 @@ async function handleTrixAfterMove(nsp, ctx, result) {
           const winner = game.players[gameResult.winnerIndex];
           if (winner && !winner.isBot && winner.userId) {
             trackTrixWin(winner.userId, { tableId: ctx.tableId });
-            try {
-              const { publish } = require("../../domain/events/domainEventBus");
-              const Events = require("../../domain/events/eventTypes");
-              publish(Events.PLAYER_COMPLETED_GAME, {
-                userId: String(winner.userId),
-                gameType: "trix",
-              });
-            } catch (_) {}
           }
         }
         emitTablesUpdated({ gameType: "trix", reason: "game_end", tableId: String(tableId) });
@@ -312,6 +304,22 @@ async function maybeAbandonTrixTable(nsp, tableId) {
   }
 }
 
+function publishCardGameActivityForHumans(ctx, sourceId) {
+  if (!ctx?.game?.players) return;
+  try {
+    const { publish } = require("../../domain/events/domainEventBus");
+    const Events = require("../../domain/events/eventTypes");
+    for (const p of ctx.game.players) {
+      if (p.isBot || !p.userId) continue;
+      publish(Events.PLAYER_COMPLETED_GAME, {
+        userId: String(p.userId),
+        gameType: ctx.type,
+        sourceId: sourceId || String(ctx.tableId),
+      });
+    }
+  } catch (_) {}
+}
+
 async function runGameSettlement(nsp, ctx, gameResult) {
   if (!ctx?.tableId || !ctx?.type || !gameResult) return null;
   if (ctx.type !== "trix" && ctx.type !== "tarneeb41") return null;
@@ -375,6 +383,10 @@ async function runGameSettlement(nsp, ctx, gameResult) {
           tableId: String(ctx.tableId),
         });
       }
+      publishCardGameActivityForHumans(
+        ctx,
+        outcome?.settlement?.settlementId || String(ctx.tableId)
+      );
     }
     return outcome;
   } catch (err) {

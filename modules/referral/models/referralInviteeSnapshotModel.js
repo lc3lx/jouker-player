@@ -22,6 +22,8 @@ const referralInviteeSnapshotSchema = new mongoose.Schema(
     completedMatches: { type: Number, default: 0 },
     totalRecharge: { type: Number, default: 0 },
     activeDays: { type: Number, default: 0 },
+    /** UTC calendar day of last activeDays increment (YYYY-MM-DD). */
+    lastActiveDayUtc: { type: String, default: null },
     qualifiedTiers: [{ type: String }],
     lastActiveAt: { type: Date, default: Date.now },
     registeredAt: { type: Date, default: Date.now },
@@ -30,5 +32,7 @@ const referralInviteeSnapshotSchema = new mongoose.Schema(
 );
 
 referralInviteeSnapshotSchema.index({ referrerId: 1, inviteeId: 1 }, { unique: true });
+referralInviteeSnapshotSchema.index({ inviteeId: 1 });
+referralInviteeSnapshotSchema.index({ referrerId: 1, lastActiveAt: -1 });
 
 module.exports = mongoose.model("ReferralInviteeSnapshot", referralInviteeSnapshotSchema);

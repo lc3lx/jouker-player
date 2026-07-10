@@ -4,6 +4,28 @@ const User = require("../../../models/userModel");
 const ReferralAnalytics = require("../models/referralAnalyticsModel");
 const ReferralInviteeSnapshot = require("../models/referralInviteeSnapshotModel");
 const ReferralRewardQueue = require("../models/referralRewardQueueModel");
+const { utcDayStr } = require("../../../utils/utcDay");
+const { XP_PER_LEVEL } = require("../../playerProgress/config/playerProgressConfig");
+
+const refreshDebouncers = new Map();
+
+function scheduleRefreshAverages(referrerId) {
+  if (!referrerId) return;
+  const key = String(referrerId);
+  if (refreshDebouncers.has(key)) clearTimeout(refreshDebouncers.get(key));
+  refreshDebouncers.set(
+    key,
+    setTimeout(() => {
+      refreshDebouncers.delete(key);
+      refreshAverages(referrerId).catch(() => {});
+    }, 5000)
+  );
+}
+
+function clearRefreshDebouncersForTests() {
+  for (const timer of refreshDebouncers.values()) clearTimeout(timer);
+  refreshDebouncers.clear();
+}
 
 async function ensureAnalytics(referrerId) {
   return ReferralAnalytics.findOneAndUpdate(
@@ -19,13 +41,16 @@ async function onReferralLinked({ payload }) {
   await ReferralAnalytics.findOneAndUpdate(
     { referrerId },
     {
-      $set: {
-        lastInviteActivityAt: new Date(),
+      $set: { lastInviteActivityAt: new Date() },
+      $setOnInsert: {
+        registrationDate: new Date(),
+        totalInvited: 0,
+        firstInviteAt: new Date(),
       },
-      $setOnInsert: { registrationDate: new Date(), totalInvited: 0 },
     },
     { upsert: true }
   );
+  scheduleRefreshAverages(referrerId);
 }
 
 async function refreshAverages(referrerId) {
@@ -67,8 +92,8 @@ async function refreshAverages(referrerId) {
   );
 }
 
-async function getAnalytics(referrerId) {
-  await refreshAverages(referrerId);
+async function getAnalytics(referrerId, { refresh = true } = {}) {
+  if (refresh) await refreshAverages(referrerId);
   return ReferralAnalytics.findOne({ referrerId }).lean();
 }
 
@@ -85,9 +110,21 @@ async function listAnalytics({ page = 1, limit = 20 } = {}) {
   return { rows, total, page: Math.max(page, 1) };
 }
 
+async function incrementActiveDayIfNew(referrerId, inviteeId) {
+  const today = utcDayStr();
+  await ReferralInviteeSnapshot.updateOne(
+    { referrerId, inviteeId, lastActiveDayUtc: { $ne: today } },
+    { $inc: { activeDays: 1 }, $set: { lastActiveDayUtc: today } }
+  );
+}
+
 async function updateInviteeSnapshot(userId, patch = {}) {
   const user = await User.findById(userId).select("referredBy createdAt").lean();
   if (!user?.referredBy) return null;
+
+  if (patch.trackActiveDay !== false) {
+    await incrementActiveDayIfNew(user.referredBy, userId);
+  }
 
   const inc = {};
   if (patch.handsPlayed) inc.handsPlayed = patch.handsPlayed;
@@ -98,32 +135,45 @@ async function updateInviteeSnapshot(userId, patch = {}) {
 
   const set = { lastActiveAt: new Date() };
   if (patch.level != null) set.level = patch.level;
-  if (patch.xp != null) set.xp = patch.xp;
+  if (patch.lifetimeXp != null) set.xp = patch.lifetimeXp;
+  else if (patch.xp != null) set.xp = patch.xp;
+
+  const update = {
+    $set: set,
+    $setOnInsert: {
+      referrerId: user.referredBy,
+      inviteeId: userId,
+      registeredAt: user.createdAt || new Date(),
+      qualifiedTiers: [],
+    },
+  };
+  if (Object.keys(inc).length) update.$inc = inc;
 
   const snap = await ReferralInviteeSnapshot.findOneAndUpdate(
     { referrerId: user.referredBy, inviteeId: userId },
-    {
-      $set: set,
-      $inc: Object.keys(inc).length ? inc : { activeDays: 0 },
-      $setOnInsert: {
-        referrerId: user.referredBy,
-        inviteeId: userId,
-        registeredAt: user.createdAt || new Date(),
-        qualifiedTiers: [],
-      },
-    },
+    update,
     { upsert: true, new: true }
   );
 
-  void refreshAverages(user.referredBy);
+  scheduleRefreshAverages(user.referredBy);
   return snap;
+}
+
+function lifetimeXpFromProgress(level, experience) {
+  const lvl = Math.max(1, Number(level) || 1);
+  const xp = Math.max(0, Number(experience) || 0);
+  return (lvl - 1) * XP_PER_LEVEL + xp;
 }
 
 module.exports = {
   ensureAnalytics,
   onReferralLinked,
   refreshAverages,
+  scheduleRefreshAverages,
+  clearRefreshDebouncersForTests,
   getAnalytics,
   listAnalytics,
   updateInviteeSnapshot,
+  incrementActiveDayIfNew,
+  lifetimeXpFromProgress,
 };

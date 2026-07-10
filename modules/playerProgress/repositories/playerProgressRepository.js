@@ -13,7 +13,18 @@ async function savePlayer(player) {
 }
 
 async function appendXpHistory(row) {
-  return PlayerXpHistory.create(row);
+  try {
+    return await PlayerXpHistory.create(row);
+  } catch (err) {
+    if (err?.code === 11000) {
+      return PlayerXpHistory.findOne({
+        userId: row.userId,
+        source: row.source,
+        sourceId: row.sourceId,
+      }).lean();
+    }
+    throw err;
+  }
 }
 
 async function listXpHistory(userId, { page = 1, limit = 50 } = {}) {

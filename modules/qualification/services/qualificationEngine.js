@@ -5,6 +5,7 @@ const Player = require("../../../models/playerModel");
 const ReferralInviteeSnapshot = require("../../referral/models/referralInviteeSnapshotModel");
 const QualificationRecord = require("../models/qualificationRecordModel");
 const { normalizeRequirements } = require("../validators/requirementsValidator");
+const { XP_PER_LEVEL } = require("../../playerProgress/config/playerProgressConfig");
 const { publish } = require("../../../domain/events/domainEventBus");
 const Events = require("../../../domain/events/eventTypes");
 
@@ -23,11 +24,14 @@ async function buildPlayerSnapshot(userId) {
 
   const s = player?.stats || {};
   const snap = inviteeSnap || {};
+  const level = s.level || 1;
+  const inLevelXp = s.experience || 0;
+  const lifetimeXp = (level - 1) * XP_PER_LEVEL + inLevelXp;
 
   return {
     userId: String(userId),
-    level: s.level || 1,
-    xp: s.experience || 0,
+    level,
+    xp: Math.max(lifetimeXp, snap.xp || 0),
     gamesPlayed: Math.max(s.gamesPlayed || 0, snap.gamesPlayed || 0),
     handsPlayed: snap.handsPlayed || 0,
     spins: snap.spins || 0,
@@ -104,18 +108,51 @@ async function recordQualification(userId, achievementKey, evaluation) {
 }
 
 async function qualifyIfMet(userId, achievementKey, requirements) {
+  const existing = await QualificationRecord.findOne({ userId, achievementKey }).lean();
+  if (existing) {
+    const snapshot = await buildPlayerSnapshot(userId);
+    publish(Events.INVITEE_QUALIFIED, {
+      userId: String(userId),
+      achievementKey,
+      snapshot,
+      referredBy: snapshot.referredBy,
+      reconciled: true,
+    });
+    return { qualified: true, evaluation: null, record: existing, alreadyRecorded: true };
+  }
+
   const evaluation = await evaluatePlayer(userId, requirements);
   if (!evaluation.qualified) return { qualified: false, evaluation };
 
-  const record = await recordQualification(userId, achievementKey, evaluation);
-  publish(Events.INVITEE_QUALIFIED, {
-    userId: String(userId),
-    achievementKey,
-    snapshot: evaluation.snapshot,
-    referredBy: evaluation.snapshot.referredBy,
-  });
-
-  return { qualified: true, evaluation, record };
+  try {
+    const record = await QualificationRecord.create({
+      userId,
+      achievementKey,
+      requirements: evaluation.requirements,
+      snapshot: evaluation.snapshot,
+    });
+    publish(Events.INVITEE_QUALIFIED, {
+      userId: String(userId),
+      achievementKey,
+      snapshot: evaluation.snapshot,
+      referredBy: evaluation.snapshot.referredBy,
+    });
+    return { qualified: true, evaluation, record };
+  } catch (err) {
+    if (err?.code === 11000) {
+      const record = await QualificationRecord.findOne({ userId, achievementKey }).lean();
+      const snapshot = evaluation.snapshot || (await buildPlayerSnapshot(userId));
+      publish(Events.INVITEE_QUALIFIED, {
+        userId: String(userId),
+        achievementKey,
+        snapshot,
+        referredBy: snapshot.referredBy,
+        reconciled: true,
+      });
+      return { qualified: true, evaluation, record, alreadyRecorded: true };
+    }
+    throw err;
+  }
 }
 
 module.exports = {

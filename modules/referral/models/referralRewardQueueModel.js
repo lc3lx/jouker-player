@@ -11,7 +11,7 @@ const referralRewardQueueSchema = new mongoose.Schema(
     tierId: { type: String, required: true, index: true },
     status: {
       type: String,
-      enum: ["pending", "approved", "rejected", "completed"],
+      enum: ["pending", "processing", "approved", "rejected", "completed"],
       default: "pending",
       index: true,
     },
@@ -32,7 +32,8 @@ const referralRewardQueueSchema = new mongoose.Schema(
   { timestamps: true }
 );
 
-referralRewardQueueSchema.index({ referrerId: 1, tierId: 1 });
+referralRewardQueueSchema.index({ referrerId: 1, tierId: 1 }, { unique: true });
 referralRewardQueueSchema.index({ status: 1, createdAt: -1 });
+referralRewardQueueSchema.index({ referrerId: 1, status: 1 });
 
 module.exports = mongoose.model("ReferralRewardQueue", referralRewardQueueSchema);

@@ -19,5 +19,6 @@ router.post("/referrers/:id/recalculate", adminReferralController.recalculate);
 router.get("/xp-history", adminReferralController.listXpHistory);
 router.get("/qualifications", adminReferralController.listQualifications);
 router.get("/export", adminReferralController.exportReport);
+router.get("/audit", adminReferralController.listAuditLog);
 
 module.exports = router;

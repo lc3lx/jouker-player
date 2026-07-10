@@ -32,7 +32,7 @@ const REFERRAL_MILESTONES = [
     tierId: "tier_25_gold",
     title: "ملازم ذهبي",
     requiredQualifiedCount: 45,
-    inviteeRequirements: { minLevel: 25 },
+    inviteeRequirements: { minLevel: 25, minXp: 62500, minHandsPlayed: 25 },
     reward: { chips: 7_000_000, vipLevel: "gold", vipDays: 7 },
     qualificationKey: "referral_tier_25_gold",
   },
@@ -55,11 +55,7 @@ function requirementsForMilestone(milestone) {
 }
 
 function countKeyForMilestone(milestone) {
-  const lvl = milestone?.inviteeRequirements?.minLevel || 0;
-  if (lvl >= 30) return "tier_30";
-  if (lvl >= 25) return "tier_25";
-  if (lvl >= 15) return "tier_15";
-  return "tier_5";
+  return milestone?.tierId || "unknown";
 }
 
 module.exports = {

@@ -17,14 +17,22 @@ const referralFraudProfileSchema = new mongoose.Schema(
       {
         score: Number,
         reasons: [String],
+        action: { type: String, default: "evaluate" },
         at: { type: Date, default: Date.now },
       },
     ],
     suspended: { type: Boolean, default: false },
+    suspendedReason: { type: String, default: null },
     whitelisted: { type: Boolean, default: false },
     blacklisted: { type: Boolean, default: false },
   },
   { timestamps: true }
 );
+
+referralFraudProfileSchema.index({ score: -1 });
+referralFraudProfileSchema.index({ suspended: 1, score: -1 });
+
+referralFraudProfileSchema.index({ blacklisted: 1 }, { sparse: true });
+referralFraudProfileSchema.index({ whitelisted: 1 }, { sparse: true });
 
 module.exports = mongoose.model("ReferralFraudProfile", referralFraudProfileSchema);

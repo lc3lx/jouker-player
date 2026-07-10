@@ -277,23 +277,25 @@ async function buildTasksForUser(userId, period) {
   };
 }
 
-async function grantTaskRewards(userId, chips, xp) {
+async function grantTaskRewards(userId, chips, xp, { taskId, periodKey } = {}) {
   if (chips > 0) {
     await withMongoTransaction(async (session) => {
       await ledgerDeposit({
         session,
         userId,
         amount: chips,
-        meta: { source: "task_reward" },
+        meta: { source: "task_reward", taskId, periodKey },
         ledgerType: "confirmed_deposit",
       });
     });
   }
 
   if (xp > 0) {
+    const sourceId =
+      taskId && periodKey ? `${periodKey}:${taskId}` : `task:${Date.now()}`;
     await playerProgressService.grantXp(userId, xp, {
       source: "task",
-      sourceId: "task_reward",
+      sourceId,
     });
   }
 }
@@ -324,7 +326,10 @@ async function claimSingleTask(userId, taskId, period) {
     xpGranted: def.xpReward,
   });
 
-  await grantTaskRewards(userId, def.chipsReward, def.xpReward);
+  await grantTaskRewards(userId, def.chipsReward, def.xpReward, {
+    taskId,
+    periodKey: meta.periodKey,
+  });
 
   const { recordActivity } = require("./activityService");
   await recordActivity({

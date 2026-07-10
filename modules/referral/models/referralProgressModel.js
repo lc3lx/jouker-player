@@ -10,10 +10,9 @@ const referralProgressSchema = new mongoose.Schema(
       index: true,
     },
     qualifiedCounts: {
-      tier_5: { type: Number, default: 0, min: 0 },
-      tier_15: { type: Number, default: 0, min: 0 },
-      tier_25: { type: Number, default: 0, min: 0 },
-      tier_30: { type: Number, default: 0, min: 0 },
+      type: Map,
+      of: Number,
+      default: () => new Map(),
     },
     milestoneStatus: {
       type: Map,
@@ -24,6 +23,7 @@ const referralProgressSchema = new mongoose.Schema(
       default: {},
     },
     suspended: { type: Boolean, default: false, index: true },
+    suspendedReason: { type: String, default: null },
     whitelisted: { type: Boolean, default: false },
     blacklisted: { type: Boolean, default: false },
     lastUpdatedAt: { type: Date, default: Date.now },

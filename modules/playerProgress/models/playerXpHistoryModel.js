@@ -21,5 +21,12 @@ const playerXpHistorySchema = new mongoose.Schema(
 );
 
 playerXpHistorySchema.index({ userId: 1, createdAt: -1 });
+playerXpHistorySchema.index(
+  { userId: 1, source: 1, sourceId: 1 },
+  {
+    unique: true,
+    partialFilterExpression: { sourceId: { $type: "string", $ne: "" } },
+  }
+);
 
 module.exports = mongoose.model("PlayerXpHistory", playerXpHistorySchema);

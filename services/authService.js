@@ -30,6 +30,11 @@ exports.signup = asyncHandler(async (req, res, next) => {
     appInstanceId: req.body.appInstanceId || null,
     emulator: !!req.body.emulator,
     rooted: !!req.body.rooted,
+    registrationIp:
+      (req.headers["x-forwarded-for"] || "").split(",")[0].trim() ||
+      req.ip ||
+      req.socket?.remoteAddress ||
+      null,
   };
 
   if (inviteRaw) {
@@ -90,6 +95,8 @@ exports.signup = asyncHandler(async (req, res, next) => {
     clientSignals,
   });
 
+  publish(Events.PLAYER_SESSION_STARTED, { userId: String(user._id) });
+
   // 4- Generate token
   const token = createToken(user._id, user.sessionVersion);
 
@@ -118,7 +125,9 @@ exports.login = asyncHandler(async (req, res, next) => {
 
   // Delete password from response
   delete user._doc.password;
-  // 4) send response to client side
+  const { publish } = require("../domain/events/domainEventBus");
+  const Events = require("../domain/events/eventTypes");
+  publish(Events.PLAYER_SESSION_STARTED, { userId: String(user._id) });
   res.status(200).json({ data: user, token });
 });
 

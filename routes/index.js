@@ -37,8 +37,10 @@ const supportRoute = require("./supportRoute");
 const agentDepositRoute = require("./agentDepositRoute");
 const referralRoute = require("./referralRoute");
 const adminReferralRoute = require("./adminReferralRoute");
+const mountInviteLanding = require("./inviteLandingRoute");
 
 const mountRoutes = (app) => {
+  mountInviteLanding(app);
   app.get("/api/v1/games/html5", (req, res) => {
     res.json({
       results: 1,

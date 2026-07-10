@@ -2,6 +2,7 @@
 
 const { XP_PER_LEVEL } = require("../config/playerProgressConfig");
 const repository = require("../repositories/playerProgressRepository");
+const PlayerXpHistory = require("../models/playerXpHistoryModel");
 const { publish } = require("../../../domain/events/domainEventBus");
 const Events = require("../../../domain/events/eventTypes");
 
@@ -22,7 +23,22 @@ async function getProgress(userId) {
 async function grantXp(userId, amount, { source = "unknown", sourceId = "" } = {}) {
   const xpAdded = Math.max(0, Math.floor(Number(amount) || 0));
   if (!userId || xpAdded <= 0) {
-    return { level: 1, experience: 0, levelsGained: 0, xpAdded: 0 };
+    return { level: 1, experience: 0, levelsGained: 0, xpAdded: 0, duplicate: false };
+  }
+
+  const sid = String(sourceId || "");
+  if (sid) {
+    const exists = await PlayerXpHistory.exists({ userId, source, sourceId: sid });
+    if (exists) {
+      const player = await repository.getOrCreatePlayer(userId);
+      return {
+        level: player.stats?.level || 1,
+        experience: player.stats?.experience || 0,
+        levelsGained: 0,
+        xpAdded: 0,
+        duplicate: true,
+      };
+    }
   }
 
   const player = await repository.getOrCreatePlayer(userId);

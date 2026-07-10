@@ -589,7 +589,9 @@ async function ledgerDeposit({ session, userId, amount, meta = {}, ledgerType = 
   });
 
   const { DEPOSIT_XP_TYPES } = require("../modules/playerProgress/config/playerProgressConfig");
-  if (DEPOSIT_XP_TYPES.has(ledgerType)) {
+  const skipXpEvent =
+    !DEPOSIT_XP_TYPES.has(ledgerType) || meta?.source === "referral_milestone";
+  if (!skipXpEvent) {
     const { publish } = require("../domain/events/domainEventBus");
     const Events = require("../domain/events/eventTypes");
     publish(Events.PLAYER_DEPOSIT_COMPLETED, {
@@ -597,6 +599,7 @@ async function ledgerDeposit({ session, userId, amount, meta = {}, ledgerType = 
       amount: amt,
       ledgerType,
       txId: tx?._id ? String(tx._id) : "",
+      meta: { ...meta },
     });
   }
 
