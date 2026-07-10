@@ -33,7 +33,7 @@ const { recordSpin, recordBigWin } = require("../../games/dice/kingArthRtp");
 const { recordSpinAnalytics } = require("../../games/dice/kingArthAnalytics");
 
 const DICE_MIN_BET = 0.2;
-const DICE_MAX_BET = 200;
+const DICE_MAX_BET = 300;
 const BET_EPS = 1e-4;
 
 function sanitizeVolatility(raw) {
@@ -845,12 +845,25 @@ function registerGameHandlers(nsp, jwtVerify) {
           volatility,
         });
         let payout = outcome.totalWin;
+        let roundCapReached = outcome.capped;
+
+        // Free spins: enforce the cumulative 4000× round-win cap across the
+        // whole session before crediting anything.
+        if (isFreeSpin) {
+          const capResult = await kingArthRoundState.recordRoundWin(
+            userId,
+            tableId,
+            payout
+          );
+          payout = capResult.payout;
+          if (capResult.capReached) roundCapReached = true;
+        }
 
         if (payout > 0) {
           await wallet.addTransaction(
             "credit",
             payout,
-            `Dice / King Arth win (${tableId}) ${outcome.winType}`
+            `King Earth win (${tableId}) ${outcome.winType}`
           );
         }
 
@@ -859,17 +872,30 @@ function registerGameHandlers(nsp, jwtVerify) {
         await recordBigWin(outcome.winType);
         await recordSpinAnalytics(userId, stake, payout, outcome.winType);
 
+        let freeSpinsAwarded = 0;
         if (isFreeSpin) {
           await kingArthRoundState.setFreeSpinTotalMultiplier(
             userId,
             tableId,
             outcome.multipliers.freeSpinTotal
           );
-          await kingArthRoundState.decrementFreeSpin(userId, tableId);
-        }
-
-        let freeSpinsAwarded = 0;
-        if (outcome.scatterCount >= 4) {
+          if (roundCapReached) {
+            // 4000× reached — end the round now, forfeit remaining spins.
+            await kingArthRoundState.deleteFreeSpinSession(userId, tableId);
+          } else {
+            // Retrigger: 3+ scatters during free spins add 5 more.
+            if (outcome.scatterCount >= DiceEngine.RETRIGGER_MIN_SCATTER) {
+              freeSpinsAwarded = DiceEngine.RETRIGGER_AWARD;
+              await kingArthRoundState.addRetriggerSpins(
+                userId,
+                tableId,
+                DiceEngine.RETRIGGER_AWARD
+              );
+            }
+            await kingArthRoundState.decrementFreeSpin(userId, tableId);
+          }
+        } else if (outcome.scatterCount >= 4 && !roundCapReached) {
+          // Base spin trigger: 4+ scatters award 15 free spins.
           freeSpinsAwarded = DiceEngine.FREE_SPINS_AWARD;
           await kingArthRoundState.awardFreeSpins(
             userId,
@@ -877,7 +903,10 @@ function registerGameHandlers(nsp, jwtVerify) {
             outcome.scatterCount,
             bet,
             doubleChance,
-            outcome.multipliers.freeSpinTotal
+            {
+              roundCap: DiceEngine.MAX_WIN_MULTIPLIER * stake,
+              initialWin: payout,
+            }
           );
         }
 
@@ -940,6 +969,8 @@ function registerGameHandlers(nsp, jwtVerify) {
           nearMiss: outcome.nearMiss,
           almostBonus: outcome.almostBonus,
           totalWin: payout,
+          capped: roundCapReached,
+          maxWin: outcome.maxWin,
           winningCells: outcome.winningCells,
           lineWins: outcome.lineWins,
           scatterCount: outcome.scatterCount,

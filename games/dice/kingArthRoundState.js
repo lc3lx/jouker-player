@@ -8,7 +8,12 @@ const crypto = require("crypto");
 const LOCK_TTL_MS = 45_000;
 const FREE_SPIN_TTL_SEC = 7 * 24 * 3600;
 const MAX_BANKED_FREE_SPINS = 50;
-const FREE_SPINS_AWARD = 15;
+const FREE_SPINS_AWARD = 15; // initial trigger (4+ scatters)
+const RETRIGGER_AWARD = 5; // 3+ scatters during free spins add 5 more
+
+function roundMoney(n) {
+  return Math.round(Number(n) * 100) / 100;
+}
 
 /** @type {import('redis').RedisClientType | null} */
 let redis = null;
@@ -186,6 +191,30 @@ async function deleteFreeSpinSession(userId, tableId) {
 }
 
 /**
+ * Open a fresh free-spins session (used by the 4+ scatter trigger and the
+ * buy-feature). `roundCap` is the 4000× round-win limit and `initialWin` seeds
+ * the cumulative round win (e.g. the triggering base spin's payout).
+ * @returns {Promise<object>}
+ */
+async function startFreeSpinSession(
+  userId,
+  tableId,
+  { lockedBaseBet, lockedDoubleChance, spins = FREE_SPINS_AWARD, roundCap = 0, initialWin = 0 } = {}
+) {
+  const session = {
+    remaining: capFsRemaining(spins),
+    lockedBaseBet,
+    lockedDoubleChance: !!lockedDoubleChance,
+    totalMultiplier: 0,
+    roundCap: Math.max(0, roundMoney(roundCap)),
+    roundWon: Math.max(0, roundMoney(initialWin)),
+  };
+  await setFreeSpinSession(userId, tableId, session);
+  return session;
+}
+
+/**
+ * Initial free-spins award — only on 4+ scatters from a base spin.
  * @returns {Promise<object|null>}
  */
 async function awardFreeSpins(
@@ -194,27 +223,50 @@ async function awardFreeSpins(
   scatterCount,
   lockedBaseBet,
   lockedDoubleChance,
-  totalMultiplier = 0
+  { roundCap = 0, initialWin = 0 } = {}
 ) {
   if (scatterCount < 4) return getFreeSpinSession(userId, tableId);
-  const add = FREE_SPINS_AWARD;
-  let cur = await getFreeSpinSession(userId, tableId);
-  if (!cur || cur.remaining <= 0) {
-    cur = {
-      remaining: capFsRemaining(add),
-      lockedBaseBet,
-      lockedDoubleChance: !!lockedDoubleChance,
-      totalMultiplier: Math.max(0, Number(totalMultiplier || 0)),
-    };
-  } else {
-    cur.remaining = capFsRemaining(cur.remaining + add);
-    cur.totalMultiplier = Math.max(
-      0,
-      Number(cur.totalMultiplier || totalMultiplier || 0)
-    );
-  }
+  return startFreeSpinSession(userId, tableId, {
+    lockedBaseBet,
+    lockedDoubleChance,
+    spins: FREE_SPINS_AWARD,
+    roundCap,
+    initialWin,
+  });
+}
+
+/** Retrigger — add `extra` spins to the active session (3+ scatters in FS). */
+async function addRetriggerSpins(userId, tableId, extra = RETRIGGER_AWARD) {
+  const cur = await getFreeSpinSession(userId, tableId);
+  if (!cur || cur.remaining <= 0) return null;
+  cur.remaining = capFsRemaining(cur.remaining + extra);
   await setFreeSpinSession(userId, tableId, cur);
   return cur;
+}
+
+/**
+ * Apply the cumulative 4000× round-win cap to a free-spin payout.
+ * Returns the (possibly reduced) payout to actually credit and whether the cap
+ * was reached — when reached, the caller should end the round.
+ * @returns {Promise<{payout:number, capReached:boolean}>}
+ */
+async function recordRoundWin(userId, tableId, rawPayout) {
+  const raw = Math.max(0, roundMoney(rawPayout));
+  const cur = await getFreeSpinSession(userId, tableId);
+  if (!cur) return { payout: raw, capReached: false };
+  const cap = Number(cur.roundCap || 0);
+  if (cap <= 0) return { payout: raw, capReached: false };
+  const already = Number(cur.roundWon || 0);
+  const remaining = Math.max(0, roundMoney(cap - already));
+  let payout = raw;
+  let capReached = false;
+  if (raw >= remaining) {
+    payout = remaining;
+    capReached = true;
+  }
+  cur.roundWon = roundMoney(already + payout);
+  await setFreeSpinSession(userId, tableId, cur);
+  return { payout: roundMoney(payout), capReached };
 }
 
 async function setFreeSpinTotalMultiplier(userId, tableId, totalMultiplier) {
@@ -246,13 +298,17 @@ module.exports = {
   LOCK_TTL_MS,
   MAX_BANKED_FREE_SPINS,
   FREE_SPINS_AWARD,
+  RETRIGGER_AWARD,
   setRedisClient,
   tryAcquireLock,
   releaseLock,
   validateNonce,
   clearLocksForUser,
   getFreeSpinSession,
+  startFreeSpinSession,
   awardFreeSpins,
+  addRetriggerSpins,
+  recordRoundWin,
   setFreeSpinTotalMultiplier,
   decrementFreeSpin,
   peekFreeSpinRemaining,

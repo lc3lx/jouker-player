@@ -106,7 +106,7 @@ const FREESPIN_WEIGHTS = [
   10.5, // 7 ring
   13, // 8 chalice
   4.0, // 9 scatter (more retriggers)
-  4.5, // 10 multiplier (orbs rain in the bonus)
+  4.45, // 10 multiplier (orbs rain in the bonus)
 ];
 
 const VOLATILITY = {
