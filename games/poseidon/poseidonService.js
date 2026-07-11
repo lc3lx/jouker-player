@@ -4,6 +4,7 @@ const {
   BET_MAX,
   MAX_WIN_MULTIPLIER,
   BUY_BONUS_COST,
+  SUPER_BUY_BONUS_COST,
   FREE_SPINS_NATURAL,
   FREE_SPINS_BOUGHT,
   RETRIGGER_AWARD,
@@ -160,14 +161,15 @@ async function executeSpin(userId, betAmountInput) {
  * Buy bonus: pay the fixed cost and open a 10-free-spin session directly —
  * no forced trigger spin, the outcome is whatever the spins deal.
  */
-async function executeBuyBonus(userId, currentBetInput) {
+async function executeBuyBonus(userId, currentBetInput, { superBonus = false } = {}) {
   const userKey = String(userId);
   if (roundManager.hasActiveBonusSession(userKey)) {
     throw new ApiError("Bonus session already active", 409);
   }
 
   const betAmount = validateBet(currentBetInput);
-  const cost = roundMoney(betAmount * BUY_BONUS_COST);
+  const multiplier = superBonus ? SUPER_BUY_BONUS_COST : BUY_BONUS_COST;
+  const cost = roundMoney(betAmount * multiplier);
 
   const balance = await wallet.getBalance(userKey);
   if (balance < cost) {
@@ -191,6 +193,7 @@ async function executeBuyBonus(userId, currentBetInput) {
     sessionId: session.sessionId,
     cost,
     betAmount,
+    superBonus: !!superBonus,
     freeSpinsTriggered: true,
     freeSpinsAwarded: FREE_SPINS_BOUGHT,
     freeSpinsRemaining: session.freeSpinsRemaining,

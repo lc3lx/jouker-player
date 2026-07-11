@@ -20,10 +20,11 @@ exports.spin = asyncHandler(async (req, res) => {
 });
 
 exports.buyBonus = asyncHandler(async (req, res) => {
-  const { currentBet } = req.body;
+  const { currentBet, superBonus } = req.body;
   const data = await poseidonService.executeBuyBonus(
     req.poseidonUserId,
     currentBet,
+    { superBonus: superBonus === true || superBonus === "true" },
   );
   res.status(200).json({ status: "success", data });
 });

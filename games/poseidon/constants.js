@@ -31,6 +31,8 @@ const RETRIGGER_AWARD = 5;
 
 /** Buy bonus: 10 free spins, cost in bet multiples (EV-matched by sim). */
 const BUY_BONUS_COST = 30;
+/** Super buy bonus — 3× standard cost (UI tier). */
+const SUPER_BUY_BONUS_COST = 90;
 
 const SYMBOLS = Object.freeze({
   // low pays (royals — all pay the same)
@@ -170,6 +172,7 @@ module.exports = {
   FREE_SPINS_BOUGHT,
   RETRIGGER_AWARD,
   BUY_BONUS_COST,
+  SUPER_BUY_BONUS_COST,
   SYMBOLS,
   MULTIPLIER_VALUES,
   MULTIPLIER_GATES,

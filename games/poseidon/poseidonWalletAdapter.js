@@ -150,6 +150,43 @@ async function creditBalance(userId, amount, meta = {}) {
 }
 
 /**
+ * Debit + optional credit committed together in ONE mongo transaction so a
+ * mid-settlement failure can never leave the bet taken without the win paid.
+ * Balance is read AFTER commit (a session-less read inside the txn would see
+ * the pre-txn snapshot and report a stale value).
+ */
+async function settleMongo(userId, { debit, credit, meta, debitLeg, creditLeg }) {
+  const { withMongoTransaction, ledgerWithdraw, ledgerDeposit } = require("../../services/walletLedgerService");
+  await withMongoTransaction(async (session) => {
+    if (debit > 0) {
+      await ledgerWithdraw({
+        session,
+        userId,
+        amount: Math.round(debit),
+        ledgerType: "game_loss",
+        meta: { source: "poseidon", ...meta, leg: debitLeg },
+      });
+    }
+    if (credit > 0) {
+      await ledgerDeposit({
+        session,
+        userId,
+        amount: Math.round(credit),
+        ledgerType: "game_win",
+        meta: { source: "poseidon", ...meta, leg: creditLeg },
+      });
+    }
+  });
+  return getBalanceMongo(userId);
+}
+
+function settleStub(userId, { debit, credit, debitLeg, creditLeg, meta }) {
+  if (debit > 0) deductBalanceStub(userId, debit, { ...meta, leg: debitLeg });
+  if (credit > 0) creditBalanceStub(userId, credit, { ...meta, leg: creditLeg });
+  return roundMoney(ensureStubUser(userId).balance);
+}
+
+/**
  * Atomic bet + optional win settlement in one locked transaction.
  */
 async function atomicSpinWallet(userId, { betAmount, winAmount, meta = {} }) {
@@ -167,23 +204,10 @@ async function atomicSpinWallet(userId, { betAmount, winAmount, meta = {} }) {
         err.code = "INSUFFICIENT_BALANCE";
         throw err;
       }
-
-      if (MODE === "mongo") {
-        await deductBalanceMongo(userId, bet, { ...meta, leg: "bet" });
-      } else {
-        await deductBalanceStub(userId, bet, { ...meta, leg: "bet" });
-      }
     }
 
-    if (win > 0) {
-      if (MODE === "mongo") {
-        await creditBalanceMongo(userId, win, { ...meta, leg: "win" });
-      } else {
-        await creditBalanceStub(userId, win, { ...meta, leg: "win" });
-      }
-    }
-
-    return getBalance(userId);
+    const args = { debit: bet, credit: win, meta, debitLeg: "bet", creditLeg: "win" };
+    return MODE === "mongo" ? settleMongo(userId, args) : settleStub(userId, args);
   });
 }
 

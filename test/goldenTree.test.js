@@ -120,6 +120,37 @@ test("spin deducts bet and credits win (stub wallet)", async () => {
   assert.equal(result.matrix[0].length, 3);
 });
 
+test("winning spin credits net (win - bet) to the wallet", async () => {
+  wallet.clearStubForTests();
+  roundManager.clearAllForTests();
+  wallet.seedStubBalance("uwin", 1_000_000);
+
+  // Force a guaranteed win via a fully-controlled settlement.
+  const before = await wallet.getBalance("uwin");
+  const balanceAfter = await wallet.atomicSpinWallet("uwin", {
+    betAmount: 10000,
+    winAmount: 50000,
+    meta: { type: "main_spin" },
+  });
+
+  assert.equal(balanceAfter, roundMoney(before - 10000 + 50000));
+  assert.equal(await wallet.getBalance("uwin"), balanceAfter);
+});
+
+test("settlement is all-or-nothing on insufficient funds (no partial debit)", async () => {
+  wallet.clearStubForTests();
+  roundManager.clearAllForTests();
+  wallet.seedStubBalance("upoor", 5000);
+
+  const before = await wallet.getBalance("upoor");
+  await assert.rejects(
+    () => wallet.atomicSpinWallet("upoor", { betAmount: 10000, winAmount: 0 }),
+    (err) => err.code === "INSUFFICIENT_BALANCE",
+  );
+  // Balance must be untouched — bet was never taken.
+  assert.equal(await wallet.getBalance("upoor"), before);
+});
+
 test("gamble doubles or zeroes win", async () => {
   wallet.clearStubForTests();
   roundManager.clearAllForTests();
