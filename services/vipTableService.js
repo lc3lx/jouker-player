@@ -73,6 +73,11 @@ exports.kick = asyncHandler(async (req, res) => {
 
   await assertOwner(id, req.user._id);
 
+  const { isTableSettlementBlocked } = require("./gameSettlementService");
+  if (await isTableSettlementBlocked(id)) {
+    throw new ApiError("Settlement in progress — kicking is temporarily blocked", 409);
+  }
+
   await withMongoTransaction(async (session) => {
     const tableTx = await Table.findById(id).session(session);
     if (!tableTx) throw new Error("TABLE_NOT_FOUND");
@@ -180,6 +185,11 @@ exports.start = asyncHandler(async (req, res) => {
 exports.destroy = asyncHandler(async (req, res) => {
   const { id } = req.params;
   await assertOwner(id, req.user._id);
+
+  const { isTableSettlementBlocked } = require("./gameSettlementService");
+  if (await isTableSettlementBlocked(id)) {
+    throw new ApiError("Settlement in progress — destroying is temporarily blocked", 409);
+  }
 
   const table = await Table.findById(id).select("seats gameType");
   if (!table) throw new ApiError("Table not found", 404);

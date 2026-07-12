@@ -62,6 +62,35 @@ async function resetPokerTableWhenEmpty(tableId) {
     table.waitingQueue = [];
   }
   if (Array.isArray(table.vacatingPlayers) && table.vacatingPlayers.length > 0) {
+    // Expired vacate entries reaching this path mean the forfeit timer never fired
+    // (e.g. restart). Refund their locked chips instead of silently dropping them.
+    const {
+      withMongoTransaction,
+      releaseTableSeatToBalance,
+    } = require("./walletLedgerService");
+    for (const vac of table.vacatingPlayers) {
+      if (!vac?.user) continue;
+      const chips = Number(vac.chips) || 0;
+      if (chips <= 0) continue;
+      try {
+        await withMongoTransaction(async (session) => {
+          await releaseTableSeatToBalance({
+            session,
+            userId: vac.user,
+            tableId: table._id,
+            seatChips: chips,
+            meta: { reason: "poker_reset_expired_vacate_refund", tableNumber: table.tableNumber },
+          });
+        });
+      } catch (err) {
+        // Already forfeited/refunded entries have no attributable lock — skip.
+        logger.warn("poker_reset_vacate_refund_skipped", {
+          tableId: tid,
+          userId: String(vac.user),
+          reason: err?.message,
+        });
+      }
+    }
     table.vacatingPlayers = [];
   }
   await table.save();

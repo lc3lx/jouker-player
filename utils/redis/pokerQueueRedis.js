@@ -134,6 +134,28 @@ async function isUserQueued(tableId, userId) {
   return rank != null;
 }
 
+/** All queued entries in FIFO order — used for refunds before a queue is destroyed. */
+async function listQueueEntries(tableId) {
+  if (!redisClient) return [];
+  const tid = String(tableId);
+  const uids = await redisClient.zRange(queueZKey(tid), 0, -1);
+  if (!uids || uids.length === 0) return [];
+  const out = [];
+  for (const uid of uids) {
+    const raw = await redisClient.hGet(queueHKey(tid), String(uid));
+    let meta = { buyIn: 0, playerId: null };
+    if (raw) {
+      try {
+        meta = JSON.parse(raw);
+      } catch (_) {
+        // keep defaults
+      }
+    }
+    out.push({ userId: String(uid), playerId: meta.playerId, buyIn: Number(meta.buyIn) || 0 });
+  }
+  return out;
+}
+
 module.exports = {
   setRedisClient,
   isEnabled,
@@ -145,5 +167,6 @@ module.exports = {
   getQueueLength,
   clearQueue,
   isUserQueued,
+  listQueueEntries,
   queueZKey,
 };

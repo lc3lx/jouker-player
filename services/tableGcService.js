@@ -108,9 +108,18 @@ async function refundCardTableSeatsTransactional(tableDoc, reason) {
 
 async function refundPokerTableTransactional(tableDoc, reason) {
   let refunded = 0;
+  // Redis-mode queue entries also hold locked buy-ins (transferToLocked at enqueue);
+  // snapshot them before the queue is cleared so they can be refunded below.
+  const pokerQueueRedis = require("../utils/redis/pokerQueueRedis");
+  const redisQueueEntries = pokerQueueRedis.isEnabled()
+    ? await pokerQueueRedis.listQueueEntries(String(tableDoc._id)).catch(() => [])
+    : [];
+
   await withMongoTransaction(async (session) => {
     const tableTx = await Table.findById(tableDoc._id).session(session);
     if (!tableTx) return;
+
+    const refundedUsers = new Set();
 
     for (const seat of [...tableTx.seats]) {
       if (!seat.user) continue;
@@ -123,6 +132,7 @@ async function refundPokerTableTransactional(tableDoc, reason) {
         seatChips: chips,
         meta: { reason, tableNumber: tableTx.tableNumber },
       });
+      refundedUsers.add(String(seat.user));
       refunded += 1;
     }
 
@@ -137,6 +147,32 @@ async function refundPokerTableTransactional(tableDoc, reason) {
         seatChips: chips,
         meta: { reason: `${reason}_vacating`, tableNumber: tableTx.tableNumber },
       });
+      refundedUsers.add(String(vac.user));
+      refunded += 1;
+    }
+
+    // Queued players locked their buy-in at enqueue time — refund before clearing.
+    const queueEntries = [
+      ...(Array.isArray(tableTx.waitingQueue) ? tableTx.waitingQueue : []).map((q) => ({
+        userId: q.user,
+        buyIn: Number(q.buyIn) || 0,
+      })),
+      ...redisQueueEntries,
+    ];
+    for (const q of queueEntries) {
+      if (!q.userId) continue;
+      const uid = String(q.userId);
+      if (refundedUsers.has(uid)) continue;
+      const buyIn = Number(q.buyIn) || 0;
+      if (buyIn <= 0) continue;
+      await releaseTableSeatToBalance({
+        session,
+        userId: q.userId,
+        tableId: tableTx._id,
+        seatChips: buyIn,
+        meta: { reason: `${reason}_queue`, tableNumber: tableTx.tableNumber },
+      });
+      refundedUsers.add(uid);
       refunded += 1;
     }
 
@@ -153,6 +189,10 @@ async function refundPokerTableTransactional(tableDoc, reason) {
     });
     throw err;
   });
+
+  if (redisQueueEntries.length > 0) {
+    await pokerQueueRedis.clearQueue(String(tableDoc._id)).catch(() => {});
+  }
   return refunded;
 }
 

@@ -11,6 +11,7 @@ const miniGamePlaySchema = new mongoose.Schema(
         "thunder-king",
         "lucky-dice",
         "king-arth",
+        "sicbo",
       ],
       required: true,
     },

@@ -19,7 +19,6 @@ const {
 const {
   joinPokerWithRetry,
   syncPokerTableStatusById,
-  statusAfterSeatChange,
 } = require("./pokerTableAllocationService");
 const {
   findUserSeatedTable,
@@ -29,11 +28,9 @@ const {
   joinFixedCapacityWithRetry,
 } = require("./tableAllocationService");
 const { LOBBY_EXCLUDED_STATUSES } = require("./tableLifecycleService");
-const { seatNextFromQueue, getQueuePosition, getWaitingQueueSize } = require("./pokerWaitingQueueService");
+const { getQueuePosition, getWaitingQueueSize } = require("./pokerWaitingQueueService");
 const waitingQueueService = require("./waitingQueueService");
-const { removeSeatPresence } = require("./pokerCollusionGuard");
-const { markTableActivity, resetPokerTableWhenEmpty } = require("./pokerTableGcService");
-const { syncLivePokerTableAfterLeave, syncLivePokerTableAfterJoin } = require("../sockets/tableGame");
+const { syncLivePokerTableAfterJoin } = require("../sockets/tableGame");
 const { vacatePokerSeat, tryRestoreVacatedSeat, permanentLeavePokerTable } = require("./pokerVacateService");
 const {
   tryClaimTarneeb41BotSeat,
@@ -423,10 +420,12 @@ exports.getTables = asyncHandler(async (req, res) => {
 
 // Get table by id
 exports.getTable = asyncHandler(async (req, res, next) => {
-  const table = await Table.findById(req.params.id).populate({
-    path: "seats.user",
-    select: "name country profileImg",
-  });
+  const table = await Table.findById(req.params.id)
+    .select("-password")
+    .populate({
+      path: "seats.user",
+      select: "name country profileImg",
+    });
   if (!table) return next(new ApiError(`No table for id ${req.params.id}`, 404));
   res.status(200).json({ data: table });
 });
@@ -438,6 +437,11 @@ exports.createTable = asyncHandler(async (req, res) => {
     gt === "trix" ? "trix" : gt === "tarneeb41" ? "tarneeb41" : "poker";
   const defaultCap =
     gameType === "trix" || gameType === "tarneeb41" ? 4 : 9;
+  let hashedPassword;
+  if (req.body.isPrivate && req.body.password) {
+    const bcrypt = require("bcryptjs");
+    hashedPassword = await bcrypt.hash(String(req.body.password), 10);
+  }
   const table = await Table.create({
     gameType,
     tier: req.body.tier,
@@ -448,10 +452,12 @@ exports.createTable = asyncHandler(async (req, res) => {
     maxBuyIn: req.body.maxBuyIn,
     capacity: Math.min(9, req.body.capacity || defaultCap),
     isPrivate: !!req.body.isPrivate,
-    password: req.body.password,
+    password: hashedPassword,
     status: gameType === "poker" ? "waiting" : "open",
   });
-  res.status(201).json({ data: table });
+  const created = table.toObject ? table.toObject() : table;
+  delete created.password;
+  res.status(201).json({ data: created });
 });
 
 // Join a table (protected)
@@ -654,9 +660,19 @@ exports.joinTable = asyncHandler(async (req, res, next) => {
     return next(new ApiError("Table is full", 400));
   }
 
-  // Check private table password
+  // Check private table password. VIP tables store a bcrypt hash; legacy
+  // admin-created tables store plaintext.
   if (table.isPrivate) {
-    if (!password || password !== table.password) {
+    let passwordOk = false;
+    if (password && table.password) {
+      if (/^\$2[aby]\$/.test(String(table.password))) {
+        const bcrypt = require("bcryptjs");
+        passwordOk = await bcrypt.compare(String(password), String(table.password));
+      } else {
+        passwordOk = password === table.password;
+      }
+    }
+    if (!passwordOk) {
       return next(new ApiError("Invalid table password", 400));
     }
   }
@@ -960,14 +976,7 @@ exports.leaveTable = asyncHandler(async (req, res, next) => {
     if (tableTx.gameType === "tarneeb41" && tableTx.seats.length < tableTx.capacity) {
       tableTx.status = "open";
     }
-    if (tableTx.gameType === "poker") {
-      tableTx.status = statusAfterSeatChange(tableTx, tableTx.seats.length);
-    }
     await tableTx.save({ session });
-
-    if (tableTx.gameType === "poker") {
-      await seatNextFromQueue({ session, tableId: tableTx._id });
-    }
 
     if (chipsTx > 0) {
       await releaseTableSeatToBalance({
@@ -990,29 +999,8 @@ exports.leaveTable = asyncHandler(async (req, res, next) => {
     throw e;
   });
 
-  if (table.gameType === "poker") {
-    await removeSeatPresence({
-      tableId: id,
-      userId: req.user._id,
-      ip: clientIp,
-      deviceId: deviceId || null,
-    });
-
-    const afterLeave = await Table.findById(id).select("seats gameType");
-    if (afterLeave && afterLeave.seats.length === 0) {
-      await resetPokerTableWhenEmpty(id);
-    } else {
-      await syncLivePokerTableAfterLeave(id);
-      markTableActivity(String(id));
-    }
-  }
-
   void trackJoinLeaveEvent(req.user._id, "leave_table");
   emitTablesUpdated({ gameType: table.gameType || "poker", reason: "leave", tableId: String(id) });
-
-  if (table.gameType === "poker") {
-    void syncPokerTableStatusById(String(id));
-  }
 
   if (table.gameType === "tarneeb41") {
     void refreshTarneeb41GameSeats(String(id));

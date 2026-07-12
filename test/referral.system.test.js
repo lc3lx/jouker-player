@@ -136,7 +136,12 @@ test("domain event bus isolates handler errors", async () => {
     ok = true;
   });
   publish(Events.PLAYER_GAINED_XP, { userId: "u1" });
-  await new Promise((r) => setTimeout(r, 20));
+  // Poll instead of a fixed 20ms sleep — under full-suite CPU load the async
+  // handler can take longer, making a fixed wait flaky.
+  const deadline = Date.now() + 2000;
+  while (!ok && Date.now() < deadline) {
+    await new Promise((r) => setTimeout(r, 10));
+  }
   assert.equal(ok, true);
   clearAll();
 });

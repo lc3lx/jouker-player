@@ -21,6 +21,8 @@ const parkourRoute = require("./parkourRoute");
 const timeRoute = require("./timeRoute");
 const goldenTreeRoute = require("./goldenTreeRoute");
 const poseidonRoute = require("./poseidonRoute");
+const sicboRoute = require("./sicboRoute");
+const adminSicboRoute = require("./adminSicboRoute");
 const luckyWheelRoute = require("./luckyWheelRoute");
 const socialRoute = require("./socialRoute");
 const chatRoute = require("./chatRoute");
@@ -86,6 +88,8 @@ const mountRoutes = (app) => {
   app.use("/api/v1/parkour", parkourRoute);
   app.use("/api/v1/time", timeRoute);
   app.use("/api/v1/lucky-wheel", luckyWheelRoute);
+  app.use("/api/v1/sicbo", sicboRoute);
+  app.use("/api/v1/admin/sicbo", adminSicboRoute);
   app.use("/api/v1/social", socialRoute);
   app.use("/api/v1/chat", chatRoute);
   app.use("/api/v1/replay", replayRoute);

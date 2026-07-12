@@ -169,17 +169,35 @@ async function abandonCardTableIfNoHumans(nsp, gameType, tableId) {
 }
 
 async function releaseTrixMongoSeatOnVacate(tableId, userId) {
-  const table = await Table.findById(tableId);
-  if (!table || table.gameType !== "trix") return false;
-  const idx = table.seats.findIndex(
-    (s) => s.user && String(s.user) === String(userId)
-  );
-  if (idx === -1) return false;
-  table.seats.splice(idx, 1);
-  if (table.seats.length < table.capacity) {
-    table.status = "open";
-  }
-  await table.save();
+  const { withMongoTransaction, forfeitTableSeatLock } = require("./walletLedgerService");
+  let released = false;
+  await withMongoTransaction(async (session) => {
+    const table = await Table.findById(tableId).session(session);
+    if (!table || table.gameType !== "trix") return;
+    const idx = table.seats.findIndex(
+      (s) => s.user && String(s.user) === String(userId)
+    );
+    if (idx === -1) return;
+    const chips = Number(table.seats[idx].chips) || 0;
+    table.seats.splice(idx, 1);
+    if (table.seats.length < table.capacity) {
+      table.status = "open";
+    }
+    // A bot plays on with these chips — the vacated player's wallet lock must be
+    // forfeited here or it stays locked forever (settlement sees the seat as a bot).
+    if (chips > 0) {
+      await forfeitTableSeatLock({
+        session,
+        userId,
+        tableId: table._id,
+        seatChips: chips,
+        meta: { reason: "trix_vacate_bot_takeover" },
+      });
+    }
+    await table.save({ session });
+    released = true;
+  });
+  if (!released) return false;
   emitTablesUpdated({
     gameType: "trix",
     reason: "vacate",

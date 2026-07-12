@@ -152,10 +152,13 @@ test("9-max capacity", () => {
 
 test("chip conservation during hand", () => {
   const g = mkGame(3);
+  // Engine semantics: a bet is moved into the pot immediately (seat.bet is a
+  // bookkeeping mirror physically inside pot) — stacks + pot equal hand-start
+  // total. 95k + 90k + 100k stacks + 10k pot = 295k.
   g.handStartTotal = 295000;
-  g.pot = 5000;
+  g.pot = 10000;
   g.seats[0].chips = 95000;
-  g.seats[0].bet = 0;
+  g.seats[0].bet = 5000;
   g.seats[1].chips = 90000;
   g.seats[1].bet = 5000;
   g.seats[2].chips = 100000;

@@ -3767,11 +3767,15 @@ function initTableGame(io, options = {}) {
     async function handleWatchTable({ tableId }) {
       try {
         if (!tableId) return;
-        const table = await Table.findById(tableId).select("gameType seats");
+        const table = await Table.findById(tableId).select("gameType seats settings");
         if (!table || table.gameType !== "poker") return;
         const seated = table.seats.some((s) => String(s.user) === String(socket.userId));
         if (seated) {
           return handleJoinTable({ tableId });
+        }
+        if (table.settings && table.settings.allowSpectators === false) {
+          socket.emit("table_event", { type: "spectating_denied", tableId: String(tableId) });
+          return;
         }
         socket.isSpectator = true;
         socket.join(`tg:${tableId}`);

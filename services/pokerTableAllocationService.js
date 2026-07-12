@@ -194,11 +194,26 @@ async function executePokerJoinTransaction({
       return enqueuePlayer({ session, userId, playerId, buyIn, tableId: tableTx._id });
     }
     tableTx = await findAvailablePokerTable(tableTx.tier, buyIn, session);
+
+    // Re-validate against the switched table: a concurrent request may have
+    // already seated or queued this user there (double-join / double-lock race).
+    if (tableTx) {
+      const seatedOnNew = tableTx.seats.find((s) => String(s.user) === String(userId));
+      if (seatedOnNew) throw new Error("ALREADY_SEATED");
+      const queuedOnNew = (tableTx.waitingQueue || []).find(
+        (q) => String(q.user) === String(userId)
+      );
+      if (queuedOnNew) throw new Error("ALREADY_QUEUED");
+      if (buyIn < tableTx.minBuyIn || buyIn > tableTx.maxBuyIn) {
+        throw new Error("INVALID_BUYIN");
+      }
+    }
   }
 
   if (!tableTx) throw new Error("TABLE_NOT_FOUND");
   if (tableTx.status === "closed") throw new Error("TABLE_CLOSED");
-  if (tableTx.seats.length >= cap) {
+  const capNow = normalizeCapacity(tableTx.capacity);
+  if (tableTx.seats.length >= capNow) {
     if (preferQueue) {
       return enqueuePlayer({ session, userId, playerId, buyIn, tableId: tableTx._id });
     }
@@ -223,8 +238,8 @@ async function executePokerJoinTransaction({
 
   const seatPosition =
     seatIndex != null
-      ? clampSeatPosition(seatIndex, cap)
-      : nextFreeSeatPosition(tableTx.seats, cap) ?? POKER_OPPOSITE_DEALER_SEAT;
+      ? clampSeatPosition(seatIndex, capNow)
+      : nextFreeSeatPosition(tableTx.seats, capNow) ?? POKER_OPPOSITE_DEALER_SEAT;
   if (occupiedSeatPositions(tableTx.seats).has(seatPosition)) {
     throw new Error("SEAT_TAKEN");
   }
@@ -235,7 +250,7 @@ async function executePokerJoinTransaction({
     chips: buyIn,
     seatPosition,
   });
-  if (tableTx.seats.length > cap) throw new Error("TABLE_FULL");
+  if (tableTx.seats.length > capNow) throw new Error("TABLE_FULL");
 
   tableTx.status = statusAfterSeatChange(tableTx, tableTx.seats.length);
   await tableTx.save({ session });

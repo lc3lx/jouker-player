@@ -10,6 +10,8 @@ const participantSchema = new mongoose.Schema(
     rakeShare: { type: Number, default: 0, min: 0 },
     isWinner: { type: Boolean, default: false },
     isBot: { type: Boolean, default: false },
+    /** Human who vacated this seat mid-game (bot played it out) — lock forfeited at settlement. */
+    vacatedUserId: { type: mongoose.Schema.ObjectId, ref: "User" },
   },
   { _id: false }
 );

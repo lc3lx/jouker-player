@@ -71,6 +71,7 @@ async function vacatePokerSeat({
       const seat = table.seats[idx];
       chips = toSafeInt(seat.chips, 0);
       const player = seat.player || null;
+      const seatPosition = seat.seatPosition != null ? seat.seatPosition : undefined;
       table.seats.splice(idx, 1);
 
       if (!Array.isArray(table.vacatingPlayers)) table.vacatingPlayers = [];
@@ -82,6 +83,7 @@ async function vacatePokerSeat({
         chips,
         vacatedAt: new Date(),
         vacateUntil,
+        seatPosition,
       });
 
       table.status = statusAfterSeatChange(table, table.seats.length);
@@ -141,12 +143,27 @@ async function tryRestoreVacatedSeat({ tableId, userId }) {
     const chips = toSafeInt(entry.chips, 0);
     if (table.seats.length >= table.capacity) throw new Error("TABLE_FULL");
 
+    // Restore the original chair when still free; otherwise take the next free one.
+    const {
+      nextFreeSeatPosition,
+      POKER_OPPOSITE_DEALER_SEAT,
+    } = require("./pokerTableAllocationService");
+    const occupied = new Set(
+      table.seats.filter((s) => s.seatPosition != null).map((s) => s.seatPosition)
+    );
+    let seatPosition = entry.seatPosition != null ? entry.seatPosition : null;
+    if (seatPosition == null || occupied.has(seatPosition)) {
+      seatPosition =
+        nextFreeSeatPosition(table.seats, table.capacity) ?? POKER_OPPOSITE_DEALER_SEAT;
+    }
+
     table.vacatingPlayers = (table.vacatingPlayers || []).filter((v) => String(v.user) !== uid);
     table.seats.push({
       user: entry.user,
       player: entry.player || undefined,
       chips,
       joinedAt: new Date(),
+      seatPosition,
     });
     table.status = statusAfterSeatChange(table, table.seats.length);
     await table.save({ session });

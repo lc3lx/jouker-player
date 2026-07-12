@@ -32,6 +32,8 @@ const vacatingPlayerSchema = new mongoose.Schema(
     vacateUntil: { type: Date, required: true },
     /** Tarneeb41/Trix: fixed seat index when vacated mid-hand. */
     seatIndex: { type: Number, min: 0, max: 3 },
+    /** Poker: fixed chair index 0–8 held while vacating (restored on return). */
+    seatPosition: { type: Number, min: 0, max: 8 },
   },
   { _id: false }
 );

@@ -204,6 +204,7 @@ const { initTableGame } = require("./sockets/tableGame");
 const { initSocial } = require("./sockets/social");
 const { initSupport } = require("./sockets/support");
 const { initDeposit } = require("./sockets/deposit");
+const { initSicbo } = require("./sockets/sicbo");
 const { initGameServer } = require("./socket");
 const { setupSocketIoRedis } = require("./utils/realtimeRedis");
 
@@ -254,6 +255,7 @@ async function startServer() {
   initSocial(io, { redis: realtimeRedis?.commandClient || null });
   initSupport(io);
   initDeposit(io);
+  initSicbo(io, { redis: realtimeRedis?.commandClient || null });
   initGameServer(io, { redis: realtimeRedis?.commandClient || null });
 
   const { startEngine: startTournamentEngine } = require("./services/tournamentEngineService");

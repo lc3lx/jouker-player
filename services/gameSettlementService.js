@@ -14,6 +14,7 @@ const {
   recordSettlementLedger,
   applyHouseSettlementDelta,
   assertHouseWalletReady,
+  forfeitTableSeatLock,
 } = require("./walletLedgerService");
 
 function toSafeInt(value, fallback = 0) {
@@ -158,6 +159,7 @@ function buildSettlementPlan({ gameType, gameResult, participants, rakePercent }
       rakeShare,
       isWinner,
       isBot: !!s.isBot,
+      vacatedUserId: s.vacatedUserId || null,
     };
   });
 
@@ -266,6 +268,9 @@ function participantsFromTableAndGame(table, gamePlayers) {
       seatIndex: idx,
       buyIn: toSafeInt(seat.chips, 0),
       isBot,
+      // Seat converted to a bot mid-game (engine marks vacatedFromUserId) — the
+      // vacated human's locked buy-in is forfeited during settlement (never paid out).
+      vacatedUserId: isBot && gp?.vacatedFromUserId ? gp.vacatedFromUserId : null,
     };
   });
 }
@@ -373,7 +378,26 @@ async function applySettlementLedger({ session, tableId, settlementId, plan }) {
   if (!isParkour && !table) throw new Error("TABLE_NOT_FOUND");
 
   for (const p of plan.participants) {
-    if (p.isBot || !p.userId) continue;
+    if (p.isBot || !p.userId) {
+      // Vacated human whose seat a bot played out: forfeit their locked buy-in.
+      // forfeitTableSeatLock caps at the table-scoped lock, so recovery replays
+      // are safe (second run finds 0 attributable and forfeits nothing).
+      if (p.isBot && p.vacatedUserId && toSafeInt(p.buyIn, 0) > 0 && !isParkour) {
+        await forfeitTableSeatLock({
+          session,
+          userId: p.vacatedUserId,
+          tableId,
+          seatChips: toSafeInt(p.buyIn, 0),
+          meta: {
+            reason: "settlement_vacated_seat_forfeit",
+            settlementId,
+            seatIndex: p.seatIndex,
+            gameType: plan.gameType,
+          },
+        });
+      }
+      continue;
+    }
 
     if (await participantSettlementAlreadyApplied(settlementId, p.userId, session)) {
       logger.info("game_settlement_participant_skip", {

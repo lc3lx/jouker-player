@@ -100,10 +100,19 @@ async function seatNextFromQueue({ session, tableId }) {
     return seatNextFromQueue({ session, tableId });
   }
 
+  // Lazy require: pokerTableAllocationService requires this module (cycle-safe).
+  const {
+    nextFreeSeatPosition,
+    POKER_OPPOSITE_DEALER_SEAT,
+  } = require("./pokerTableAllocationService");
+  const seatPosition =
+    nextFreeSeatPosition(tableTx.seats, cap) ?? POKER_OPPOSITE_DEALER_SEAT;
+
   tableTx.seats.push({
     user: next.userId,
     player: next.playerId,
     chips: buyIn,
+    seatPosition,
   });
   await tableTx.save({ session });
   emitTablesUpdated({ gameType: "poker", reason: "queue_seated", tableId: String(tableId), userId: uid });
