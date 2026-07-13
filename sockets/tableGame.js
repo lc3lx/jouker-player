@@ -1225,12 +1225,21 @@ class PokerTable {
       this.humanSeatCount() >= 1 &&
       this.activeSeatCount() < Math.min(this.capacity, Math.max(2, this.botFillTarget));
     if (shouldRestoreBots && previousBots.length > 0) {
+      const humanChairs = new Set(
+        this.seats
+          .filter((s) => !s.isBot)
+          .map((s) => toSafeInt(s.seatPosition, -1))
+          .filter((c) => c >= 0)
+      );
+      const botsToRestore = previousBots.filter(
+        (b) => !humanChairs.has(toSafeInt(b.seatPosition, -1))
+      );
       const target = Math.min(this.capacity, Math.max(2, this.botFillTarget));
       const missing = Math.max(0, target - this.activeSeatCount());
       const freeSlots = Math.max(0, this.capacity - this.seats.length);
-      const toRestore = Math.min(missing, freeSlots, previousBots.length);
+      const toRestore = Math.min(missing, freeSlots, botsToRestore.length);
       if (toRestore > 0) {
-        this.seats.push(...previousBots.slice(0, toRestore));
+        this.seats.push(...botsToRestore.slice(0, toRestore));
       }
     }
 
