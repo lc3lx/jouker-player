@@ -859,7 +859,7 @@ exports.joinTable = asyncHandler(async (req, res, next) => {
   if (table.gameType === "poker") {
     void syncPokerTableStatusById(joinedTableId);
     if (!joinMeta.queued) {
-      void syncLivePokerTableAfterJoin(joinedTableId);
+      await syncLivePokerTableAfterJoin(joinedTableId);
     }
   }
 

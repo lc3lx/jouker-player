@@ -15,8 +15,9 @@ const sicboRoundSchema = new mongoose.Schema(
     },
 
     bettingStart: { type: Date },
-    bettingEnd: { type: Date },
-    resultAt: { type: Date },
+    bettingEnd: { type: Date }, // betting closes here
+    resultAt: { type: Date }, // winners revealed here (= bettingEnd + rollMs)
+    rolledAt: { type: Date }, // when the dice were actually generated
     settledAt: { type: Date },
 
     // Provably fair: hash published at open, seed revealed at result.

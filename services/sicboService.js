@@ -12,7 +12,7 @@
 const logger = require("../utils/logger");
 const roundManager = require("../games/sicbo/sicboRoundManager");
 const roundState = require("../games/sicbo/sicboRoundState");
-const { PHASE, BETTING_MS, RESULT_MS } = require("../games/sicbo/sicboConstants");
+const { PHASE, BETTING_MS, ROLL_MS, RESULT_MS } = require("../games/sicbo/sicboConstants");
 const { evaluateBet } = require("../games/sicbo/sicboEngine");
 const { BET_CATALOG } = require("../games/sicbo/sicboConstants");
 
@@ -56,13 +56,29 @@ function winningBetTypes(dice) {
 }
 
 async function openNextRound() {
-  const round = await roundManager.openRound({ bettingMs: BETTING_MS });
-  _engine = { round, phaseDeadline: new Date(round.bettingEnd).getTime(), settled: false };
+  const round = await roundManager.openRound({ bettingMs: BETTING_MS, rollMs: ROLL_MS });
+  const rollAt = new Date(round.bettingEnd).getTime(); // betting closes → shake
+  const resultAt = new Date(round.resultAt).getTime(); // winners revealed
+  _engine = { round, rollAt, resultAt, nextAt: resultAt + RESULT_MS, rolled: false, settled: false };
   const pub = roundManager.publicRound(round);
   await roundState.setStateCache(pub);
   broadcast("sicbo:new_round", pub);
-  broadcast("sicbo:bet_open", { roundId: round.roundId, bettingEnd: round.bettingEnd });
+  broadcast("sicbo:bet_open", {
+    roundId: round.roundId,
+    bettingEnd: round.bettingEnd,
+    resultAt: round.resultAt,
+  });
   logger.info("sicbo_bet_open", { roundId: round.roundId });
+}
+
+function emitTimer(e, now) {
+  if (now - _lastTimerEmit >= TIMER_BROADCAST_MS) {
+    _lastTimerEmit = now;
+    broadcast("sicbo:timer", {
+      roundId: e.round.roundId,
+      msLeft: Math.max(0, e.resultAt - now), // countdown always targets the RESULT
+    });
+  }
 }
 
 async function tick() {
@@ -91,57 +107,54 @@ async function tick() {
     }
 
     const now = Date.now();
-    const round = _engine.round;
+    const e = _engine;
 
-    switch (round.status) {
-      case PHASE.BETTING: {
-        // Throttled countdown broadcast.
-        if (now - _lastTimerEmit >= TIMER_BROADCAST_MS) {
-          _lastTimerEmit = now;
-          broadcast("sicbo:timer", {
-            roundId: round.roundId,
-            msLeft: Math.max(0, _engine.phaseDeadline - now),
-          });
-        }
-        if (now >= _engine.phaseDeadline) {
-          const locked = await roundManager.lockRound(round.roundId);
-          _engine.round = locked || (await refreshRound(round.roundId));
-          broadcast("sicbo:bet_closed", { roundId: round.roundId });
-        }
-        break;
-      }
-
-      case PHASE.LOCKED: {
-        // GENERATE RESULT → SAVE → reveal → SETTLE WALLET → broadcast → RESULT window.
-        const resulted = await roundManager.rollAndResult(round.roundId);
-        _engine.round = resulted;
+    // ── BETTING: countdown to result; at betting close, roll + start the shake ──
+    if (!e.rolled) {
+      emitTimer(e, now);
+      if (now >= e.rollAt) {
+        await roundManager.lockRound(e.round.roundId);
+        const resulted = await roundManager.rollAndResult(e.round.roundId);
+        e.round = resulted;
+        e.rolled = true;
         const dice = [resulted.dice1, resulted.dice2, resulted.dice3];
-
+        broadcast("sicbo:bet_closed", { roundId: resulted.roundId });
+        // Dice sent now (betting is closed); the client cup shakes for ROLL_MS and
+        // settles ~1s before the result. Winners are NOT revealed until resultAt.
         broadcast("sicbo:dice_animation", {
           roundId: resulted.roundId,
           dice,
-          serverSeed: resulted.serverSeed, // revealed now (betting closed)
+          serverSeed: resulted.serverSeed,
           serverSeedHash: resulted.serverSeedHash,
           clientSeed: resulted.clientSeed,
           nonce: resulted.nonce,
+          resultAt: resulted.resultAt,
         });
+        await roundState.setStateCache(roundManager.publicRound(resulted));
+      }
+      return;
+    }
+
+    // ── ROLLING: keep the countdown ticking; at resultAt reveal winners + settle ──
+    if (!e.settled) {
+      emitTimer(e, now);
+      if (now >= e.resultAt) {
+        const dice = [e.round.dice1, e.round.dice2, e.round.dice3];
         broadcast("sicbo:result", {
-          roundId: resulted.roundId,
+          roundId: e.round.roundId,
           dice,
-          total: resulted.total,
+          total: e.round.total,
           result: {
-            bigSmall: resulted.resultBigSmall,
-            oddEven: resulted.resultOddEven,
-            isTriple: resulted.isTriple,
+            bigSmall: e.round.resultBigSmall,
+            oddEven: e.round.resultOddEven,
+            isTriple: e.round.isTriple,
           },
           winningBetTypes: winningBetTypes(dice),
         });
-
-        // SETTLE WALLET (+ VERIFY COMPLETION inside settleRound). Personal payouts stream out.
-        const { round: settled } = await roundManager.settleRound(resulted.roundId, {
+        const { round: settled } = await roundManager.settleRound(e.round.roundId, {
           onUserSettled: (res) => {
             emitToUser(res.userId, "sicbo:payout", {
-              roundId: resulted.roundId,
+              roundId: e.round.roundId,
               payout: res.payout,
               wonBets: res.wonBets,
               totalBets: res.totalBets,
@@ -149,8 +162,8 @@ async function tick() {
             });
           },
         });
-        _engine.round = settled;
-        _engine.settled = settled.status === PHASE.SETTLED;
+        e.round = settled;
+        e.settled = settled.status === PHASE.SETTLED;
         broadcast("sicbo:round_settled", {
           roundId: settled.roundId,
           totals: {
@@ -160,38 +173,19 @@ async function tick() {
           },
         });
         await roundState.setStateCache(roundManager.publicRound(settled));
-        _engine.phaseDeadline = now + RESULT_MS;
-        break;
       }
+      return;
+    }
 
-      case PHASE.RESULT:
-      case PHASE.SETTLED: {
-        // If settlement failed (round stuck in RESULT), retry before opening next.
-        if (round.status === PHASE.RESULT && !_engine.settled) {
-          const { round: retried } = await roundManager.settleRound(round.roundId);
-          _engine.round = retried;
-          _engine.settled = retried.status === PHASE.SETTLED;
-        }
-        if (now >= _engine.phaseDeadline) {
-          await openNextRound();
-        }
-        break;
-      }
-
-      default:
-        // Unknown state — reset and reopen next tick.
-        _engine.round = null;
+    // ── POST-RESULT gap → next round ──
+    if (now >= e.nextAt) {
+      await openNextRound();
     }
   } catch (err) {
     logger.error("sicbo_engine_tick_failed", { reason: err?.message });
   } finally {
     _ticking = false;
   }
-}
-
-async function refreshRound(roundId) {
-  const SicBoRound = require("../models/sicboRoundModel");
-  return SicBoRound.findOne({ roundId });
 }
 
 function startSicboEngine({ nsp, redis } = {}) {

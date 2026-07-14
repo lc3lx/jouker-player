@@ -23,23 +23,29 @@ function newRoundId() {
   return `sb_${Date.now().toString(36)}_${crypto.randomBytes(4).toString("hex")}`;
 }
 
-/** Create a fresh round in BETTING with a published seed commitment. */
-async function openRound({ bettingMs }) {
+/**
+ * Create a fresh round in BETTING with a published seed commitment.
+ * `bettingEnd` = when betting closes; `resultAt` = when winners are revealed
+ * (= bettingEnd + rollMs). The dice shake fills the [bettingEnd, resultAt] window.
+ */
+async function openRound({ bettingMs, rollMs = 0 }) {
   const roundId = newRoundId();
   const commitment = createRoundCommitment(roundId);
   const now = new Date();
+  const bettingEnd = new Date(now.getTime() + bettingMs);
   const round = await SicBoRound.create({
     roundId,
     status: PHASE.BETTING,
     bettingStart: now,
-    bettingEnd: new Date(now.getTime() + bettingMs),
+    bettingEnd,
+    resultAt: new Date(bettingEnd.getTime() + rollMs),
     serverSeedHash: commitment.serverSeedHash,
     clientSeed: commitment.clientSeed,
     nonce: commitment.nonce,
     // serverSeed is stored but withheld from clients until RESULT.
     serverSeed: commitment.serverSeed,
   });
-  logger.info("sicbo_round_open", { roundId, bettingEnd: round.bettingEnd });
+  logger.info("sicbo_round_open", { roundId, bettingEnd, resultAt: round.resultAt });
   return round;
 }
 
@@ -72,7 +78,7 @@ async function rollAndResult(roundId) {
   round.isTriple = s.isTriple;
   round.resultBigSmall = s.bigSmall;
   round.resultOddEven = s.oddEven;
-  round.resultAt = new Date();
+  round.rolledAt = new Date();
   await round.save();
   logger.info("sicbo_round_result", { roundId, dice, total: s.total });
   return round;
@@ -247,6 +253,7 @@ function publicRound(round) {
     status: round.status,
     bettingStart: round.bettingStart,
     bettingEnd: round.bettingEnd,
+    resultAt: round.resultAt,
     serverSeedHash: round.serverSeedHash,
     clientSeed: round.clientSeed,
     nonce: round.nonce,

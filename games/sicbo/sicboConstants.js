@@ -23,8 +23,14 @@ const CHIP_DENOMINATIONS = Object.freeze([
 const MAX_ROUND_STAKE_PER_PLAYER = 200000000;
 
 // ─── Round phase timings (env-overridable) ───────────────────────────────────
+// Timeline per round (countdown is shown all the way to the result):
+//   BETTING_MS  betting open  → betting closes  →  ROLL_MS dice shake  →  RESULT
+//   then RESULT_MS gap showing the winners → next round.
+// The dice cup appears at ROLL_MS-before-result (betting close); the dice settle
+// ~1s before the result; winners are revealed at the result moment.
 const BETTING_MS = clampInt(process.env.SICBO_BET_MS, 25000, 3000, 120000);
-const RESULT_MS = clampInt(process.env.SICBO_RESULT_MS, 10000, 3000, 60000);
+const ROLL_MS = clampInt(process.env.SICBO_ROLL_MS, 6000, 3000, 20000);
+const RESULT_MS = clampInt(process.env.SICBO_RESULT_MS, 6000, 2000, 60000);
 
 function clampInt(raw, fallback, min, max) {
   const n = parseInt(raw, 10);
@@ -137,6 +143,7 @@ module.exports = {
   CHIP_DENOMINATIONS,
   MAX_ROUND_STAKE_PER_PLAYER,
   BETTING_MS,
+  ROLL_MS,
   RESULT_MS,
   PHASE,
   BET_FAMILY,

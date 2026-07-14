@@ -33,6 +33,7 @@ const {
   sortSeatsByPosition,
   nextFreeSeatPosition,
   POKER_OPPOSITE_DEALER_SEAT,
+  clampSeatPosition,
 } = require("../services/pokerTableAllocationService");
 const {
   PLAYER_STATE,
@@ -1183,6 +1184,8 @@ class PokerTable {
       for (const ms of table.seats) {
         const uid = String(ms.user?._id || ms.user);
         if (this.findSeatIndexByUser(uid) >= 0) continue;
+        const chair =
+          ms.seatPosition != null ? clampSeatPosition(ms.seatPosition, this.capacity) : null;
         const row = {
           userId: uid,
           name: ms.user?.name || "Player",
@@ -1197,6 +1200,7 @@ class PokerTable {
           isBot: false,
           lastAction: null,
           actedThisStreet: false,
+          seatPosition: chair != null ? chair : undefined,
           cosmetics: { tableTheme: null, cardSkin: null },
           playerState: PLAYER_STATE.WAITING,
           disconnectedAt: null,
