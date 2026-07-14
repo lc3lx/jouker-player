@@ -64,8 +64,8 @@ test("config constants match the reference game", () => {
   assert.equal(DiceEngine.RETRIGGER_MIN_SCATTER, 3);
   assert.equal(DiceEngine.BUY_COST_MULT, 100);
   assert.equal(DiceEngine.MAX_WIN_MULTIPLIER, 4000);
-  assert.equal(DiceEngine.BET_MIN, 0.2);
-  assert.equal(DiceEngine.BET_MAX, 300);
+  assert.equal(DiceEngine.BET_MIN, 10000);
+  assert.equal(DiceEngine.BET_MAX, 40000000);
   assert.equal(DiceEngine.MULTIPLIER_VALUES.length, 15);
   assert.equal(DiceEngine.MULTIPLIER_VALUES[0], 2);
   assert.equal(DiceEngine.MULTIPLIER_VALUES.at(-1), 500);
