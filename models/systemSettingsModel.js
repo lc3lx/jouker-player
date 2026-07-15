@@ -28,6 +28,17 @@ const systemSettingsSchema = new mongoose.Schema(
       ],
       default: undefined,
     },
+    /** Admin-controlled VIP store prices (benefits stay in vipConfig). */
+    vipPackages: {
+      type: [
+        {
+          level: { type: String, required: true },
+          priceUsd: { type: Number, default: 0, min: 0 },
+          isActive: { type: Boolean, default: true },
+        },
+      ],
+      default: undefined,
+    },
   },
   { timestamps: true }
 );
