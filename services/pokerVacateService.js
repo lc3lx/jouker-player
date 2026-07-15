@@ -242,6 +242,9 @@ async function permanentLeavePokerTable({
     await withMongoTransaction(async (session) => {
       const table = await Table.findById(tid).session(session);
       if (!table || table.gameType !== "poker") throw new Error("NOT_POKER");
+      // N-1: never cash out a seat while the engine is mid-settlement for this
+      // table — the two writes to table.seats[].chips must not interleave.
+      if (table.activeSettlementId) throw new Error("SETTLEMENT_IN_PROGRESS");
 
       const vacEntry = findActiveVacatingEntry(table, uid);
       if (vacEntry) {
@@ -286,7 +289,11 @@ async function permanentLeavePokerTable({
       await seatNextFromQueue({ session, tableId: tid });
     });
   } catch (e) {
-    if (e.message === "NOT_SEATED" || e.message === "NOT_POKER") {
+    if (
+      e.message === "NOT_SEATED" ||
+      e.message === "NOT_POKER" ||
+      e.message === "SETTLEMENT_IN_PROGRESS"
+    ) {
       return { left: false, reason: e.message };
     }
     throw e;

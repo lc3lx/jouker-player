@@ -1,5 +1,5 @@
 /**
- * Inserts starter catalog rows (idempotent by assetKey + type).
+ * Inserts/updates starter catalog rows (idempotent by assetKey + type).
  * Usage: node scripts/seedDefaultCosmetics.js
  */
 const path = require("path");
@@ -7,84 +7,33 @@ require("dotenv").config({ path: path.join(__dirname, "..", ".env") });
 
 const mongoose = require("mongoose");
 const Cosmetic = require("../models/cosmeticModel");
-
-const CATALOG = [
-  {
-    type: "table_theme",
-    name: "Classic Green",
-    assetKey: "default",
-    price: 0,
-    rarity: "common",
-    isActive: true,
-  },
-  {
-    type: "table_theme",
-    name: "Midnight Royal",
-    assetKey: "midnight_royal",
-    price: 2500,
-    rarity: "rare",
-    isActive: true,
-  },
-  {
-    type: "table_theme",
-    name: "Burgundy Velvet",
-    assetKey: "burgundy_velvet",
-    price: 5000,
-    rarity: "epic",
-    isActive: true,
-  },
-  {
-    type: "avatar_frame",
-    name: "إطار الملك",
-    assetKey: "royal",
-    price: 3500,
-    rarity: "epic",
-    isActive: true,
-    featured: true,
-    featuredOrder: 1,
-  },
-  {
-    type: "avatar_frame",
-    name: "إطار فضي",
-    assetKey: "silver",
-    price: 1200,
-    rarity: "common",
-    isActive: true,
-  },
-  {
-    type: "card_skin",
-    name: "Standard Deck",
-    assetKey: "default",
-    price: 0,
-    rarity: "common",
-    isActive: true,
-  },
-  {
-    type: "card_skin",
-    name: "Ruby Back",
-    assetKey: "ruby",
-    price: 1500,
-    rarity: "rare",
-    isActive: true,
-    featured: true,
-    featuredOrder: 2,
-    promoMeta: {
-      discountPercent: 15,
-      expiresAt: new Date(Date.now() + 7 * 24 * 60 * 60 * 1000).toISOString(),
-    },
-  },
-];
+const DEFAULT_CATALOG = require("../data/defaultCosmeticsCatalog");
 
 async function main() {
   const uri = process.env.DATABASE_URL || process.env.MONGO_URI || "mongodb://127.0.0.1:27017/play";
   await mongoose.connect(uri);
-  for (const row of CATALOG) {
+
+  for (const row of DEFAULT_CATALOG) {
+    const { type, assetKey, ...rest } = row;
     await Cosmetic.updateOne(
-      { type: row.type, assetKey: row.assetKey },
-      { $setOnInsert: row },
+      { type, assetKey },
+      {
+        $set: {
+          type,
+          assetKey,
+          ...rest,
+        },
+      },
       { upsert: true }
     );
   }
+
+  // Deactivate legacy frames that are no longer sold
+  await Cosmetic.updateMany(
+    { type: "avatar_frame", assetKey: { $in: ["royal", "silver"] } },
+    { $set: { isActive: false } }
+  );
+
   const midnight = await Cosmetic.findOne({
     type: "table_theme",
     assetKey: "midnight_royal",
@@ -111,8 +60,14 @@ async function main() {
       { upsert: true }
     );
   }
+
   const n = await Cosmetic.countDocuments();
-  console.log(`Cosmetics catalog synced. Total documents: ${n}`);
+  const skins = await Cosmetic.countDocuments({
+    type: "avatar_frame",
+    assetKey: /^skin_/,
+    isActive: true,
+  });
+  console.log(`Cosmetics catalog synced. Total: ${n}, country skins: ${skins}`);
   await mongoose.disconnect();
 }
 

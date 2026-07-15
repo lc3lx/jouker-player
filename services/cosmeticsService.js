@@ -61,13 +61,28 @@ function publicCosmeticDisplay(doc) {
   const finalPrice = effectivePrice(doc);
   const promoFeatured = (doc.promoMeta || {}).featured === true || (doc.promoMeta || {}).featured === "true";
   const previewImage = doc.previewImage ? String(doc.previewImage).trim() : null;
+  const skinFile =
+    doc.promoMeta && doc.promoMeta.skinFile
+      ? String(doc.promoMeta.skinFile).trim()
+      : null;
+  const assetPath = skinFile || previewImage;
+  let previewImageUrl = null;
+  if (assetPath) {
+    if (assetPath.startsWith("skin/") || assetPath.startsWith("vip/")) {
+      previewImageUrl = `/assets/${assetPath.replace(/^\/+/, "")}`;
+    } else if (assetPath.startsWith("/assets/") || assetPath.startsWith("http")) {
+      previewImageUrl = assetPath;
+    } else {
+      previewImageUrl = `/uploads/cosmetics/${assetPath}`;
+    }
+  }
   return {
     id: String(doc._id),
     type: doc.type,
     name: doc.name,
     assetKey: doc.assetKey,
     previewImage,
-    previewImageUrl: previewImage ? `/uploads/cosmetics/${previewImage}` : null,
+    previewImageUrl,
     price: finalPrice,
     finalPrice,
     basePrice: base,
@@ -122,37 +137,48 @@ async function addBundleDerivedFields(publicList, leanRows) {
 
 async function ensureDefaultCatalog() {
   const count = await Cosmetic.countDocuments({ isActive: true });
-  if (count > 0) return;
+  if (count === 0) {
+    for (const row of DEFAULT_CATALOG) {
+      await Cosmetic.updateOne(
+        { type: row.type, assetKey: row.assetKey },
+        { $setOnInsert: row },
+        { upsert: true }
+      );
+    }
 
+    const midnight = await Cosmetic.findOne({
+      type: "table_theme",
+      assetKey: "midnight_royal",
+    }).select("_id");
+    const ruby = await Cosmetic.findOne({ type: "card_skin", assetKey: "ruby" }).select("_id");
+    if (midnight && ruby) {
+      await Cosmetic.updateOne(
+        { type: "bundle", assetKey: "starter_mogul_pack" },
+        {
+          $set: {
+            type: "bundle",
+            name: "باقة المبتدئ المميزة",
+            assetKey: "starter_mogul_pack",
+            price: 3200,
+            rarity: "rare",
+            isActive: true,
+            featured: true,
+            featuredOrder: 0,
+            promoMeta: { items: [midnight._id, ruby._id] },
+          },
+        },
+        { upsert: true }
+      );
+    }
+  }
+
+  // Country skins: upsert when missing even if the catalog already has items.
   for (const row of DEFAULT_CATALOG) {
+    if (row.type !== "avatar_frame") continue;
+    if (!String(row.assetKey || "").startsWith("skin_")) continue;
     await Cosmetic.updateOne(
       { type: row.type, assetKey: row.assetKey },
       { $setOnInsert: row },
-      { upsert: true }
-    );
-  }
-
-  const midnight = await Cosmetic.findOne({
-    type: "table_theme",
-    assetKey: "midnight_royal",
-  }).select("_id");
-  const ruby = await Cosmetic.findOne({ type: "card_skin", assetKey: "ruby" }).select("_id");
-  if (midnight && ruby) {
-    await Cosmetic.updateOne(
-      { type: "bundle", assetKey: "starter_mogul_pack" },
-      {
-        $set: {
-          type: "bundle",
-          name: "باقة المبتدئ المميزة",
-          assetKey: "starter_mogul_pack",
-          price: 3200,
-          rarity: "rare",
-          isActive: true,
-          featured: true,
-          featuredOrder: 0,
-          promoMeta: { items: [midnight._id, ruby._id] },
-        },
-      },
       { upsert: true }
     );
   }
@@ -227,7 +253,8 @@ function payloadFromRowAndIdMap(row, idTo) {
     const c = idTo.get(String(row.equipped.avatarFrame));
     if (c && c.type === "avatar_frame") avatarFrame = c.assetKey;
   }
-  return { tableTheme, cardSkin, avatarFrame };
+  // `skin` is the public alias for equipped avatar_frame (country skins).
+  return { tableTheme, cardSkin, avatarFrame, skin: avatarFrame };
 }
 
 /**
@@ -247,6 +274,7 @@ async function resolveEquippedPayloadForUsers(userIds) {
         tableTheme: p.tableTheme ?? null,
         cardSkin: p.cardSkin ?? null,
         avatarFrame: p.avatarFrame ?? null,
+        skin: p.skin ?? p.avatarFrame ?? null,
       });
     } else {
       missing.push(uid);
@@ -257,7 +285,7 @@ async function resolveEquippedPayloadForUsers(userIds) {
   const objectIds = missing.map((s) => toObjectId(s)).filter(Boolean);
   if (objectIds.length === 0) {
     for (const uid of missing) {
-      const empty = { tableTheme: null, cardSkin: null, avatarFrame: null };
+      const empty = { tableTheme: null, cardSkin: null, avatarFrame: null, skin: null };
       await equippedCache.set(uid, empty);
       out.set(uid, empty);
     }
@@ -294,7 +322,7 @@ async function resolveEquippedPayloadForUsers(userIds) {
   for (const oid of objectIds) {
     const uid = String(oid);
     if (!found.has(uid)) {
-      const empty = { tableTheme: null, cardSkin: null, avatarFrame: null };
+      const empty = { tableTheme: null, cardSkin: null, avatarFrame: null, skin: null };
       await equippedCache.set(uid, empty);
       out.set(uid, empty);
     }
@@ -501,14 +529,15 @@ async function autoEquipAfterBuy(userId, cosmeticIdRaw) {
 /** Attach server-truth cosmetics to a public table_state payload (seats[].cosmetics). */
 async function mergeCosmeticsIntoPublicState(state) {
   if (!state || !Array.isArray(state.seats)) return state;
-  const ids = state.seats.map((s) => s.userId).filter(Boolean);
-  const map = await resolveEquippedPayloadForUsers(ids);
+  const {
+    resolvePublicCosmeticsForSeats,
+    emptyCosmetics,
+  } = require("./playerPublicCosmeticsService");
+  const map = await resolvePublicCosmeticsForSeats(state.seats);
   for (const s of state.seats) {
-    s.cosmetics = map.get(String(s.userId)) || {
-      tableTheme: null,
-      cardSkin: null,
-      avatarFrame: null,
-    };
+    const pack = map.get(String(s.userId));
+    s.vipLevel = pack?.vipLevel || null;
+    s.cosmetics = pack?.cosmetics || emptyCosmetics();
   }
   return state;
 }

@@ -6,10 +6,9 @@ const HandHistory = require("../models/handHistoryModel");
 const { newDeck, shuffleDeterministic, draw, sha256Hex, randomInt: secureRandomInt } = require("../utils/poker/deck");
 const { bestOf7, compareHands7 } = require("../utils/poker/handEval");
 const Jackpot = require("../models/jackpotModel");
-const Wallet = require("../models/walletModel");
 const User = require("../models/userModel");
 const { RedisTableStateStore } = require("../utils/tableStateStore");
-const { applyLockedDelta, applyHouseSettlementDelta, withMongoTransaction } = require("../services/walletLedgerService");
+const { applyLockedDelta, applyHouseSettlementDelta, withMongoTransaction, creditJackpotWin } = require("../services/walletLedgerService");
 const logger = require("../utils/logger");
 const tableChat = require("./tableChat");
 const { metrics } = require("../utils/metrics");
@@ -20,6 +19,11 @@ const cosmeticsService = require("../services/cosmeticsService");
 const { attachRedisClient: attachCosmeticsEquippedCache } = require("../utils/cosmeticsEquippedCache");
 const vipService = require("../services/vipService");
 const { attachRedisClient: attachVipLevelCache } = require("../utils/vipLevelCache");
+const {
+  resolvePublicCosmeticsForSeats,
+  publicCosmeticsPayload,
+  emptyCosmetics,
+} = require("../services/playerPublicCosmeticsService");
 const {
   buildPokerLobbyFields,
   derivePokerTableStatus,
@@ -176,6 +180,11 @@ class InMemoryTableLockManager {
     return true;
   }
 
+  /** In-memory locks never expire — renewal is a no-op success. */
+  async renew(tableId) {
+    return this.locks.has(tableId);
+  }
+
   async release(tableId) {
     if (!tableId) return;
     this.locks.delete(tableId);
@@ -204,6 +213,33 @@ class RedisTableLockManager {
     if (ok !== "OK") return false;
     this.tokens.set(tableId, token);
     return true;
+  }
+
+  /**
+   * H-2: extend the lease while a long critical section (showdown pacing +
+   * settlement) is still running. Token-checked so we never extend a lock a
+   * different instance has since acquired.
+   */
+  async renew(tableId) {
+    if (!tableId || !this.redis) return false;
+    const token = this.tokens.get(tableId);
+    if (!token) return false;
+    const lua = `
+      if redis.call("GET", KEYS[1]) == ARGV[1] then
+        return redis.call("PEXPIRE", KEYS[1], ARGV[2])
+      else
+        return 0
+      end
+    `;
+    try {
+      const res = await this.redis.eval(lua, {
+        keys: [this.lockKey(tableId)],
+        arguments: [token, String(this.ttlMs)],
+      });
+      return res === 1;
+    } catch (_) {
+      return false;
+    }
   }
 
   async release(tableId) {
@@ -349,6 +385,8 @@ class PokerTable {
     this.turnTimer = null;
     this.botThinkTimer = null;
     this.botFillTimer = null;
+    /** H-2: renews the Redis action lock while a critical section runs. */
+    this.lockHeartbeatTimer = null;
     this.actionDeadline = null;
     this.botFillDeadline = null;
     this.waitForPlayersTimer = null;
@@ -360,7 +398,12 @@ class PokerTable {
     this.pendingVacates = new Map();
     this.vacateTimers = new Map();
     this.spectatorUserIds = new Set();
+    /** N-3: periodic delayed-feed pump for spectators (runs only while any watch). */
+    this.spectatorDrainTimer = null;
+    this.lastSpectatorEmittedRev = -1;
     this.handStartTotal = 0;
+    /** C-5: human jackpot fees taken this hand — excluded from the house delta. */
+    this.handJackpotFees = 0;
     this.uncollectedRake = 0;
     this.frozen = false;
     this.tableStatusOverride = null;
@@ -492,11 +535,37 @@ class PokerTable {
   }
 
   async acquireActionLock() {
-    return this.lockManager.acquire(this.tableId);
+    const ok = await this.lockManager.acquire(this.tableId);
+    if (ok) this.startLockHeartbeat();
+    return ok;
   }
 
   async releaseActionLock() {
+    this.stopLockHeartbeat();
     await this.lockManager.release(this.tableId);
+  }
+
+  /**
+   * H-2: the paced advance (ACTION_REVEAL_MS + street sleeps) and the showdown
+   * tail (1.5s pause + 4s hold + settlement) run INSIDE the action lock and can
+   * exceed its Redis TTL. Renew the lease on a sub-TTL cadence so it stays held
+   * for the whole critical section instead of silently expiring mid-settlement.
+   */
+  startLockHeartbeat() {
+    if (this.lockHeartbeatTimer) return;
+    if (typeof this.lockManager.renew !== "function") return;
+    const ttlMs = toSafeInt(this.lockManager.ttlMs, 8000);
+    const periodMs = Math.max(1000, Math.floor(ttlMs / 3));
+    this.lockHeartbeatTimer = setInterval(() => {
+      void Promise.resolve(this.lockManager.renew(this.tableId)).catch(() => {});
+    }, periodMs);
+  }
+
+  stopLockHeartbeat() {
+    if (this.lockHeartbeatTimer) {
+      clearInterval(this.lockHeartbeatTimer);
+      this.lockHeartbeatTimer = null;
+    }
   }
 
   actionIdempotencyKey(actionId) {
@@ -576,10 +645,11 @@ class PokerTable {
         playerState: s.playerState || PLAYER_STATE.SEATED,
         disconnectedAt: s.disconnectedAt || null,
         reconnectDeadline: s.reconnectDeadline || null,
+        vipLevel: s.vipLevel || null,
         cosmetics:
           s.cosmetics && typeof s.cosmetics === "object"
-            ? { ...s.cosmetics }
-            : { tableTheme: null, cardSkin: null },
+            ? publicCosmeticsPayload(s.cosmetics)
+            : emptyCosmetics(),
       })),
       actionSpec: this.computeTurnActionSpec(this.currentIndex),
       lastAction: this.computeLastTableAction(),
@@ -647,10 +717,11 @@ class PokerTable {
         playerState: s.playerState || PLAYER_STATE.SEATED,
         disconnectedAt: s.disconnectedAt || null,
         reconnectDeadline: s.reconnectDeadline || null,
+        vipLevel: s.vipLevel || null,
         cosmetics:
           s.cosmetics && typeof s.cosmetics === "object"
-            ? { tableTheme: s.cosmetics.tableTheme || null, cardSkin: s.cosmetics.cardSkin || null }
-            : { tableTheme: null, cardSkin: null },
+            ? publicCosmeticsPayload(s.cosmetics)
+            : emptyCosmetics(),
       }));
       if (this.seats.length > 0) {
         this.dealerIndex =
@@ -812,13 +883,11 @@ class PokerTable {
         }),
         bet: toSafeInt(s.bet, 0),
         lastAction: s.lastAction && typeof s.lastAction === "object" ? { ...s.lastAction } : null,
+        vipLevel: s.vipLevel || null,
         cosmetics:
           s.cosmetics && typeof s.cosmetics === "object"
-            ? {
-                tableTheme: s.cosmetics.tableTheme || null,
-                cardSkin: s.cosmetics.cardSkin || null,
-              }
-            : { tableTheme: null, cardSkin: null },
+            ? publicCosmeticsPayload(s.cosmetics)
+            : emptyCosmetics(),
       })),
     };
   }
@@ -1016,18 +1085,37 @@ class PokerTable {
       const share = Math.max(0, Math.floor(amount / winners.length));
       if (share <= 0) return;
 
-      for (const wi of winners) {
-        const userId = this.seats[wi].userId;
-        if (!userId || isBotUserId(userId)) continue;
-        let wallet = await Wallet.findOne({ user: userId });
-        if (!wallet) wallet = await Wallet.create({ user: userId });
-        await wallet.addTransaction('credit', share, `Golden Island jackpot (${type})`);
-      }
-
-      j.pot = Math.max(0, (j.pot || 0) - (share * winners.length));
-      await j.save();
+      const handId = this.currentHandId;
+      // C-5: pay atomically through the ledger (never the legacy embedded
+      // wallet.transactions path), decrementing the jackpot pool in the SAME
+      // transaction, and idempotent per (winner, hand).
+      await withMongoTransaction(async (session) => {
+        const jTx = await Jackpot.getSingleton();
+        let paidOut = 0;
+        for (const wi of winners) {
+          const userId = this.seats[wi]?.userId;
+          if (!userId || isBotUserId(userId)) continue;
+          const credited = await creditJackpotWin({
+            session,
+            userId,
+            amount: share,
+            handId,
+            meta: { reason: "golden_island_jackpot", jackpotType: type, tableId: this.tableId },
+          });
+          if (credited) paidOut += share;
+        }
+        if (paidOut > 0) {
+          jTx.pot = Math.max(0, toSafeInt(jTx.pot, 0) - paidOut);
+          await jTx.save(session ? { session } : undefined);
+        }
+      });
     } catch (e) {
-      // ignore jackpot payout errors to not block gameplay
+      // Never let a jackpot payout error block hand settlement / next hand.
+      logger.warn("poker_jackpot_payout_failed", {
+        tableId: this.tableId,
+        handId: this.currentHandId,
+        reason: e?.message || "unknown",
+      });
     }
   }
 
@@ -1072,7 +1160,8 @@ class PokerTable {
         lastAction: null,
         actedThisStreet: false,
         seatPosition: chair,
-        cosmetics: { tableTheme: null, cardSkin: null },
+        cosmetics: emptyCosmetics(),
+        vipLevel: null,
         playerState: seatDefaults.playerState,
         disconnectedAt: null,
         reconnectDeadline: null,
@@ -1120,6 +1209,10 @@ class PokerTable {
     }
     this.vacateTimers.clear();
     this.pendingVacates.clear();
+    this.stopLockHeartbeat();
+    this.stopSpectatorDrain();
+    this.lastSpectatorEmittedRev = -1;
+    require("../services/spectatorDelayService").clearTable(this.tableId);
 
     this.currentHandId = null;
     this.currentHandActions = [];
@@ -1201,7 +1294,8 @@ class PokerTable {
           lastAction: null,
           actedThisStreet: false,
           seatPosition: chair != null ? chair : undefined,
-          cosmetics: { tableTheme: null, cardSkin: null },
+          cosmetics: emptyCosmetics(),
+          vipLevel: null,
           playerState: PLAYER_STATE.WAITING,
           disconnectedAt: null,
           reconnectDeadline: null,
@@ -1251,27 +1345,22 @@ class PokerTable {
   }
 
   async applyCosmeticsToSeats() {
-    const humanIds = this.seats
-      .filter((s) => s.userId && !s.isBot && !isBotUserId(String(s.userId)))
-      .map((s) => String(s.userId));
-    if (humanIds.length === 0) {
-      for (const s of this.seats) {
-        if (!s.cosmetics) s.cosmetics = { tableTheme: null, cardSkin: null };
-        s.vipLevel = null;
-      }
-      return;
-    }
-    const map = await cosmeticsService.resolveEquippedPayloadForUsers(humanIds);
-    const vipMap = await vipService.getVipLevelsForUsers(humanIds);
+    const seatsForResolve = this.seats.map((s) => ({
+      userId: s.userId,
+      isBot: !!(s.isBot || (s.userId && isBotUserId(String(s.userId)))),
+    }));
+    const map = await resolvePublicCosmeticsForSeats(seatsForResolve);
     for (const s of this.seats) {
-      if (s.isBot || isBotUserId(String(s.userId))) {
-        s.cosmetics = { tableTheme: null, cardSkin: null };
+      if (!s.userId || s.isBot || isBotUserId(String(s.userId))) {
+        s.cosmetics = emptyCosmetics();
         s.vipLevel = null;
         continue;
       }
-      const c = map.get(String(s.userId));
-      s.cosmetics = c ? { ...c } : { tableTheme: null, cardSkin: null };
-      s.vipLevel = vipMap.get(String(s.userId)) || null;
+      const row = map.get(String(s.userId));
+      s.vipLevel = row?.vipLevel || null;
+      s.cosmetics = row?.cosmetics
+        ? { ...row.cosmetics }
+        : emptyCosmetics();
     }
   }
 
@@ -2119,6 +2208,9 @@ class PokerTable {
 
     // Jackpot contribution per hand (Golden Island) — skipped when fee is 0.
     const jackpotDeducted = await this.applyJackpotContribution();
+    // C-5: remember the human jackpot fees so settlement can exclude them from
+    // the house counterparty (the fees went to the jackpot pool, not the house).
+    this.handJackpotFees = toSafeInt(jackpotDeducted, 0);
 
     this.handStartTotal = this.seats.reduce(
       (sum, s) => sum + toSafeInt(s.handStartChips, toSafeInt(s.chips, 0)),
@@ -2837,6 +2929,40 @@ class PokerTable {
     }
   }
 
+  /**
+   * N-1: publish a Mongo-visible "settlement in progress" marker so a concurrent
+   * REST leave-cashout backs off (409) instead of racing the seat-chip write.
+   */
+  async _acquireSettlementLock() {
+    if (!mongoose.isValidObjectId(this.tableId)) return;
+    try {
+      await Table.updateOne(
+        { _id: this.tableId },
+        { $set: { activeSettlementId: this.currentHandId || `${this.tableId}:settle` } }
+      );
+    } catch (e) {
+      logger.warn("poker_settlement_lock_acquire_failed", {
+        tableId: this.tableId,
+        reason: e?.message || "unknown",
+      });
+    }
+  }
+
+  async _releaseSettlementLock() {
+    if (!mongoose.isValidObjectId(this.tableId)) return;
+    try {
+      await Table.updateOne(
+        { _id: this.tableId },
+        { $set: { activeSettlementId: null } }
+      );
+    } catch (e) {
+      logger.warn("poker_settlement_lock_release_failed", {
+        tableId: this.tableId,
+        reason: e?.message || "unknown",
+      });
+    }
+  }
+
   async persistAndPrepareNext(community, payoutBySeat, winnerIdxs, meta = {}, opts = {}) {
     const manageLifecycle = opts.manageLifecycle !== false;
     // Rake simple percentage
@@ -2881,16 +3007,20 @@ class PokerTable {
         }
       }
     }
+    // C-1 commit-then-apply: compute the intended post-settlement stacks WITHOUT
+    // mutating the live seats. The engine's RAM stacks are advanced only after the
+    // DB transaction commits (below), so a settlement failure can never leave the
+    // engine ahead of the wallet/DB — the two always stay reconcilable.
+    const potTotal = toSafeInt(this.pot, 0);
+    const intendedChips = this.seats.map((s) => toSafeInt(s.chips, 0));
     const winners = [];
     for (const [idx, share] of payouts.entries()) {
       if (!Number.isFinite(share) || share <= 0) continue;
-      this.seats[idx].chips += share;
+      intendedChips[idx] = toSafeInt(intendedChips[idx], 0) + share;
       if (!this.seats[idx].isBot && !isBotUserId(this.seats[idx].userId)) {
         winners.push({ user: this.seats[idx].userId, share });
       }
     }
-
-    this.resetHandBettingState();
 
     const winnerSummaries = [];
     for (const [idx, share] of payouts.entries()) {
@@ -2910,7 +3040,7 @@ class PokerTable {
 
     const seatSummaries = this.seats.map((s, idx) => {
       const chipsBefore = toSafeInt(s.handStartChips, s.chips);
-      const chipsAfter = toSafeInt(s.chips, 0);
+      const chipsAfter = toSafeInt(intendedChips[idx], 0);
       const rankInfo = showdownRanks ? showdownRanks.get(idx) : null;
       const atShowdown = meta.reason === "showdown" && s.inHand && !s.folded;
       return {
@@ -2964,7 +3094,7 @@ class PokerTable {
       handId: this.currentHandId,
       reason: meta.reason || (showdownRanks ? "showdown" : "fold"),
       endedAt: Date.now(),
-      pot: this.pot,
+      pot: potTotal,
       rake,
       community: [...community],
       winners: winnerSummaries,
@@ -2980,12 +3110,26 @@ class PokerTable {
       },
     };
 
+    // N-1: block a concurrent REST leave-cashout for the duration of settlement.
+    await this._acquireSettlementLock();
+
     // Atomic financial + history settlement
     const auditLog = buildHandAuditLog(this.currentHandActions, this.seats, community);
     let settledHandHistoryId = null;
+    let alreadySettled = false;
     try {
       await withMongoTransaction(async (session) => {
         const createOpts = session ? { session } : {};
+        // C-1 idempotency: if this hand already persisted (a retried settlement or
+        // a crash-recovery replay), never double-apply wallet deltas.
+        const existingHand = await (session
+          ? HandHistory.findOne({ handId: this.currentHandId }).session(session)
+          : HandHistory.findOne({ handId: this.currentHandId }));
+        if (existingHand) {
+          settledHandHistoryId = existingHand._id || null;
+          alreadySettled = true;
+          return;
+        }
         const [handDoc] = await HandHistory.create(
           [
             {
@@ -2998,12 +3142,17 @@ class PokerTable {
               startedAt: this.handStartedAt ? new Date(this.handStartedAt) : new Date(),
               players: this.seats
                 .filter((s) => !s.isBot)
-                .map((s) => ({
-                  user: s.userId,
-                  seatIndex: this.seats.findIndex((x) => String(x.userId) === String(s.userId)),
-                  chipsBefore: toSafeInt(s.handStartChips, s.chips),
-                  chipsAfter: s.chips,
-                })),
+                .map((s) => {
+                  const seatIdx = this.seats.findIndex(
+                    (x) => String(x.userId) === String(s.userId)
+                  );
+                  return {
+                    user: s.userId,
+                    seatIndex: seatIdx,
+                    chipsBefore: toSafeInt(s.handStartChips, s.chips),
+                    chipsAfter: toSafeInt(intendedChips[seatIdx], 0),
+                  };
+                }),
               actions: this.currentHandActions.map((a) => ({
                 ts: a.ts,
                 round: a.round,
@@ -3015,15 +3164,15 @@ class PokerTable {
               })),
               auditLog,
               community,
-              pot: this.pot,
+              pot: potTotal,
               rake,
               winners,
               potDistribution: potDistributionFinal || [],
               handCategory: handCategory || null,
-              seats: this.seats.map((s) => ({
+              seats: this.seats.map((s, i) => ({
                 user: s.isBot ? undefined : s.userId,
                 chipsBefore: toSafeInt(s.handStartChips, s.chips),
-                chipsAfter: s.chips,
+                chipsAfter: toSafeInt(intendedChips[i], 0),
                 hole: s.hole,
               })),
               endedAt: new Date(),
@@ -3044,21 +3193,27 @@ class PokerTable {
         const table = session ? await tableQuery.session(session) : await tableQuery;
         if (table) {
           let humanNetDelta = 0;
-          for (const s of this.seats) {
-            if (s.isBot || isBotUserId(s.userId)) continue;
+          this.seats.forEach((s, i) => {
+            if (s.isBot || isBotUserId(s.userId)) return;
             const chipsBefore = toSafeInt(s.handStartChips, s.chips);
-            const chipsAfter = toSafeInt(s.chips, 0);
+            const chipsAfter = toSafeInt(intendedChips[i], 0);
             humanNetDelta += chipsAfter - chipsBefore;
-          }
-          if (humanNetDelta !== 0) {
+          });
+          // C-5: the human jackpot fees left the table into the jackpot POOL, not
+          // the house — exclude them from the house counterparty so the fee is not
+          // counted twice (once into the pool, once as house income).
+          const jackpotFeesToPool = toSafeInt(this.handJackpotFees, 0);
+          const houseDelta = -humanNetDelta - jackpotFeesToPool;
+          if (houseDelta !== 0) {
             await applyHouseSettlementDelta({
               session,
-              delta: -humanNetDelta,
+              delta: houseDelta,
               tableId: this.tableId,
               handId: this.currentHandId,
               meta: {
                 reason: "poker_hand_settlement_counterparty",
                 round: this.round,
+                jackpotFeesToPool,
               },
             });
           }
@@ -3071,7 +3226,7 @@ class PokerTable {
               (x) => String(x.userId) === String(tSeat.user)
             );
             const chipsBefore = toSafeInt(s.handStartChips, s.chips);
-            const chipsAfter = toSafeInt(s.chips, 0);
+            const chipsAfter = toSafeInt(intendedChips[seatIdx], 0);
             const delta = chipsAfter - chipsBefore;
             const rakeCut = toSafeInt(cutsBySeat.get(seatIdx) || 0, 0);
 
@@ -3097,7 +3252,23 @@ class PokerTable {
         }
       });
 
-      try {
+      // C-1: the transaction committed — now advance the engine's RAM stacks to
+      // match the persisted result. (If it threw, we skip this and freeze below,
+      // leaving RAM equal to the rolled-back DB.) On an idempotent replay the
+      // wallets were untouched, so RAM must not be re-advanced either.
+      if (!alreadySettled) {
+        this.seats.forEach((s, i) => {
+          s.chips = toSafeInt(intendedChips[i], 0);
+        });
+        this.resetHandBettingState();
+      } else {
+        this.logSuspicious("settlement_replay_skipped", {
+          handId: this.currentHandId,
+        });
+      }
+
+      // Stats / analytics / archive only fire for the FIRST persist of a hand.
+      if (!alreadySettled) try {
         const humanIds = this.seats
           .filter((s) => !s.isBot && !isBotUserId(s.userId))
           .map((s) => s.userId);
@@ -3155,7 +3326,7 @@ class PokerTable {
         });
       }
 
-      if (settledHandHistoryId) {
+      if (!alreadySettled && settledHandHistoryId) {
         void require("../services/phase3HandArchiveService")
           .onHandSettled({
             handId: this.currentHandId,
@@ -3186,14 +3357,35 @@ class PokerTable {
           });
       }
     } catch (e) {
-      // Log settlement failure but keep the table running — chips are already
-      // updated in the live engine; blocking the next hand strands all players.
+      // C-1: the settlement transaction did NOT commit. Because RAM stacks were
+      // left untouched (they still equal the rolled-back DB and pot), freeze the
+      // table for manual reconcile instead of continuing an unsettled hand.
       this.logSuspicious("financial_settlement_failed", {
         tableId: this.tableId,
         handId: this.currentHandId,
         reason: e?.message || "unknown",
       });
+      metrics.errorsTotal.inc({ type: "financial_settlement_failed" });
+      this.frozen = true;
+      this.running = false;
+      this.tableStatusOverride = "frozen";
+      this.clearActionScheduling();
+      this.clearBotFillTimer();
+      void sendAlert("poker_settlement_failed", {
+        tableId: this.tableId,
+        handId: this.currentHandId,
+        reason: e?.message || "unknown",
+      });
+      await this._releaseSettlementLock();
+      try {
+        await this.broadcastState();
+      } catch (_) {
+        /* ignore broadcast errors during freeze */
+      }
+      return;
     }
+
+    await this._releaseSettlementLock();
 
     // Prepare next hand: move dealer to next alive seat
     const order = this.seatOrderFrom(this.dealerIndex);
@@ -3275,13 +3467,8 @@ class PokerTable {
         playerState: s.playerState || PLAYER_STATE.SEATED,
         reconnectDeadline: s.reconnectDeadline || null,
         lastAction: s.lastAction && typeof s.lastAction === "object" ? { ...s.lastAction } : null,
-        cosmetics:
-          s.cosmetics && typeof s.cosmetics === "object"
-            ? {
-                tableTheme: s.cosmetics.tableTheme || null,
-                cardSkin: s.cosmetics.cardSkin || null,
-              }
-            : { tableTheme: null, cardSkin: null },
+        vipLevel: s.vipLevel || null,
+        cosmetics: publicCosmeticsPayload(s.cosmetics),
       })),
     };
   }
@@ -3297,6 +3484,7 @@ class PokerTable {
     const pub = this.getPublicState(null);
     const spectatorDelay = require("../services/spectatorDelayService");
     spectatorDelay.enqueueSpectatorState(this.tableId, pub);
+    if (this.spectatorUserIds.size > 0) this.startSpectatorDrain();
 
     try {
       const sockets = await this.nsp.in(room).fetchSockets();
@@ -3315,9 +3503,14 @@ class PokerTable {
             .markPlaying(uid, { gameType: "poker", tableId: this.tableId })
             .catch(() => {});
         } else if (isSpectator) {
-          const delayed = spectatorDelay.getLatestDelayedState(this.tableId) || pub;
-          sock.emit("table_state", delayed);
-          sock.emit("state", delayed);
+          // N-3: spectators only ever receive DELAYED frames — never live state.
+          // When no frame is ready yet, skip; the drain timer delivers it later.
+          const delayed = spectatorDelay.getLatestDelayedState(this.tableId);
+          if (delayed) {
+            this.lastSpectatorEmittedRev = toSafeInt(delayed.stateRevision, 0);
+            sock.emit("table_state", delayed);
+            sock.emit("state", delayed);
+          }
           void require("../services/presenceService")
             .markWatching(uid, { gameType: "poker", tableId: this.tableId })
             .catch(() => {});
@@ -3329,6 +3522,80 @@ class PokerTable {
         tableId: this.tableId,
         reason: e?.message || "unknown",
       });
+    }
+  }
+
+  /**
+   * N-3: neutral frame for a spectator who joined before any delayed frame is
+   * ready — seat roster only, zero live-hand data (round/board/pot/bets/turn).
+   * stateRevision 0 so the OLDER delayed frames that follow are not dropped by
+   * the client's monotonic revision gate.
+   */
+  buildSpectatorWaitingState() {
+    const pub = this.getPublicState(null);
+    return {
+      ...pub,
+      stateRevision: 0,
+      spectatorPending: true,
+      round: "idle",
+      community: [],
+      pot: 0,
+      currentBet: 0,
+      turnUserId: null,
+      actionDeadline: null,
+      lastHand: null,
+      lastAction: null,
+      actionSpec: emptyClientActionSpec(),
+      seats: pub.seats.map((s, i) => ({
+        ...s,
+        // Start-of-hand stacks only — live stacks would reveal bet sizes.
+        chips: toSafeInt(this.seats[i]?.handStartChips, toSafeInt(s.chips, 0)),
+        inHand: false,
+        folded: false,
+        allIn: false,
+        bet: 0,
+        hole: [null, null],
+        lastAction: null,
+      })),
+    };
+  }
+
+  startSpectatorDrain() {
+    if (this.spectatorDrainTimer) return;
+    this.spectatorDrainTimer = setInterval(() => {
+      void this.drainSpectatorFrame();
+    }, 1000);
+  }
+
+  stopSpectatorDrain() {
+    if (this.spectatorDrainTimer) {
+      clearInterval(this.spectatorDrainTimer);
+      this.spectatorDrainTimer = null;
+    }
+  }
+
+  /** Pump the newest READY delayed frame to spectators (deduped by revision). */
+  async drainSpectatorFrame() {
+    if (this.spectatorUserIds.size === 0) {
+      this.stopSpectatorDrain();
+      return;
+    }
+    const spectatorDelay = require("../services/spectatorDelayService");
+    const delayed = spectatorDelay.getLatestDelayedState(this.tableId);
+    if (!delayed) return;
+    const rev = toSafeInt(delayed.stateRevision, 0);
+    if (rev <= this.lastSpectatorEmittedRev) return;
+    this.lastSpectatorEmittedRev = rev;
+    try {
+      const sockets = await this.nsp.in(`tg:${this.tableId}`).fetchSockets();
+      for (const sock of sockets) {
+        const uid = sock.userId;
+        if (!uid || !this.spectatorUserIds.has(String(uid))) continue;
+        sock.emit("table_state", delayed);
+        sock.emit("state", delayed);
+      }
+    } catch (_) {
+      /* transient fetch failure — next tick retries */
     }
   }
 
@@ -3439,7 +3706,7 @@ class PokerTable {
       }
 
       const { action, amount, actionId } = payload || {};
-      const normalizedAction = String(action || "").toLowerCase();
+      let normalizedAction = String(action || "").toLowerCase();
       const normalizedActionId =
         typeof actionId === "string" && actionId.trim().length > 0
           ? actionId.trim().slice(0, 128)
@@ -3451,6 +3718,11 @@ class PokerTable {
       }
 
       const spec = this.computeTurnActionSpec(idx);
+      // "call" with nothing to call IS a check (spec only lists one of the two;
+      // a client racing a bet-level change may legitimately send the other).
+      if (normalizedAction === "call" && spec && spec.canCheck) {
+        normalizedAction = "check";
+      }
       if (!spec || !spec.allowed || !spec.allowed.includes(normalizedAction)) {
         this.logSuspicious("action_not_allowed", {
           userId,
@@ -3795,12 +4067,18 @@ function initTableGame(io, options = {}) {
         const game = await registry.get(String(tableId));
         if (game) {
           game.spectatorUserIds.add(String(socket.userId));
-          const pub = game.getPublicState(null);
-          socket.emit("table_state", pub);
-          socket.emit("state", pub);
-          socket.emit("table_state_me", pub);
-          socket.emit("reconnect_state", pub);
-          socket.emit("state:me", pub);
+          game.startSpectatorDrain();
+          // N-3: never hand a spectator live state — latest delayed frame, or a
+          // neutral roster-only placeholder until the delayed feed is ready.
+          const spectatorDelay = require("../services/spectatorDelayService");
+          const frame =
+            spectatorDelay.getLatestDelayedState(String(tableId)) ||
+            game.buildSpectatorWaitingState();
+          socket.emit("table_state", frame);
+          socket.emit("state", frame);
+          socket.emit("table_state_me", frame);
+          socket.emit("reconnect_state", frame);
+          socket.emit("state:me", frame);
         }
         socket.emit("table_event", { type: "spectating", tableId: String(tableId) });
       } catch (e) {
@@ -3817,6 +4095,10 @@ function initTableGame(io, options = {}) {
     socket.on("leave_table", async ({ tableId }) => {
       if (!tableId) return;
       socket.leave(`tg:${tableId}`);
+      const entry = registry.map.get(String(tableId));
+      if (entry?.game) {
+        entry.game.spectatorUserIds.delete(String(socket.userId));
+      }
       socket.emit("table_event", { type: "left", tableId: String(tableId) });
     });
 
@@ -3928,7 +4210,13 @@ function initTableGame(io, options = {}) {
     socket.on("disconnect", () => {
       security.onDisconnect(socket, socket.userId);
       metrics.activePlayers.dec();
-      if (socket.isSpectator) return;
+      if (socket.isSpectator) {
+        // N-3: release the spectator registration so the drain timer can stop.
+        for (const { game } of registry.map.values()) {
+          game.spectatorUserIds.delete(String(socket.userId));
+        }
+        return;
+      }
       for (const { game } of registry.map.values()) {
         const idx = game.findSeatIndexByUser(socket.userId);
         if (idx >= 0) {
@@ -3942,30 +4230,47 @@ function initTableGame(io, options = {}) {
 
 let activeRegistry = null;
 
-async function refreshCosmeticsForUserOnTables(userId) {
+async function refreshCosmeticsForUserOnTables(userId, { emitVipUpdated = false } = {}) {
   if (!activeRegistry || !userId) return;
-  const map = await cosmeticsService.resolveEquippedPayloadForUsers([userId]);
-  const c = map.get(String(userId)) || { tableTheme: null, cardSkin: null };
   const uidStr = String(userId);
+  const map = await resolvePublicCosmeticsForSeats([
+    { userId: uidStr, isBot: false },
+  ]);
+  const row = map.get(uidStr);
+  const cosmetics = row?.cosmetics || emptyCosmetics();
+  const vipLevel = row?.vipLevel || null;
   for (const { game } of activeRegistry.map.values()) {
     const idx = game.findSeatIndexByUser(userId);
     if (idx >= 0) {
-      game.seats[idx].cosmetics = { ...c };
+      game.seats[idx].cosmetics = { ...cosmetics };
+      game.seats[idx].vipLevel = vipLevel;
       const room = `tg:${game.tableId}`;
-      // Persist seat cosmetics (bumps stateRevision), then targeted emit — snapshot stays source of truth.
       try {
         await game.saveSnapshot({ finished: false });
         game.nsp.to(room).emit("cosmetics_updated", {
           tableId: String(game.tableId),
           userId: uidStr,
-          cosmetics: { tableTheme: c.tableTheme, cardSkin: c.cardSkin },
+          vipLevel,
+          cosmetics: publicCosmeticsPayload(cosmetics),
           stateRevision: toSafeInt(game.stateRevision, 0),
         });
+        if (emitVipUpdated) {
+          game.nsp.to(room).emit("vip_updated", {
+            tableId: String(game.tableId),
+            userId: uidStr,
+            vipLevel,
+          });
+        }
       } catch (_) {
         /* ignore emit / snapshot errors */
       }
     }
   }
+}
+
+/** Re-apply VIP level + VIP table/card themes after membership change (no profile skin). */
+async function refreshVipForUserOnTables(userId) {
+  return refreshCosmeticsForUserOnTables(userId, { emitVipUpdated: true });
 }
 
 function evictTableFromRegistry(tableId) {
@@ -3978,6 +4283,8 @@ function evictTableFromRegistry(tableId) {
     game.clearActionScheduling?.();
     game.clearBotFillTimer?.();
     game.clearWaitForPlayersTimer?.();
+    game.stopSpectatorDrain?.();
+    game.stopLockHeartbeat?.();
     game.running = false;
   }
   activeRegistry.map.delete(tid);
@@ -4152,6 +4459,7 @@ module.exports = {
   getLiveTableGameForAdmin,
   adminForceEndHandTable,
   refreshCosmeticsForUserOnTables,
+  refreshVipForUserOnTables,
   /** @internal unit tests — hole visibility contract */
   mapHoleForClientView,
 };

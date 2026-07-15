@@ -7,6 +7,7 @@ const { metrics } = require("../utils/metrics");
 const { sendAlert } = require("../utils/alert");
 const { recordActivityFromTransaction } = require("./activityService");
 const { applyHouseDelta, ensureHouseWalletExists } = require("./houseWalletService");
+const { isProduction } = require("../utils/appConfig");
 
 function toSafeInt(value, fallback = 0) {
   const n = Number(value);
@@ -31,11 +32,25 @@ function isTransactionUnsupportedError(err) {
 let _mongoTxnCapability = "unknown";
 let _mongoTxnProbePromise = null;
 
+/**
+ * C-4: transactions are MANDATORY in production. This keys off the canonical
+ * `isProduction()` (APP_MODE) — the same definition validateProductionChecks and
+ * fraud strictness use — so a misconfigured NODE_ENV can no longer silently
+ * re-enable the non-transactional fallback. `REQUIRE_MONGO_TRANSACTIONS=true`
+ * forces fail-closed in any environment.
+ */
+function requireTransactions() {
+  if (String(process.env.REQUIRE_MONGO_TRANSACTIONS || "").toLowerCase() === "true") {
+    return true;
+  }
+  return isProduction();
+}
+
 function allowNonTransactionFallback() {
+  if (requireTransactions()) return false;
   return (
-    process.env.NODE_ENV !== "production" &&
     String(process.env.ALLOW_NON_TRANSACTION_FALLBACK || "true").toLowerCase() !==
-      "false"
+    "false"
   );
 }
 
@@ -111,6 +126,22 @@ async function _runMongoTransactionProbe() {
 function resetMongoTransactionProbeForTests() {
   _mongoTxnCapability = "unknown";
   _mongoTxnProbePromise = null;
+}
+
+/**
+ * C-4 boot gate: fail fast at startup if transactions are required (production /
+ * REQUIRE_MONGO_TRANSACTIONS) but the Mongo deployment cannot provide them,
+ * instead of discovering it at the first hand settlement.
+ */
+async function assertTransactionsAvailableOrThrow() {
+  const capability = await probeMongoTransactions();
+  if (requireTransactions() && capability !== "supported") {
+    throw new Error(
+      "MONGO_TRANSACTIONS_REQUIRED: production requires a MongoDB replica set or mongos. " +
+        "Provision a replica set, or unset APP_MODE=production / REQUIRE_MONGO_TRANSACTIONS for non-prod."
+    );
+  }
+  return capability;
 }
 
 async function getOrCreateTableLock(userId, tableId, session) {
@@ -775,9 +806,50 @@ async function ledgerWithdraw({ session, userId, amount, meta = {}, ledgerType =
   return wallet;
 }
 
+/**
+ * C-5: credit a jackpot win to available balance inside the caller's transaction,
+ * with a proper ledger row (never the legacy embedded `wallet.transactions` path).
+ * Idempotent per (userId, handId): a retried/replayed payout never double-credits.
+ */
+async function creditJackpotWin({ session, userId, amount, handId = null, meta = {} }) {
+  const amt = toSafeInt(amount, 0);
+  if (amt <= 0) return null;
+
+  if (handId) {
+    const dup = await withOptionalSession(
+      WalletTransaction.findOne({ userId, handId, type: "island_jackpot_win" }),
+      session
+    );
+    if (dup) return null;
+  }
+
+  const wallet = await getOrCreateWallet(userId, session);
+  const before = {
+    balance: toSafeInt(wallet.balance, 0),
+    lockedBalance: toSafeInt(wallet.lockedBalance, 0),
+  };
+  wallet.balance = before.balance + amt;
+  await wallet.save(sessionOptions(session));
+
+  await appendWalletTransaction({
+    session,
+    userId,
+    type: "island_jackpot_win",
+    amount: amt,
+    handId,
+    walletBefore: before,
+    walletAfter: { balance: wallet.balance, lockedBalance: wallet.lockedBalance || 0 },
+    meta,
+  });
+  return wallet;
+}
+
 module.exports = {
   withMongoTransaction,
   probeMongoTransactions,
+  assertTransactionsAvailableOrThrow,
+  /** Exposed for validateProductionChecks — reflects the canonical fail-closed gate. */
+  allowNonTransactionFallbackForChecks: allowNonTransactionFallback,
   resetMongoTransactionProbeForTests,
   getOrCreateWallet,
   transferToLocked,
@@ -788,6 +860,7 @@ module.exports = {
   recordSettlementLedger,
   ledgerDeposit,
   ledgerWithdraw,
+  creditJackpotWin,
   appendBalancesUnchanged,
   getTableLockAmount,
   addTableLock,

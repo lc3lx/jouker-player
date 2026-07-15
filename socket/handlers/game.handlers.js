@@ -538,7 +538,8 @@ function registerGameHandlers(nsp, jwtVerify) {
           return;
         }
 
-        game.syncLobbyFromTable(table, (uid) => roomManager.getTrixUserSocket(String(uid)));
+        await game.syncLobbyFromTable(table, (uid) => roomManager.getTrixUserSocket(String(uid)));
+        await game.applyCosmeticsToPlayers();
         if (!game.gameState) {
           game.startGame();
         }
@@ -554,7 +555,7 @@ function registerGameHandlers(nsp, jwtVerify) {
               nm = String(seat.user.name);
             }
             if (
-              game.restoreHumanAtSeat(
+              await game.restoreHumanAtSeat(
                 mongoSeatIdx,
                 userId,
                 socket.id,
@@ -562,11 +563,13 @@ function registerGameHandlers(nsp, jwtVerify) {
               )
             ) {
               seatIndex = mongoSeatIdx;
+              await game.applyCosmeticsToPlayers();
             }
           }
         }
         if (seatIndex < 0) {
-          game.syncLobbyFromTable(table, (uid) => roomManager.getTrixUserSocket(String(uid)));
+          await game.syncLobbyFromTable(table, (uid) => roomManager.getTrixUserSocket(String(uid)));
+          await game.applyCosmeticsToPlayers();
           seatIndex = game.getPlayerIndex(userId);
         }
         if (seatIndex < 0) {
@@ -630,7 +633,8 @@ function registerGameHandlers(nsp, jwtVerify) {
         roomManager.setTarneeb41UserSocket(String(userId), socket.id);
         roomManager.setUserTarneeb41Table(String(userId), String(table._id));
         let game = getOrCreateTarneeb41GameWired(nsp, table._id);
-        game.syncLobbyFromTable(table, (uid) => roomManager.getTarneeb41UserSocket(String(uid)));
+        await game.syncLobbyFromTable(table, (uid) => roomManager.getTarneeb41UserSocket(String(uid)));
+        await game.applyCosmeticsToPlayers();
         let seatIndex = game.getPlayerIndex(userId);
         if (seatIndex < 0) {
           const mongoSeatIdx = table.seats.findIndex(
@@ -643,7 +647,7 @@ function registerGameHandlers(nsp, jwtVerify) {
               nm = String(seat.user.name);
             }
             if (
-              game.restoreHumanAtSeat(
+              await game.restoreHumanAtSeat(
                 mongoSeatIdx,
                 userId,
                 socket.id,
@@ -652,6 +656,7 @@ function registerGameHandlers(nsp, jwtVerify) {
             ) {
               seatIndex = mongoSeatIdx;
               roomManager.setUserTarneeb41Table(String(userId), String(table._id));
+              await game.applyCosmeticsToPlayers();
             }
           }
         }
@@ -662,7 +667,8 @@ function registerGameHandlers(nsp, jwtVerify) {
           }
           roomManager.tarneeb41GamesByTableId.delete(String(table._id));
           game = getOrCreateTarneeb41GameWired(nsp, table._id);
-          game.syncLobbyFromTable(table, (uid) => roomManager.getTarneeb41UserSocket(String(uid)));
+          await game.syncLobbyFromTable(table, (uid) => roomManager.getTarneeb41UserSocket(String(uid)));
+          await game.applyCosmeticsToPlayers();
           seatIndex = game.getPlayerIndex(userId);
         }
         if (seatIndex < 0) {
@@ -1287,7 +1293,7 @@ function registerGameHandlers(nsp, jwtVerify) {
     });
 
     // fill_with_bots — client requests AI fill after waiting (no humans available)
-    socket.on("fill_with_bots", (payload) => {
+    socket.on("fill_with_bots", async (payload) => {
       const { roomId } = payload || {};
       const t41 = roomManager.getTarneeb41TableIdForUser(userId);
       if (!t41 || (roomId && String(t41) !== String(roomId))) {
@@ -1303,7 +1309,7 @@ function registerGameHandlers(nsp, jwtVerify) {
         broadcastTarneeb41TableState(nsp, t41);
         return;
       }
-      game.fillWithBots();
+      await game.fillWithBots();
       broadcastTarneeb41TableState(nsp, t41);
     });
 

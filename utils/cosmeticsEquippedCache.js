@@ -57,6 +57,8 @@ async function set(userId, payload) {
   memory.set(key, {
     tableTheme: payload.tableTheme ?? null,
     cardSkin: payload.cardSkin ?? null,
+    avatarFrame: payload.avatarFrame ?? null,
+    skin: payload.skin ?? payload.avatarFrame ?? null,
   });
   memoryTrim();
 }

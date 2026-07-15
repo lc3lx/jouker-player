@@ -244,7 +244,8 @@ async function validateTarneeb41StartEligibility(tableId, game) {
   if (table.status === "closed" || table.status === "archived") return { ok: false, reason: "table_closed" };
   if (table.seats.length !== 4) return { ok: false, reason: "seats_not_four" };
 
-  game.syncLobbyFromTable(table, (uid) => roomManager.getTarneeb41UserSocket(String(uid)));
+  await game.syncLobbyFromTable(table, (uid) => roomManager.getTarneeb41UserSocket(String(uid)));
+  await game.applyCosmeticsToPlayers();
 
   if (game.players.length !== 4 || game.humanCount() !== 4) {
     return { ok: false, reason: "roster_not_four" };
@@ -264,7 +265,7 @@ async function refreshTarneeb41GameSeats(tableId) {
     game.cancelGameCountdown("seats_changed");
   }
   if (game.state === "waiting" || game.state === "countdown") {
-    game.syncLobbyFromTable(table, (uid) => roomManager.getTarneeb41UserSocket(String(uid)));
+    await game.syncLobbyFromTable(table, (uid) => roomManager.getTarneeb41UserSocket(String(uid)));
     if (game.isReadyForCountdown()) {
       game.startGameCountdown();
     }
@@ -280,7 +281,7 @@ async function refreshTrixGameSeats(tableId) {
   const game = roomManager.getTrixGameForTable(tableId);
   if (!game) return;
   if (game.state === "waiting") {
-    game.syncLobbyFromTable(table, (uid) => roomManager.getTrixUserSocket(String(uid)));
+    await game.syncLobbyFromTable(table, (uid) => roomManager.getTrixUserSocket(String(uid)));
   }
 }
 
@@ -919,6 +920,34 @@ exports.leaveTable = asyncHandler(async (req, res, next) => {
       : null;
 
   if (idx === -1 && !vacatingEntry) {
+    // N-2: a poker player who is only in the waiting queue (never seated) must
+    // have their locked buy-in refunded when they leave, not stranded.
+    if (table.gameType === "poker") {
+      const {
+        getQueuePosition,
+        dequeuePlayer,
+      } = require("./pokerWaitingQueueService");
+      const queuePos = await getQueuePosition(id, req.user._id);
+      if (queuePos > 0) {
+        try {
+          await withMongoTransaction(async (session) => {
+            await dequeuePlayer({ session, userId: req.user._id, tableId: id });
+          });
+        } catch (e) {
+          if (e.message !== "NOT_IN_QUEUE") throw e;
+        }
+        void trackJoinLeaveEvent(req.user._id, "leave_table");
+        emitTablesUpdated({ gameType: "poker", reason: "leave_queue", tableId: String(id) });
+        return res.status(200).json({
+          status: "success",
+          message: "Left waiting queue",
+          data: {
+            leftQueue: true,
+            rtcRoom: { roomId: table._id, type: "table" },
+          },
+        });
+      }
+    }
     return next(new ApiError("You are not seated at this table", 400));
   }
 
@@ -943,6 +972,11 @@ exports.leaveTable = asyncHandler(async (req, res, next) => {
     if (!result.left) {
       if (result.reason === "NOT_SEATED") {
         return next(new ApiError("You are not seated at this table", 400));
+      }
+      if (result.reason === "SETTLEMENT_IN_PROGRESS") {
+        return next(
+          new ApiError("Settlement in progress — leaving is temporarily blocked", 409)
+        );
       }
       return next(new ApiError("Could not leave table", 400));
     }

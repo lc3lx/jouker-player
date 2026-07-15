@@ -51,10 +51,18 @@ function assertCorsWhitelist() {
 }
 
 function assertTransactionFallbackDisabled() {
+  const { allowNonTransactionFallbackForChecks } = require("../services/walletLedgerService");
   const fallback =
     String(process.env.ALLOW_NON_TRANSACTION_FALLBACK || "").toLowerCase() === "true";
   if (fallback) {
     throw new Error("ALLOW_NON_TRANSACTION_FALLBACK_FORBIDDEN_IN_PRODUCTION");
+  }
+  // Belt-and-suspenders: the canonical gate must also resolve to fail-closed.
+  if (
+    typeof allowNonTransactionFallbackForChecks === "function" &&
+    allowNonTransactionFallbackForChecks()
+  ) {
+    throw new Error("NON_TRANSACTION_FALLBACK_ENABLED_IN_PRODUCTION");
   }
 }
 

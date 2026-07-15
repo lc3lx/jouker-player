@@ -211,13 +211,15 @@ async function tryClaimTarneeb41BotSeat({
     resolvedName = String(seat.user.name);
   }
 
-  const ok = game.replaceBotWithHuman(seatIndex, userId, socketId, resolvedName, {
+  const ok = await game.replaceBotWithHuman(seatIndex, userId, socketId, resolvedName, {
     chips: buyIn,
     allowTakeover: !isRestore,
   });
   if (!ok) {
     return { claimed: false, reason: "engine_replace_failed" };
   }
+
+  await game.applyCosmeticsToPlayers();
 
   roomManager.setUserTarneeb41Table(uid, tid);
   if (socketId) roomManager.setTarneeb41UserSocket(uid, socketId);

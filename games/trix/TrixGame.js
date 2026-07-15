@@ -9,6 +9,11 @@ const BotAI = require('./ai/BotAI');
 const timerManager = require('../../engine/TimerManager');
 const StateMachine = require('../../engine/StateMachine');
 const { STATE: TRIX_STATE, TRANSITIONS: TRIX_TRANSITIONS } = require('../../engine/states/trixStates');
+const {
+  resolvePublicCosmeticsForSeats,
+  publicCosmeticsPayload,
+  emptyCosmetics,
+} = require('../../services/playerPublicCosmeticsService');
 
 function clearManagedOrNativeInterval(id) {
   if (!timerManager.clear(id)) clearInterval(id);
@@ -281,16 +286,18 @@ class TrixGame extends BaseGameEngine {
     p.socketId = null;
     p.displayName = "بوت";
     p.reconnectDeadline = null;
+    p.cosmetics = emptyCosmetics();
+    p.vipLevel = null;
     return true;
   }
 
-  restoreHumanAtSeat(seatIndex, userId, socketId, displayName) {
+  async restoreHumanAtSeat(seatIndex, userId, socketId, displayName) {
     return this.replaceBotWithHuman(seatIndex, userId, socketId, displayName, {
       allowTakeover: false,
     });
   }
 
-  replaceBotWithHuman(seatIndex, userId, socketId, displayName, opts = {}) {
+  async replaceBotWithHuman(seatIndex, userId, socketId, displayName, opts = {}) {
     const p = this.players.find((x) => x.seatIndex === seatIndex);
     if (!p || !p.isBot) return false;
 
@@ -324,10 +331,11 @@ class TrixGame extends BaseGameEngine {
         this._restartTurnTimer();
       }
     }
+    await this.applyCosmeticsToPlayers();
     return true;
   }
 
-  syncLobbyFromTable(tableDoc, resolveSocket) {
+  async syncLobbyFromTable(tableDoc, resolveSocket) {
     if (this.gameState && ACTIVE_STATES.has(this.state)) {
       for (const p of this.players) {
         if (!p.isBot) {
@@ -335,6 +343,7 @@ class TrixGame extends BaseGameEngine {
           if (sid) p.socketId = sid;
         }
       }
+      await this.applyCosmeticsToPlayers();
       return;
     }
 
@@ -344,8 +353,10 @@ class TrixGame extends BaseGameEngine {
       const uid = seat.user && seat.user._id ? seat.user._id : seat.user;
       const uidStr = String(uid);
       let nm = `لاعب ${i + 1}`;
-      if (seat.user && typeof seat.user === 'object' && seat.user.name) {
-        nm = String(seat.user.name);
+      let avatar = null;
+      if (seat.user && typeof seat.user === 'object') {
+        if (seat.user.name) nm = String(seat.user.name);
+        avatar = seat.user.profileImg || null;
       }
       this.players.push({
         userId: uid,
@@ -353,7 +364,10 @@ class TrixGame extends BaseGameEngine {
         seatIndex: this.players.length,
         isBot: false,
         displayName: nm,
+        avatar,
         chips: Number(seat.chips) || 0,
+        vipLevel: null,
+        cosmetics: emptyCosmetics(),
       });
     }
     let bi = 0;
@@ -366,12 +380,39 @@ class TrixGame extends BaseGameEngine {
         seatIndex: this.players.length,
         isBot: true,
         displayName: 'بوت',
+        avatar: null,
         chips: 0,
+        vipLevel: null,
+        cosmetics: emptyCosmetics(),
       });
+    }
+    await this.applyCosmeticsToPlayers();
+  }
+
+  /**
+   * Resolve store skin + VIP table/card overrides for all human players and
+   * cache the result on each lobby row. Call after roster changes (join,
+   * bot-replace, syncLobbyFromTable) before building outgoing state.
+   */
+  async applyCosmeticsToPlayers() {
+    const seatsForResolve = this.players.map((p) => ({
+      userId: p.userId,
+      isBot: !!p.isBot,
+    }));
+    const map = await resolvePublicCosmeticsForSeats(seatsForResolve);
+    for (const p of this.players) {
+      if (p.isBot || !p.userId) {
+        p.cosmetics = emptyCosmetics();
+        p.vipLevel = null;
+        continue;
+      }
+      const row = map.get(String(p.userId));
+      p.vipLevel = row?.vipLevel || null;
+      p.cosmetics = row?.cosmetics ? { ...row.cosmetics } : emptyCosmetics();
     }
   }
 
-  startGame() {
+  async startGame() {
     this.sessionId = crypto.randomUUID();
     this._settlementTriggered = false;
     this._lastSettlementPayload = null;
@@ -388,8 +429,12 @@ class TrixGame extends BaseGameEngine {
         isBot: true,
         displayName: 'بوت',
         chips: 0,
+        vipLevel: null,
+        cosmetics: emptyCosmetics(),
       });
     }
+
+    await this.applyCosmeticsToPlayers();
 
     const gamePlayers = this.players.map(
       (p) =>
@@ -535,10 +580,14 @@ class TrixGame extends BaseGameEngine {
       return {
         seatIndex: idx,
         displayName: gp.name,
+        avatar: lobby?.avatar || null,
+        userId: lobby && !lobby.isBot ? lobby.userId || null : null,
         isBot: gp.isBot,
         chips: lobby ? lobby.chips || 0 : 0,
         vacatingUntil:
           deadline && deadline > Date.now() ? deadline : null,
+        vipLevel: lobby?.vipLevel || null,
+        cosmetics: publicCosmeticsPayload(lobby?.cosmetics),
       };
     });
 

@@ -82,6 +82,20 @@ app.use("/uploads", (req, res, next) => {
   next();
 }, express.static(path.join(__dirname, "uploads"), { dotfiles: "deny", index: false }));
 app.use("/games", express.static(path.join(__dirname, "games")));
+// Cosmetic skins + VIP table/card art (backend/assets/skin, backend/assets/vip)
+app.use(
+  "/assets",
+  (req, res, next) => {
+    const ext = path.extname(req.path).toLowerCase();
+    if (!ALLOWED_UPLOAD_EXTS.has(ext)) return res.status(404).end();
+    next();
+  },
+  express.static(path.join(__dirname, "assets"), {
+    dotfiles: "deny",
+    index: false,
+    maxAge: "7d",
+  }),
+);
 app.use(mongoSanitize());
 app.use(xss());
 
@@ -225,8 +239,9 @@ async function startServer() {
   await dbConnection();
   const { registerDomainListeners } = require("./domain/listeners/registerDomainListeners");
   registerDomainListeners();
-  const { probeMongoTransactions } = require("./services/walletLedgerService");
-  await probeMongoTransactions();
+  const { assertTransactionsAvailableOrThrow } = require("./services/walletLedgerService");
+  // C-4: fail fast if transactions are required (production) but unavailable.
+  await assertTransactionsAvailableOrThrow();
   await runProductionChecks({ skipSmoke: true });
 
   realtimeRedis = await setupSocketIoRedis(io);

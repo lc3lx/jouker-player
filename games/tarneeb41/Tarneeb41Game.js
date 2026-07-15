@@ -11,6 +11,11 @@ const TarneebBot = require("../../engine/bots/TarneebBot");
 const timerManager = require("../../engine/TimerManager");
 const StateMachine = require("../../engine/StateMachine");
 const { STATE: T41_STATE, TRANSITIONS: T41_TRANSITIONS } = require("../../engine/states/tarneeb41States");
+const {
+  resolvePublicCosmeticsForSeats,
+  publicCosmeticsPayload,
+  emptyCosmetics,
+} = require("../../services/playerPublicCosmeticsService");
 
 /**
  * Try timerManager first; if id not found there (e.g. a native Interval from a
@@ -150,11 +155,13 @@ class Tarneeb41Game extends BaseGameEngine {
     p.socketId = null;
     p.displayName = "بوت";
     p.reconnectDeadline = null;
+    p.cosmetics = emptyCosmetics();
+    p.vipLevel = null;
     return true;
   }
 
   /** Restore a human who was replaced by a vacate-bot at the same Mongo seat index. */
-  restoreHumanAtSeat(seatIndex, userId, socketId, displayName) {
+  async restoreHumanAtSeat(seatIndex, userId, socketId, displayName) {
     return this.replaceBotWithHuman(seatIndex, userId, socketId, displayName, {
       allowTakeover: false,
     });
@@ -166,7 +173,7 @@ class Tarneeb41Game extends BaseGameEngine {
    * @param {number} [opts.chips]
    * @param {boolean} [opts.allowTakeover] — false: only vacatedFromUserId may return
    */
-  replaceBotWithHuman(seatIndex, userId, socketId, displayName, opts = {}) {
+  async replaceBotWithHuman(seatIndex, userId, socketId, displayName, opts = {}) {
     const p = this.players.find((x) => x.seatIndex === seatIndex);
     if (!p || !p.isBot) return false;
 
@@ -194,10 +201,11 @@ class Tarneeb41Game extends BaseGameEngine {
     ) {
       this.startTurnTimer();
     }
+    await this.applyCosmeticsToPlayers();
     return true;
   }
 
-  syncLobbyFromTable(tableDoc, resolveSocket) {
+  async syncLobbyFromTable(tableDoc, resolveSocket) {
     if (ACTIVE_STATES.has(this.state) && this.players.length > 0) {
       for (const p of this.players) {
         if (!p.isBot) {
@@ -205,6 +213,7 @@ class Tarneeb41Game extends BaseGameEngine {
           p.socketId = sid || null;
         }
       }
+      await this.applyCosmeticsToPlayers();
       return;
     }
 
@@ -214,8 +223,10 @@ class Tarneeb41Game extends BaseGameEngine {
       const uid = seat.user && seat.user._id ? seat.user._id : seat.user;
       const uidStr = String(uid);
       let nm = `لاعب ${i + 1}`;
-      if (seat.user && typeof seat.user === "object" && seat.user.name) {
-        nm = String(seat.user.name);
+      let avatar = null;
+      if (seat.user && typeof seat.user === "object") {
+        if (seat.user.name) nm = String(seat.user.name);
+        avatar = seat.user.profileImg || null;
       }
       this.players.push({
         userId: uid,
@@ -223,8 +234,35 @@ class Tarneeb41Game extends BaseGameEngine {
         seatIndex: this.players.length,
         isBot: false,
         displayName: nm,
+        avatar,
         chips: Number(seat.chips) || 0,
+        vipLevel: null,
+        cosmetics: emptyCosmetics(),
       });
+    }
+    await this.applyCosmeticsToPlayers();
+  }
+
+  /**
+   * Resolve store skin + VIP table/card overrides for all human players and
+   * cache the result on each lobby row. Call after roster changes (join,
+   * bot-replace, syncLobbyFromTable) before building outgoing state.
+   */
+  async applyCosmeticsToPlayers() {
+    const seatsForResolve = this.players.map((p) => ({
+      userId: p.userId,
+      isBot: !!p.isBot,
+    }));
+    const map = await resolvePublicCosmeticsForSeats(seatsForResolve);
+    for (const p of this.players) {
+      if (p.isBot || !p.userId) {
+        p.cosmetics = emptyCosmetics();
+        p.vipLevel = null;
+        continue;
+      }
+      const row = map.get(String(p.userId));
+      p.vipLevel = row?.vipLevel || null;
+      p.cosmetics = row?.cosmetics ? { ...row.cosmetics } : emptyCosmetics();
     }
   }
 
@@ -277,7 +315,7 @@ class Tarneeb41Game extends BaseGameEngine {
       return;
     }
 
-    const started = this.startGame();
+    const started = await this.startGame();
     if (started) {
       this._notifyAfterMove({ success: true, gameStarted: true });
     } else {
@@ -304,10 +342,11 @@ class Tarneeb41Game extends BaseGameEngine {
     this.countdownSeconds = null;
   }
 
-  startGame() {
+  async startGame() {
     if (this.state !== "waiting" && this.state !== "countdown") return false;
     if (this.players.length !== 4) return false;
     this.clearCountdown();
+    await this.applyCosmeticsToPlayers();
     this.sessionId = crypto.randomUUID();
     this.dealRound(true);
     this.startBotTimer();
@@ -315,7 +354,7 @@ class Tarneeb41Game extends BaseGameEngine {
   }
 
   /** Fill remaining seats with AI bots then start the game immediately. */
-  fillWithBots() {
+  async fillWithBots() {
     if (this.state !== "waiting") return false;
     const ts = Date.now();
     // Replace empty-slot placeholders (userId=null, not a real bot) with actual bots
@@ -345,7 +384,7 @@ class Tarneeb41Game extends BaseGameEngine {
         chips: 0,
       });
     }
-    const started = this.startGame();
+    const started = await this.startGame();
     if (started) {
       this._notifyAfterMove({ success: true, gameStarted: true });
     }
@@ -786,6 +825,8 @@ class Tarneeb41Game extends BaseGameEngine {
     const seatsPublic = this.players.map((p, idx) => ({
       seatIndex: idx,
       displayName: p.displayName || (p.isBot ? "بوت" : `لاعب ${idx + 1}`),
+      avatar: p.avatar || null,
+      userId: !p.isBot ? p.userId || null : null,
       isBot: !!p.isBot,
       chips: p.chips || 0,
       reconnectDeadline:
@@ -793,6 +834,8 @@ class Tarneeb41Game extends BaseGameEngine {
           ? p.reconnectDeadline
           : null,
       vacatedFromUserId: p.vacatedFromUserId || null,
+      vipLevel: p.vipLevel || null,
+      cosmetics: publicCosmeticsPayload(p.cosmetics),
     }));
 
     const gameResult = this.state === "game_end" ? this.getGameResult() : null;
