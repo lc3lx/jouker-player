@@ -20,8 +20,9 @@ const { attachRedisClient: attachCosmeticsEquippedCache } = require("../utils/co
 const vipService = require("../services/vipService");
 const { attachRedisClient: attachVipLevelCache } = require("../utils/vipLevelCache");
 const {
-  resolvePublicCosmeticsForSeats,
+  resolvePublicCosmeticsForPokerSeats,
   publicCosmeticsPayload,
+  publicSeatCosmeticsPayload,
   emptyCosmetics,
 } = require("../services/playerPublicCosmeticsService");
 const {
@@ -52,6 +53,8 @@ const {
 } = require("../utils/poker/playerState");
 const { verifyHandChipConservation } = require("../utils/poker/chipConservation");
 const { auditOrFreeze, auditChipConservation } = require("../utils/poker/chipAuditor");
+const { createOwnershipManager } = require("../services/pokerTableOwnership");
+const { PokerTableCommandBus } = require("../services/pokerTableCommandBus");
 const { deriveMinimumBet } = require("../utils/poker/tableBettingConfig");
 const { buildHandAuditLog } = require("../services/handHistoryAuditService");
 
@@ -381,6 +384,14 @@ class PokerTable {
     this.dealerIndex = 0;
     this.running = false;
     this.starting = false;
+    /**
+     * H-3: true when THIS instance holds the Redis ownership lease for the table.
+     * Defaults true so single-instance mode and direct-construction tests behave
+     * exactly as before; GameRegistry flips it to false on follower instances so
+     * only the owner runs the autonomous loop (deals, timers, settlement, bots).
+     */
+    this.isOwner = true;
+    this.ownershipFence = 0;
 
     this.turnTimer = null;
     this.botThinkTimer = null;
@@ -435,6 +446,9 @@ class PokerTable {
     this.processedActionIds = new Set();
     /** Monotonic: bumps on each snapshot persist; clients drop stale packets. */
     this.stateRevision = 0;
+    /** Shared VIP table felt for all viewers (highest seated VIP). */
+    this.activeTableTheme = null;
+    this.activeTableAsset = null;
     this.serverSeed = null;
     this.serverSeedHash = null;
     this.clientSeedDigest = null;
@@ -653,6 +667,8 @@ class PokerTable {
       })),
       actionSpec: this.computeTurnActionSpec(this.currentIndex),
       lastAction: this.computeLastTableAction(),
+      activeTableTheme: this.activeTableTheme || null,
+      activeTableAsset: this.activeTableAsset || null,
     };
   }
 
@@ -695,6 +711,8 @@ class PokerTable {
     this.showdownRevealedSeats = new Set(
       Array.isArray(snapshot.showdownRevealedSeats) ? snapshot.showdownRevealedSeats : []
     );
+    this.activeTableTheme = snapshot.activeTableTheme || null;
+    this.activeTableAsset = snapshot.activeTableAsset || null;
     // actionSpec / lastAction in snapshot are for subscribers; live table recomputes each tick.
 
     const restoredSeats = Array.isArray(snapshot.seats) ? snapshot.seats : [];
@@ -893,6 +911,9 @@ class PokerTable {
   }
 
   async saveSnapshot({ finished = false } = {}) {
+    // H-3: only the authoritative owner may persist snapshots — a follower write
+    // would clobber the owner's state in Redis.
+    if (!this.isOwner) return;
     this.stateRevision = toSafeInt(this.stateRevision, 0) + 1;
     if (!this.stateStore || !this.stateStore.isEnabled()) return;
     const snapshot = this.serializeSnapshot();
@@ -936,7 +957,26 @@ class PokerTable {
     }
   }
 
+  /**
+   * Stop every scheduled timer/interval owned by this table. Called on registry
+   * prune and eviction so a dropped table can never leak a running timer
+   * (turn / bot / wait / next-hand / reconnect / vacate / drain / heartbeat).
+   */
+  disposeTimers() {
+    this.clearActionScheduling();
+    this.clearBotFillTimer();
+    this.clearWaitForPlayersTimer();
+    this.clearNextHandTimer();
+    this.stopSpectatorDrain();
+    this.stopLockHeartbeat();
+    for (const t of this.reconnectTimers.values()) clearTimeout(t);
+    this.reconnectTimers.clear();
+    for (const t of this.vacateTimers.values()) clearTimeout(t);
+    this.vacateTimers.clear();
+  }
+
   scheduleNextHand() {
+    if (!this.isOwner) return; // H-3: only the lease owner drives the loop
     this.clearNextHandTimer();
     const delay = POKER_TIMINGS.NEXT_HAND_DELAY_MS;
     this.nextHandTimer = setTimeout(() => {
@@ -946,6 +986,8 @@ class PokerTable {
   }
 
   async beginNextHandIfPossible() {
+    if (!this.isOwner) return; // H-3
+
     if (this.frozen && !this.running) {
       const probe = auditChipConservation(this, "unfreeze_probe");
       if (probe.ok) {
@@ -980,6 +1022,7 @@ class PokerTable {
   }
 
   scheduleWaitForPlayers() {
+    if (!this.isOwner) return; // H-3
     if (this.running || this.frozen) return;
     if (this.eligibleHumanCount() >= POKER_MIN_PLAYERS) {
       this.clearWaitForPlayersTimer();
@@ -1348,15 +1391,19 @@ class PokerTable {
     const seatsForResolve = this.seats.map((s) => ({
       userId: s.userId,
       isBot: !!(s.isBot || (s.userId && isBotUserId(String(s.userId)))),
+      chips: s.chips,
     }));
-    const map = await resolvePublicCosmeticsForSeats(seatsForResolve);
+    const { byUserId, activeTableTheme, activeTableAsset } =
+      await resolvePublicCosmeticsForPokerSeats(seatsForResolve);
+    this.activeTableTheme = activeTableTheme;
+    this.activeTableAsset = activeTableAsset;
     for (const s of this.seats) {
       if (!s.userId || s.isBot || isBotUserId(String(s.userId))) {
         s.cosmetics = emptyCosmetics();
         s.vipLevel = null;
         continue;
       }
-      const row = map.get(String(s.userId));
+      const row = byUserId.get(String(s.userId));
       s.vipLevel = row?.vipLevel || null;
       s.cosmetics = row?.cosmetics
         ? { ...row.cosmetics }
@@ -1467,6 +1514,7 @@ class PokerTable {
     if (this.eligibleHumanCount() < POKER_MIN_PLAYERS) {
       this.scheduleWaitForPlayers();
     }
+    await this.applyCosmeticsToSeats();
     await this.syncMongoTableStatus();
     await this.broadcastState();
     return true;
@@ -1520,6 +1568,7 @@ class PokerTable {
       this.processedActionIds = new Set();
     }
 
+    await this.applyCosmeticsToSeats();
     await this.syncMongoTableStatus();
     await this.broadcastState();
     return true;
@@ -1761,6 +1810,7 @@ class PokerTable {
   }
 
   scheduleBotFillIfNeeded() {
+    if (!this.isOwner) return; // H-3
     // Bots fill empty seats during an active game as long as at least 1 human is seated.
     if (!this.running) return;
     if (this.humanSeatCount() < 1) return;
@@ -1861,6 +1911,7 @@ class PokerTable {
   }
 
   async bootstrapLobbyStart() {
+    if (!this.isOwner) return; // H-3: followers never start the loop
     if (this.frozen && !this.running) {
       const probe = auditChipConservation(this, "unfreeze_probe");
       if (probe.ok) {
@@ -1906,6 +1957,7 @@ class PokerTable {
   }
 
   async startIfReady({ refreshFromDb = true, allowBotFill = false } = {}) {
+    if (!this.isOwner) return; // H-3
     if (this.frozen) return;
     if (this.running || this.starting) return;
     if (this.round !== "idle") {
@@ -2106,6 +2158,7 @@ class PokerTable {
   }
 
   async startHand() {
+    if (!this.isOwner) return; // H-3: only the owner deals hands
     this.clearActionScheduling();
     promoteWaitingToSeated(this.seats);
 
@@ -2225,6 +2278,7 @@ class PokerTable {
   }
 
   scheduleCurrentTurn() {
+    if (!this.isOwner) return; // H-3
     this.clearActionScheduling();
     if (!this.running) return;
 
@@ -2963,6 +3017,27 @@ class PokerTable {
     }
   }
 
+  /**
+   * H-3 / N-1: on ownership (re)acquisition, clear a settlement marker orphaned
+   * by a crashed or fenced-out predecessor. Safe because (a) this instance is now
+   * the sole owner and is NOT mid-settlement, and (b) any re-settlement is made
+   * idempotent by the HandHistory existence guard in persistAndPrepareNext.
+   */
+  async clearStaleSettlementLock() {
+    if (!mongoose.isValidObjectId(this.tableId)) return;
+    try {
+      await Table.updateOne(
+        { _id: this.tableId, activeSettlementId: { $ne: null } },
+        { $set: { activeSettlementId: null } }
+      );
+    } catch (e) {
+      logger.warn("poker_stale_settlement_clear_failed", {
+        tableId: this.tableId,
+        reason: e?.message || "unknown",
+      });
+    }
+  }
+
   async persistAndPrepareNext(community, payoutBySeat, winnerIdxs, meta = {}, opts = {}) {
     const manageLifecycle = opts.manageLifecycle !== false;
     // Rake simple percentage
@@ -3110,13 +3185,16 @@ class PokerTable {
       },
     };
 
-    // N-1: block a concurrent REST leave-cashout for the duration of settlement.
-    await this._acquireSettlementLock();
-
     // Atomic financial + history settlement
     const auditLog = buildHandAuditLog(this.currentHandActions, this.seats, community);
     let settledHandHistoryId = null;
     let alreadySettled = false;
+    let settlementFailed = false;
+
+    // N-1: block a concurrent REST leave-cashout for the whole settlement. The
+    // `finally` below guarantees the marker is always cleared — on success, on
+    // freeze, or on an unexpected throw — so it can never be orphaned.
+    await this._acquireSettlementLock();
     try {
       await withMongoTransaction(async (session) => {
         const createOpts = session ? { session } : {};
@@ -3360,6 +3438,7 @@ class PokerTable {
       // C-1: the settlement transaction did NOT commit. Because RAM stacks were
       // left untouched (they still equal the rolled-back DB and pot), freeze the
       // table for manual reconcile instead of continuing an unsettled hand.
+      settlementFailed = true;
       this.logSuspicious("financial_settlement_failed", {
         tableId: this.tableId,
         handId: this.currentHandId,
@@ -3376,7 +3455,12 @@ class PokerTable {
         handId: this.currentHandId,
         reason: e?.message || "unknown",
       });
+    } finally {
+      // N-1: always clear the settlement marker (success | freeze | throw).
       await this._releaseSettlementLock();
+    }
+
+    if (settlementFailed) {
       try {
         await this.broadcastState();
       } catch (_) {
@@ -3384,8 +3468,6 @@ class PokerTable {
       }
       return;
     }
-
-    await this._releaseSettlementLock();
 
     // Prepare next hand: move dealer to next alive seat
     const order = this.seatOrderFrom(this.dealerIndex);
@@ -3445,6 +3527,8 @@ class PokerTable {
       lastHand: this.lastHand,
       actionSpec,
       lastAction: this.computeLastTableAction(),
+      activeTableTheme: this.activeTableTheme || null,
+      activeTableAsset: this.activeTableAsset || null,
       seats: this.seats.map((s, i) => ({
         seatIndex: i,
         userId: s.userId,
@@ -3468,12 +3552,15 @@ class PokerTable {
         reconnectDeadline: s.reconnectDeadline || null,
         lastAction: s.lastAction && typeof s.lastAction === "object" ? { ...s.lastAction } : null,
         vipLevel: s.vipLevel || null,
-        cosmetics: publicCosmeticsPayload(s.cosmetics),
+        cosmetics: publicSeatCosmeticsPayload(s.cosmetics),
       })),
     };
   }
 
   async broadcastState(showdown = false) {
+    // H-3: only the owner broadcasts + persists. Followers never emit table state
+    // (the owner reaches every socket cluster-wide through the redis-adapter).
+    if (!this.isOwner) return;
     // Persist snapshot first, then derive outgoing events from state.
     await this.saveSnapshot({
       finished: !this.running && (this.round === "idle" || this.round === "showdown"),
@@ -3488,13 +3575,17 @@ class PokerTable {
 
     try {
       const sockets = await this.nsp.in(room).fetchSockets();
+      // Cache the one delayed frame this broadcast might deliver to spectators.
+      let deliveredDelayed = false;
+      const delayedFrame = spectatorDelay.getLatestDelayedState(this.tableId);
       for (const sock of sockets) {
-        const uid = sock.userId;
+        // H-3: RemoteSockets (players connected to OTHER instances via the
+        // redis-adapter) expose their id on `sock.data`, not `sock.userId`.
+        const uid = sock.data?.userId ?? sock.userId;
         if (!uid) continue;
         const isSeated = this.seats.some((s) => String(s.userId) === String(uid));
-        const isSpectator = this.spectatorUserIds.has(String(uid));
-        const me = this.getPublicState(uid);
         if (isSeated) {
+          const me = this.getPublicState(uid);
           sock.emit("table_state", pub);
           sock.emit("state", pub);
           sock.emit("table_state_me", me);
@@ -3502,19 +3593,21 @@ class PokerTable {
           void require("../services/presenceService")
             .markPlaying(uid, { gameType: "poker", tableId: this.tableId })
             .catch(() => {});
-        } else if (isSpectator) {
-          // N-3: spectators only ever receive DELAYED frames — never live state.
-          // When no frame is ready yet, skip; the drain timer delivers it later.
-          const delayed = spectatorDelay.getLatestDelayedState(this.tableId);
-          if (delayed) {
-            this.lastSpectatorEmittedRev = toSafeInt(delayed.stateRevision, 0);
-            sock.emit("table_state", delayed);
-            sock.emit("state", delayed);
+        } else {
+          // Anyone in the room who is NOT seated is a spectator (cluster-wide) and
+          // only ever receives DELAYED frames — never live state. N-3.
+          if (delayedFrame) {
+            deliveredDelayed = true;
+            sock.emit("table_state", delayedFrame);
+            sock.emit("state", delayedFrame);
           }
           void require("../services/presenceService")
             .markWatching(uid, { gameType: "poker", tableId: this.tableId })
             .catch(() => {});
         }
+      }
+      if (deliveredDelayed) {
+        this.lastSpectatorEmittedRev = toSafeInt(delayedFrame.stateRevision, 0);
       }
     } catch (e) {
       metrics.errorsTotal.inc({ type: "broadcast_state_failed" });
@@ -3589,8 +3682,11 @@ class PokerTable {
     try {
       const sockets = await this.nsp.in(`tg:${this.tableId}`).fetchSockets();
       for (const sock of sockets) {
-        const uid = sock.userId;
-        if (!uid || !this.spectatorUserIds.has(String(uid))) continue;
+        // Cluster-wide: deliver the delayed frame to every in-room socket that is
+        // NOT seated (spectators), using the adapter-visible id on sock.data.
+        const uid = sock.data?.userId ?? sock.userId;
+        if (!uid) continue;
+        if (this.seats.some((s) => String(s.userId) === String(uid))) continue;
         sock.emit("table_state", delayed);
         sock.emit("state", delayed);
       }
@@ -3662,6 +3758,11 @@ class PokerTable {
   }
 
   async handleAction(userId, payload) {
+    // H-3 safety net: a follower must NEVER mutate its (non-authoritative) copy.
+    // Socket handlers forward to the owner; this guards against any misroute.
+    if (!this.isOwner) {
+      return { status: "rejected", reason: "NOT_OWNER" };
+    }
     const lockAcquired = await this.acquireActionLock();
     if (!lockAcquired) {
       this.logSuspicious("duplicate_action_while_locked", { userId, payload });
@@ -3877,6 +3978,130 @@ class GameRegistry {
       ? new RedisTableLockManager(this.redis)
       : new InMemoryTableLockManager();
     this.stateStore = new RedisTableStateStore(this.redis);
+    // H-3: exactly-one-owner-per-table lease. In-memory (always owner) without Redis.
+    this.ownership = options.ownership || createOwnershipManager(this.redis, {});
+    this.instanceId = this.ownership.instanceId;
+    this.ownershipEnabled = this.ownership.isEnabled();
+    this.heartbeatTimer = null;
+    this.sweepTimer = null;
+  }
+
+  /**
+   * H-3: start the lease heartbeat (renew what we own) and the failover sweep
+   * (promote follower copies whose owner has died). No-op single-instance.
+   */
+  startOwnershipLoops() {
+    if (!this.ownershipEnabled || this.heartbeatTimer) return;
+    const ttl = this.ownership.leaseTtlMs || 15000;
+    const beat = Math.max(2000, Math.floor(ttl / 3));
+    this.heartbeatTimer = setInterval(() => {
+      void this._heartbeat();
+    }, beat);
+    this.sweepTimer = setInterval(() => {
+      void this._sweep();
+    }, Math.max(5000, beat * 2));
+    this.heartbeatTimer.unref?.();
+    this.sweepTimer.unref?.();
+  }
+
+  stopOwnershipLoops() {
+    if (this.heartbeatTimer) clearInterval(this.heartbeatTimer);
+    if (this.sweepTimer) clearInterval(this.sweepTimer);
+    this.heartbeatTimer = null;
+    this.sweepTimer = null;
+  }
+
+  /** Renew leases we own; demote any table whose lease we have lost. */
+  async _heartbeat() {
+    for (const [tid, entry] of this.map.entries()) {
+      if (!entry.game.isOwner) continue;
+      let ok = false;
+      try {
+        ok = await this.ownership.renew(tid);
+      } catch (_) {
+        ok = false;
+      }
+      if (!ok) await this._demote(tid);
+    }
+  }
+
+  /** Stop being authoritative for a table (lost lease / shutting down). */
+  async _demote(tid) {
+    const entry = this.map.get(tid);
+    if (!entry) return;
+    entry.game.isOwner = false;
+    entry.game.disposeTimers();
+    entry.game.running = false;
+    entry.game.starting = false;
+    this.map.delete(tid);
+    logger.warn("poker_ownership_demoted", { tableId: tid, instanceId: this.instanceId });
+  }
+
+  /** Try to claim ownerless tables we hold a follower copy of (owner crashed). */
+  async _sweep() {
+    for (const [tid, entry] of this.map.entries()) {
+      if (entry.game.isOwner) continue;
+      let own = { owned: false };
+      try {
+        own = await this.ownership.acquire(tid);
+      } catch (_) {
+        own = { owned: false };
+      }
+      if (own.owned) await this._promote(tid, own);
+    }
+  }
+
+  /** Become the authoritative owner of a resident follower copy after failover. */
+  async _promote(tid, own) {
+    const entry = this.map.get(tid);
+    if (!entry) return;
+    const gt = entry.game;
+    gt.isOwner = true;
+    gt.ownershipFence = own.fence || 0;
+    try {
+      const snapshot = await this.stateStore.load(tid);
+      const table = await Table.findById(tid).populate({
+        path: "seats.user",
+        select: "name profileImg",
+      });
+      if (snapshot) {
+        gt.restoreFromSnapshot(snapshot);
+        if (table) await gt.reconcileEngineWithMongo(table);
+      }
+      await gt.clearStaleSettlementLock();
+      await gt.applyCosmeticsToSeats();
+      if (gt.running) {
+        gt.scheduleCurrentTurn();
+      } else if (!gt.frozen && gt.round === "idle" && gt.humanSeatCount() > 0) {
+        await gt.bootstrapLobbyStart();
+      } else {
+        gt.rescheduleWaitForPlayersAfterRestore();
+      }
+      await gt.broadcastState();
+      logger.info("poker_ownership_promoted", {
+        tableId: tid,
+        instanceId: this.instanceId,
+        fence: own.fence,
+      });
+    } catch (e) {
+      logger.error("poker_ownership_promote_failed", {
+        tableId: tid,
+        reason: e?.message || "unknown",
+      });
+    }
+  }
+
+  /** Release every lease we hold (graceful shutdown → fast failover). */
+  async releaseAll() {
+    this.stopOwnershipLoops();
+    const ids = this.ownership.ownedTableIds ? this.ownership.ownedTableIds() : [];
+    for (const tid of ids) {
+      try {
+        await this.ownership.release(tid);
+      } catch (_) {
+        /* lease expires on its own */
+      }
+    }
   }
 
   markAccess(tableId) {
@@ -3891,6 +4116,7 @@ class GameRegistry {
     for (const [tableId, entry] of this.map.entries()) {
       const idleFor = now - (entry.lastAccessAt || 0);
       if (idleFor >= this.idleEvictMs && !entry.game.running && !entry.game.starting) {
+        entry.game.disposeTimers();
         this.map.delete(tableId);
       }
       if (this.map.size <= this.maxTables) break;
@@ -3899,32 +4125,59 @@ class GameRegistry {
   }
 
   async get(tableId) {
-    if (this.map.has(tableId)) {
-      this.markAccess(tableId);
-      return this.map.get(tableId).game;
+    const tid = String(tableId);
+    if (this.map.has(tid)) {
+      this.markAccess(tid);
+      const entry = this.map.get(tid);
+      if (!this.ownershipEnabled || entry.game.isOwner) return entry.game;
+      // We hold a follower copy — opportunistically claim ownership if the owner
+      // has died (its lease expired), otherwise stay a passive follower.
+      let own = { owned: false };
+      try {
+        own = await this.ownership.acquire(tid);
+      } catch (_) {
+        own = { owned: false };
+      }
+      if (own.owned) await this._promote(tid, own);
+      return entry.game;
     }
-    const table = await Table.findById(tableId).populate({
+
+    // H-3: decide ownership BEFORE running any loop.
+    let own = { owned: true, fence: 0 };
+    try {
+      own = await this.ownership.acquire(tid);
+    } catch (_) {
+      own = { owned: true, fence: 0 }; // Redis blip → behave as owner (lock still serializes)
+    }
+    const isOwner = own.owned;
+
+    const table = await Table.findById(tid).populate({
       path: "seats.user",
       select: "name profileImg",
     });
-    if (!table) return null;
+    if (!table) {
+      if (isOwner) await this.ownership.release(tid);
+      return null;
+    }
     const gt = new PokerTable(this.nsp, table, {
       lockManager: this.lockManager,
       redis: this.redis,
       stateStore: this.stateStore,
     });
+    gt.isOwner = isOwner;
+    gt.ownershipFence = own.fence || 0;
 
     // Crash/restart recovery: restore from Redis snapshot if exists.
-    const snapshot = await this.stateStore.load(tableId);
+    const snapshot = await this.stateStore.load(tid);
     if (snapshot) {
       gt.restoreFromSnapshot(snapshot);
       const handActive =
         snapshot.running === true ||
         (snapshot.round && String(snapshot.round) !== "idle");
-      if (handActive) {
+      if (handActive && isOwner) {
         try {
           const { registerPokerRecoveryWatch } = require("../services/tableGcService");
-          registerPokerRecoveryWatch(tableId);
+          registerPokerRecoveryWatch(tid);
         } catch (_) {
           // GC service optional during tests
         }
@@ -3932,20 +4185,24 @@ class GameRegistry {
       await gt.reconcileEngineWithMongo(table);
     }
 
+    // H-3: a fresh owner clears any settlement marker orphaned by a crashed
+    // predecessor (re-settlement stays idempotent via the HandHistory guard).
+    if (isOwner) await gt.clearStaleSettlementLock();
+
     await gt.applyCosmeticsToSeats();
 
-    if (!gt.running && gt.round === "idle" && !gt.frozen && gt.humanSeatCount() > 0) {
+    if (isOwner && !gt.running && gt.round === "idle" && !gt.frozen && gt.humanSeatCount() > 0) {
       try {
         await gt.bootstrapLobbyStart();
       } catch (e) {
         logger.warn("poker_registry_bootstrap_failed", {
-          tableId: String(tableId),
+          tableId: tid,
           reason: e?.message || "unknown",
         });
       }
     }
 
-    this.map.set(tableId, { game: gt, lastAccessAt: Date.now() });
+    this.map.set(tid, { game: gt, lastAccessAt: Date.now() });
     this.prune();
     metrics.activeTables.set(this.map.size);
     return gt;
@@ -3966,6 +4223,156 @@ function initTableGame(io, options = {}) {
   const registry = new GameRegistry(nsp, options);
   const security = new SocketSecurityGuard();
   activeRegistry = registry;
+  registry.startOwnershipLoops();
+
+  // ── H-3 action routing: follower → owner command bus ────────────────────────
+  const commandBus = new PokerTableCommandBus(options.redis || null, {
+    instanceId: registry.instanceId,
+    onCommand: (cmd) => dispatchOwnerCommand(cmd),
+  });
+  void commandBus.start();
+  registry.commandBus = commandBus;
+
+  async function currentOwnerId(tableId) {
+    try {
+      return await registry.ownership.currentOwner(String(tableId));
+    } catch (_) {
+      return null;
+    }
+  }
+
+  /** Owner side: apply a command forwarded from a follower to OUR engine. */
+  async function dispatchOwnerCommand(cmd) {
+    if (!cmd || !cmd.tableId) return;
+    const game = await registry.get(String(cmd.tableId));
+    // If ownership moved since the follower resolved us, drop it — the follower
+    // re-resolves and re-forwards to the new owner (no duplicate execution).
+    if (!game || !game.isOwner) return;
+    const sid = cmd.socketId;
+    switch (cmd.type) {
+      case "action": {
+        const res = await game.handleAction(cmd.userId, cmd.payload || {});
+        if (res && res.status === "rejected") {
+          if (sid) {
+            nsp.to(sid).emit("invalid_move", res);
+            nsp.to(sid).emit("action_result", res);
+          }
+        } else if (sid) {
+          nsp.to(sid).emit("action_result", { status: "accepted" });
+        }
+        break;
+      }
+      case "connect": {
+        game.onPlayerSocketConnected(cmd.userId);
+        await game.resyncTurnAfterReconnect(cmd.userId);
+        const idx = game.findSeatIndexByUser(cmd.userId);
+        if (idx >= 0 && cmd.payload && cmd.payload.clientSeed) {
+          game.seats[idx].clientSeed = String(cmd.payload.clientSeed).trim().slice(0, 128);
+        }
+        if (game.round === "idle" && !game.running && !game.frozen) {
+          await game.bootstrapLobbyStart();
+        } else {
+          await game.refreshSeatsFromDb();
+          await game.broadcastState();
+        }
+        if (sid) {
+          const p = game.getPublicState(null);
+          const m = game.getPublicState(cmd.userId);
+          nsp.to(sid).emit("table_state", p);
+          nsp.to(sid).emit("state", p);
+          nsp.to(sid).emit("table_state_me", m);
+          nsp.to(sid).emit("reconnect_state", m);
+          nsp.to(sid).emit("state:me", m);
+        }
+        break;
+      }
+      case "disconnect": {
+        game.onPlayerSocketDisconnected(cmd.userId);
+        break;
+      }
+      case "resync": {
+        await game.resyncTurnAfterReconnect(cmd.userId);
+        if (sid) {
+          const m = game.getPublicState(cmd.userId);
+          nsp.to(sid).emit("table_state_me", m);
+          nsp.to(sid).emit("state:me", m);
+          nsp.to(sid).emit("reconnect_state", m);
+        }
+        await game.broadcastState();
+        break;
+      }
+      case "bootstrap": {
+        await game.bootstrapLobbyStart();
+        break;
+      }
+      case "sync-db": {
+        if (game.round === "idle" && !game.running && !game.frozen) {
+          await game.bootstrapLobbyStart();
+        } else {
+          await game.refreshSeatsFromDb();
+          await game.broadcastState();
+        }
+        break;
+      }
+      case "watch": {
+        game.spectatorUserIds.add(String(cmd.userId));
+        game.startSpectatorDrain();
+        if (sid) {
+          const delayed = require("../services/spectatorDelayService").getLatestDelayedState(
+            game.tableId
+          );
+          if (delayed) {
+            nsp.to(sid).emit("table_state", delayed);
+            nsp.to(sid).emit("state", delayed);
+          }
+        }
+        break;
+      }
+      case "unwatch": {
+        game.spectatorUserIds.delete(String(cmd.userId));
+        break;
+      }
+      default:
+        break;
+    }
+  }
+
+  /**
+   * Run a mutating op on the authoritative owner. If THIS instance owns the
+   * table, execute `runLocal`; otherwise publish `forwardCmd` to the owner.
+   */
+  async function ownerRunOrForward(tableId, forwardCmd, runLocal) {
+    const game = await registry.get(String(tableId));
+    if (!game) return;
+    if (game.isOwner) {
+      await runLocal(game);
+      return;
+    }
+    const ownerId = await currentOwnerId(tableId);
+    if (ownerId && ownerId !== registry.instanceId) {
+      await commandBus.publishTo(ownerId, forwardCmd);
+      return;
+    }
+    // Ownerless / stale — a second get() may claim ownership for us (failover).
+    const g2 = await registry.get(String(tableId));
+    if (g2 && g2.isOwner) await runLocal(g2);
+  }
+
+  registry.ownerRunOrForward = ownerRunOrForward;
+
+  /**
+   * Service→engine bridge helper: after a REST mutation to Mongo, ensure the
+   * OWNER re-reads it. Returns true when forwarded to a remote owner (the caller
+   * should then skip its local engine sync), false when we are the owner.
+   */
+  registry.requestOwnerSync = async (tableId) => {
+    const ownerId = await currentOwnerId(tableId);
+    if (ownerId && ownerId !== registry.instanceId) {
+      await commandBus.publishTo(ownerId, { type: "sync-db", tableId: String(tableId) });
+      return true;
+    }
+    return false;
+  };
 
   // Auth
   nsp.use((socket, next) => {
@@ -3974,6 +4381,9 @@ function initTableGame(io, options = {}) {
       if (!token) return next(new Error("Authentication token missing"));
       const decoded = jwt.verify(token, process.env.JWT_SECRET_KEY);
       socket.userId = decoded.userId;
+      // H-3: mirror userId into socket.data so cluster-wide RemoteSockets (via the
+      // redis-adapter) expose it for the owner's per-user broadcasts.
+      socket.data.userId = decoded.userId;
       socket.userIp = security.getIp(socket);
       const sec = security.onConnection(socket, socket.userId);
       if (sec.blocked) return next(new Error(sec.reason || "Rate limited"));
@@ -3998,30 +4408,39 @@ function initTableGame(io, options = {}) {
         if (!isSeated && !isVacating) return;
         socket.join(`tg:${tableId}`);
 
-        const game = await registry.get(String(tableId));
-        if (!game) return;
-
-        game.onPlayerSocketConnected(socket.userId);
-        await game.resyncTurnAfterReconnect(socket.userId);
-        const idx = game.findSeatIndexByUser(socket.userId);
-        if (idx >= 0 && typeof clientSeed === "string" && clientSeed.trim()) {
-          game.seats[idx].clientSeed = clientSeed.trim().slice(0, 128);
-        }
-
-        if (game.round === "idle" && !game.running && !game.frozen) {
-          await game.bootstrapLobbyStart();
-        } else {
-          await game.refreshSeatsFromDb();
-          await game.broadcastState();
-        }
-
-        const p = game.getPublicState(null);
-        const m = game.getPublicState(socket.userId);
-        socket.emit("table_state", p);
-        socket.emit("state", p);
-        socket.emit("table_state_me", m);
-        socket.emit("reconnect_state", m);
-        socket.emit("state:me", m);
+        // H-3: the owner applies the (re)connect + emits initial state. On a
+        // follower, forward it; the owner emits state to this socket cluster-wide.
+        await ownerRunOrForward(
+          String(tableId),
+          {
+            type: "connect",
+            tableId: String(tableId),
+            userId: socket.userId,
+            socketId: socket.id,
+            payload: { clientSeed: typeof clientSeed === "string" ? clientSeed : null },
+          },
+          async (game) => {
+            game.onPlayerSocketConnected(socket.userId);
+            await game.resyncTurnAfterReconnect(socket.userId);
+            const idx = game.findSeatIndexByUser(socket.userId);
+            if (idx >= 0 && typeof clientSeed === "string" && clientSeed.trim()) {
+              game.seats[idx].clientSeed = clientSeed.trim().slice(0, 128);
+            }
+            if (game.round === "idle" && !game.running && !game.frozen) {
+              await game.bootstrapLobbyStart();
+            } else {
+              await game.refreshSeatsFromDb();
+              await game.broadcastState();
+            }
+            const p = game.getPublicState(null);
+            const m = game.getPublicState(socket.userId);
+            socket.emit("table_state", p);
+            socket.emit("state", p);
+            socket.emit("table_state_me", m);
+            socket.emit("reconnect_state", m);
+            socket.emit("state:me", m);
+          }
+        );
 
         socket.emit("table_event", { type: "joined", tableId: String(tableId) });
       } catch (e) {
@@ -4064,22 +4483,25 @@ function initTableGame(io, options = {}) {
         }
         socket.isSpectator = true;
         socket.join(`tg:${tableId}`);
-        const game = await registry.get(String(tableId));
-        if (game) {
-          game.spectatorUserIds.add(String(socket.userId));
-          game.startSpectatorDrain();
-          // N-3: never hand a spectator live state — latest delayed frame, or a
-          // neutral roster-only placeholder until the delayed feed is ready.
-          const spectatorDelay = require("../services/spectatorDelayService");
-          const frame =
-            spectatorDelay.getLatestDelayedState(String(tableId)) ||
-            game.buildSpectatorWaitingState();
-          socket.emit("table_state", frame);
-          socket.emit("state", frame);
-          socket.emit("table_state_me", frame);
-          socket.emit("reconnect_state", frame);
-          socket.emit("state:me", frame);
+        // Send an immediate frame ONLY if a ≥delay-old spectator frame is ready
+        // locally (never live state — N-3). Otherwise the owner's drain delivers
+        // the first delayed frame within ~1s once we register below.
+        const spectatorDelay = require("../services/spectatorDelayService");
+        const delayed = spectatorDelay.getLatestDelayedState(String(tableId));
+        if (delayed) {
+          socket.emit("table_state", delayed);
+          socket.emit("state", delayed);
         }
+        // Register the spectator with the OWNER so its drain + broadcasts deliver
+        // ongoing delayed frames cluster-wide.
+        await ownerRunOrForward(
+          String(tableId),
+          { type: "watch", tableId: String(tableId), userId: socket.userId, socketId: socket.id },
+          async (game) => {
+            game.spectatorUserIds.add(String(socket.userId));
+            game.startSpectatorDrain();
+          }
+        );
         socket.emit("table_event", { type: "spectating", tableId: String(tableId) });
       } catch (e) {
         logger.error("watch_table_failed", {
@@ -4096,8 +4518,17 @@ function initTableGame(io, options = {}) {
       if (!tableId) return;
       socket.leave(`tg:${tableId}`);
       const entry = registry.map.get(String(tableId));
-      if (entry?.game) {
+      if (entry?.game?.isOwner) {
         entry.game.spectatorUserIds.delete(String(socket.userId));
+      } else {
+        const ownerId = await currentOwnerId(tableId);
+        if (ownerId && ownerId !== registry.instanceId) {
+          void commandBus.publishTo(ownerId, {
+            type: "unwatch",
+            tableId: String(tableId),
+            userId: socket.userId,
+          });
+        }
       }
       socket.emit("table_event", { type: "left", tableId: String(tableId) });
     });
@@ -4112,23 +4543,30 @@ function initTableGame(io, options = {}) {
         (v) => String(v.user) === uid && new Date(v.vacateUntil).getTime() > Date.now()
       );
       if (!isSeated && !isVacating) return;
-      const game = await registry.get(String(tableId));
-      if (game) {
-        await game.bootstrapLobbyStart();
-      }
+      await ownerRunOrForward(
+        String(tableId),
+        { type: "bootstrap", tableId: String(tableId), userId: socket.userId, socketId: socket.id },
+        async (game) => {
+          await game.bootstrapLobbyStart();
+        }
+      );
     });
 
     socket.on("resync_turn", async ({ tableId }) => {
       try {
         if (!tableId) return;
-        const game = await registry.get(String(tableId));
-        if (!game) return;
-        await game.resyncTurnAfterReconnect(socket.userId);
-        const priv = game.getPublicState(socket.userId);
-        socket.emit("table_state_me", priv);
-        socket.emit("state:me", priv);
-        socket.emit("reconnect_state", priv);
-        await game.broadcastState();
+        await ownerRunOrForward(
+          String(tableId),
+          { type: "resync", tableId: String(tableId), userId: socket.userId, socketId: socket.id },
+          async (game) => {
+            await game.resyncTurnAfterReconnect(socket.userId);
+            const priv = game.getPublicState(socket.userId);
+            socket.emit("table_state_me", priv);
+            socket.emit("state:me", priv);
+            socket.emit("reconnect_state", priv);
+            await game.broadcastState();
+          }
+        );
       } catch (e) {
         logger.error("resync_turn_failed", {
           userId: socket.userId,
@@ -4145,16 +4583,28 @@ function initTableGame(io, options = {}) {
         socket.emit("invalid_move", { status: "rejected", reason: sec.reason, retryAfterMs: sec.retryAfterMs });
         return;
       }
-      const game = await registry.get(String(tableId));
-      if (!game) return;
-      const res = await game.handleAction(socket.userId, { action, amount, actionId });
-      if (res && res.status === "rejected") {
-        metrics.actionsTotal.inc({ status: "rejected", action: String(action || "unknown") });
-        socket.emit("invalid_move", res);
-        socket.emit("action_result", res);
-      } else {
-        socket.emit("action_result", { status: "accepted" });
-      }
+      // H-3: only the owner processes the action; a follower forwards it. The
+      // owner emits the result to this socket cluster-wide (via the adapter).
+      await ownerRunOrForward(
+        String(tableId),
+        {
+          type: "action",
+          tableId: String(tableId),
+          userId: socket.userId,
+          socketId: socket.id,
+          payload: { action, amount, actionId },
+        },
+        async (game) => {
+          const res = await game.handleAction(socket.userId, { action, amount, actionId });
+          if (res && res.status === "rejected") {
+            metrics.actionsTotal.inc({ status: "rejected", action: String(action || "unknown") });
+            socket.emit("invalid_move", res);
+            socket.emit("action_result", res);
+          } else {
+            socket.emit("action_result", { status: "accepted" });
+          }
+        }
+      );
     });
 
     socket.on("table_chat", (payload, ack) => {
@@ -4207,21 +4657,44 @@ function initTableGame(io, options = {}) {
       }
     });
 
-    socket.on("disconnect", () => {
+    socket.on("disconnect", async () => {
       security.onDisconnect(socket, socket.userId);
       metrics.activePlayers.dec();
       if (socket.isSpectator) {
-        // N-3: release the spectator registration so the drain timer can stop.
-        for (const { game } of registry.map.values()) {
-          game.spectatorUserIds.delete(String(socket.userId));
+        // N-3 / H-3: release the spectator on whichever instance owns each table.
+        for (const [tid, { game }] of registry.map.entries()) {
+          if (game.isOwner) {
+            game.spectatorUserIds.delete(String(socket.userId));
+          } else {
+            const ownerId = await currentOwnerId(tid);
+            if (ownerId && ownerId !== registry.instanceId) {
+              void commandBus.publishTo(ownerId, {
+                type: "unwatch",
+                tableId: tid,
+                userId: socket.userId,
+              });
+            }
+          }
         }
         return;
       }
+      // H-3: the owner applies the disconnect (reconnect grace + fold-on-timeout).
+      // A follower forwards it to the owner instead of touching its passive copy.
       for (const { game } of registry.map.values()) {
         const idx = game.findSeatIndexByUser(socket.userId);
-        if (idx >= 0) {
+        if (idx < 0) continue;
+        if (game.isOwner) {
           game.onPlayerSocketDisconnected(socket.userId);
           void game.broadcastState();
+        } else {
+          const ownerId = await currentOwnerId(game.tableId);
+          if (ownerId && ownerId !== registry.instanceId) {
+            void commandBus.publishTo(ownerId, {
+              type: "disconnect",
+              tableId: game.tableId,
+              userId: socket.userId,
+            });
+          }
         }
       }
     });
@@ -4233,32 +4706,28 @@ let activeRegistry = null;
 async function refreshCosmeticsForUserOnTables(userId, { emitVipUpdated = false } = {}) {
   if (!activeRegistry || !userId) return;
   const uidStr = String(userId);
-  const map = await resolvePublicCosmeticsForSeats([
-    { userId: uidStr, isBot: false },
-  ]);
-  const row = map.get(uidStr);
-  const cosmetics = row?.cosmetics || emptyCosmetics();
-  const vipLevel = row?.vipLevel || null;
   for (const { game } of activeRegistry.map.values()) {
     const idx = game.findSeatIndexByUser(userId);
     if (idx >= 0) {
-      game.seats[idx].cosmetics = { ...cosmetics };
-      game.seats[idx].vipLevel = vipLevel;
+      await game.applyCosmeticsToSeats();
+      const seat = game.seats[idx];
       const room = `tg:${game.tableId}`;
       try {
         await game.saveSnapshot({ finished: false });
         game.nsp.to(room).emit("cosmetics_updated", {
           tableId: String(game.tableId),
           userId: uidStr,
-          vipLevel,
-          cosmetics: publicCosmeticsPayload(cosmetics),
+          vipLevel: seat.vipLevel || null,
+          cosmetics: publicSeatCosmeticsPayload(seat.cosmetics),
+          activeTableTheme: game.activeTableTheme || null,
+          activeTableAsset: game.activeTableAsset || null,
           stateRevision: toSafeInt(game.stateRevision, 0),
         });
         if (emitVipUpdated) {
           game.nsp.to(room).emit("vip_updated", {
             tableId: String(game.tableId),
             userId: uidStr,
-            vipLevel,
+            vipLevel: seat.vipLevel || null,
           });
         }
       } catch (_) {
@@ -4280,11 +4749,7 @@ function evictTableFromRegistry(tableId) {
   if (!entry) return false;
   const game = entry.game;
   if (game) {
-    game.clearActionScheduling?.();
-    game.clearBotFillTimer?.();
-    game.clearWaitForPlayersTimer?.();
-    game.stopSpectatorDrain?.();
-    game.stopLockHeartbeat?.();
+    game.disposeTimers?.();
     game.running = false;
   }
   activeRegistry.map.delete(tid);
@@ -4363,8 +4828,12 @@ async function restoreLiveEngineSeat(tableId, userId, meta = {}) {
 async function syncLivePokerTableAfterJoin(tableId) {
   if (!activeRegistry) return;
   try {
+    // H-3: if another instance owns this table, ask IT to re-read Mongo.
+    if (activeRegistry.requestOwnerSync && (await activeRegistry.requestOwnerSync(tableId))) {
+      return;
+    }
     const game = await activeRegistry.get(String(tableId));
-    if (!game) return;
+    if (!game || !game.isOwner) return;
     if (game.round === "idle" && !game.running && !game.frozen) {
       await game.bootstrapLobbyStart();
     } else {
@@ -4381,8 +4850,12 @@ async function syncLivePokerTableAfterJoin(tableId) {
 
 async function syncLivePokerTableAfterLeave(tableId) {
   if (!activeRegistry) return;
+  // H-3: if another instance owns this table, ask IT to re-read Mongo.
+  if (activeRegistry.requestOwnerSync && (await activeRegistry.requestOwnerSync(tableId))) {
+    return;
+  }
   const game = await activeRegistry.get(String(tableId));
-  if (!game) return;
+  if (!game || !game.isOwner) return;
   await game.refreshSeatsFromDb();
   game.clearWaitForPlayersTimer();
   if (game.humanSeatCount() < 1) {
@@ -4444,9 +4917,30 @@ async function adminForceEndHandTable(tableId) {
   return game.adminForceEndHand();
 }
 
+/**
+ * H-3 graceful shutdown: release every ownership lease and stop the command bus
+ * so surviving instances re-home this node's tables immediately (instead of
+ * waiting out the lease TTL). Safe to call multiple times / when disabled.
+ */
+async function shutdownTableGame() {
+  if (!activeRegistry) return;
+  try {
+    if (activeRegistry.commandBus) await activeRegistry.commandBus.stop();
+  } catch (_) {
+    /* closing anyway */
+  }
+  try {
+    await activeRegistry.releaseAll();
+  } catch (_) {
+    /* leases expire on TTL if release fails */
+  }
+}
+
 module.exports = {
   initTableGame,
+  shutdownTableGame,
   PokerTable,
+  GameRegistry,
   getTableGameDebugSnapshot,
   evictTableFromRegistry,
   resetLivePokerTableWhenEmpty,

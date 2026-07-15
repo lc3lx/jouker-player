@@ -539,3 +539,32 @@ test("H-2: action-lock heartbeat starts on acquire, stops on release; Redis rene
   assert.equal(await g2.lockManager.renew("h2-redis"), false, "renew refused on token mismatch");
   await g2.releaseActionLock();
 });
+
+// ─── Phase-0 stability: no timer leaks on prune / eviction ───────────────────
+
+test("disposeTimers stops the spectator drain and lock heartbeat (no timer leak)", async () => {
+  const g = new PokerTable(createNspStub(), {
+    _id: "dispose-t",
+    smallBlind: 100,
+    bigBlind: 200,
+    minBuyIn: 10000,
+    maxBuyIn: 10000,
+    capacity: 9,
+    seats: [],
+  });
+  g.saveSnapshot = async () => {};
+
+  g.spectatorUserIds.add("spec-x");
+  g.startSpectatorDrain();
+  await g.acquireActionLock();
+  assert.ok(g.spectatorDrainTimer, "drain timer running");
+  assert.ok(g.lockHeartbeatTimer, "heartbeat running");
+
+  g.disposeTimers();
+  assert.equal(g.spectatorDrainTimer, null, "drain timer cleared");
+  assert.equal(g.lockHeartbeatTimer, null, "heartbeat cleared");
+  assert.equal(g.reconnectTimers.size, 0);
+  assert.equal(g.vacateTimers.size, 0);
+
+  await g.releaseActionLock();
+});

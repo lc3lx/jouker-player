@@ -44,6 +44,10 @@ function mkGame(seatCount) {
   const g = new PokerTable(createNspStub(), mkTable(seatCount));
   g.broadcastState = async () => {};
   g.syncMongoTableStatus = async () => {};
+  // Engine tests use synthetic userIds ("u0"..) — stub the cosmetics/VIP
+  // resolver (which casts userIds to ObjectId) so these unit tests stay isolated
+  // from the wallet/VIP/cosmetics services.
+  g.applyCosmeticsToSeats = async () => {};
   g.startHand = async function prodStartHand() {
     promoteWaitingToSeated(this.seats);
     for (const s of this.seats) {

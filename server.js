@@ -319,3 +319,31 @@ process.on("uncaughtException", (err) => {
   });
   metrics.errorsTotal.inc({ type: "uncaught_exception" });
 });
+
+// H-3: on a rolling deploy / graceful stop, release poker table ownership leases
+// so other instances take over immediately instead of waiting out the TTL.
+let _shuttingDown = false;
+async function gracefulShutdown(signal) {
+  if (_shuttingDown) return;
+  _shuttingDown = true;
+  logger.info("graceful_shutdown_started", { signal });
+  try {
+    const { shutdownTableGame } = require("./sockets/tableGame");
+    await shutdownTableGame();
+  } catch (e) {
+    logger.warn("graceful_shutdown_tablegame_failed", { reason: e?.message || "unknown" });
+  }
+  try {
+    if (realtimeRedis && realtimeRedis.close) await realtimeRedis.close();
+  } catch (_) {
+    /* closing anyway */
+  }
+  if (server) {
+    server.close(() => process.exit(0));
+    setTimeout(() => process.exit(0), 5000).unref();
+  } else {
+    process.exit(0);
+  }
+}
+process.on("SIGTERM", () => void gracefulShutdown("SIGTERM"));
+process.on("SIGINT", () => void gracefulShutdown("SIGINT"));

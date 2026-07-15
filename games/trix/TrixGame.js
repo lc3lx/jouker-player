@@ -10,7 +10,7 @@ const timerManager = require('../../engine/TimerManager');
 const StateMachine = require('../../engine/StateMachine');
 const { STATE: TRIX_STATE, TRANSITIONS: TRIX_TRANSITIONS } = require('../../engine/states/trixStates');
 const {
-  resolvePublicCosmeticsForSeats,
+  resolveProfileOnlyCosmeticsForSeats,
   publicCosmeticsPayload,
   emptyCosmetics,
 } = require('../../services/playerPublicCosmeticsService');
@@ -399,7 +399,7 @@ class TrixGame extends BaseGameEngine {
       userId: p.userId,
       isBot: !!p.isBot,
     }));
-    const map = await resolvePublicCosmeticsForSeats(seatsForResolve);
+    const map = await resolveProfileOnlyCosmeticsForSeats(seatsForResolve);
     for (const p of this.players) {
       if (p.isBot || !p.userId) {
         p.cosmetics = emptyCosmetics();

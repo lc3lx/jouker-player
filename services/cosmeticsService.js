@@ -530,14 +530,19 @@ async function autoEquipAfterBuy(userId, cosmeticIdRaw) {
 async function mergeCosmeticsIntoPublicState(state) {
   if (!state || !Array.isArray(state.seats)) return state;
   const {
-    resolvePublicCosmeticsForSeats,
+    resolvePublicCosmeticsForPokerSeats,
     emptyCosmetics,
+    publicSeatCosmeticsPayload,
   } = require("./playerPublicCosmeticsService");
-  const map = await resolvePublicCosmeticsForSeats(state.seats);
+  const { byUserId, activeTableTheme, activeTableAsset } =
+    await resolvePublicCosmeticsForPokerSeats(state.seats);
+  state.activeTableTheme = activeTableTheme;
+  state.activeTableAsset = activeTableAsset;
   for (const s of state.seats) {
-    const pack = map.get(String(s.userId));
+    const pack = byUserId.get(String(s.userId));
     s.vipLevel = pack?.vipLevel || null;
-    s.cosmetics = pack?.cosmetics || emptyCosmetics();
+    s.cosmetics =
+      publicSeatCosmeticsPayload(pack?.cosmetics) || emptyCosmetics();
   }
   return state;
 }

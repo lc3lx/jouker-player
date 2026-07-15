@@ -1,38 +1,137 @@
 "use strict";
 
 /**
- * Resolve public seat cosmetics: store skin + VIP table/card overrides.
+ * Public seat cosmetics — server is the single source of truth.
+ *
+ * Poker:
+ *  - Table felt: one active VIP theme for the whole table (highest seated VIP).
+ *  - Per seat: profile skin + owner card backs only.
+ *
+ * Trix / Tarneeb:
+ *  - Profile skin (+ vipLevel badge) only — no table or card cosmetics.
  */
 const cosmeticsService = require("./cosmeticsService");
 const vipService = require("./vipService");
-const {
-  resolveEffectiveSeatCosmetics,
-  vipCosmeticsForLevel,
-} = require("../config/vipCosmeticsConfig");
+const { vipLevelRank } = require("../config/vipConfig");
+const { vipCosmeticsForLevel } = require("../config/vipCosmeticsConfig");
 
-function emptyCosmetics() {
+function emptySeatCosmetics() {
   return {
     skin: null,
     avatarFrame: null,
-    tableTheme: null,
     cardSkin: null,
-    tableAsset: null,
     cardAssets: null,
   };
 }
 
+/** @deprecated alias — seat payload only (no table fields). */
+function emptyCosmetics() {
+  return emptySeatCosmetics();
+}
+
+function resolveSeatCardCosmetics({ equipped, vipLevel }) {
+  const eq = equipped && typeof equipped === "object" ? equipped : {};
+  const vip = vipCosmeticsForLevel(vipLevel);
+  return {
+    skin: eq.skin || eq.avatarFrame || null,
+    avatarFrame: eq.skin || eq.avatarFrame || null,
+    cardSkin: vip?.cardSkin || eq.cardSkin || null,
+    cardAssets: vip?.cardAssets || null,
+  };
+}
+
+function resolveProfileOnlyCosmetics({ equipped }) {
+  const eq = equipped && typeof equipped === "object" ? equipped : {};
+  return {
+    skin: eq.skin || eq.avatarFrame || null,
+    avatarFrame: eq.skin || eq.avatarFrame || null,
+  };
+}
+
 /**
- * @param {Array<{userId?: string|null, isBot?: boolean}>} seats
- * @returns {Promise<Map<string, object>>} userId -> effective cosmetics + vipLevel
+ * Pick the highest VIP among seated humans (chips > 0) for shared table felt.
+ * @param {Array<{ vipLevel?: string|null }>} seatedHumans
  */
-async function resolvePublicCosmeticsForSeats(seats) {
-  const humanIds = [
+function resolveActiveTableCosmetics(seatedHumans) {
+  let bestLevel = null;
+  let bestRank = 0;
+  for (const row of seatedHumans || []) {
+    const lvl = row?.vipLevel || null;
+    if (!lvl) continue;
+    const rank = vipLevelRank(lvl);
+    if (rank > bestRank) {
+      bestRank = rank;
+      bestLevel = lvl;
+    }
+  }
+  if (!bestLevel) {
+    return { activeTableTheme: null, activeTableAsset: null };
+  }
+  const vip = vipCosmeticsForLevel(bestLevel);
+  return {
+    activeTableTheme: vip?.tableTheme || null,
+    activeTableAsset: vip?.tableAsset || null,
+  };
+}
+
+function humanIdsFromSeats(seats) {
+  return [
     ...new Set(
       (seats || [])
         .filter((s) => s && s.userId && !s.isBot)
         .map((s) => String(s.userId))
     ),
   ];
+}
+
+/**
+ * Poker table: per-seat skin + card backs, plus table-wide active VIP felt.
+ * @returns {Promise<{ byUserId: Map<string, object>, activeTableTheme: string|null, activeTableAsset: string|null }>}
+ */
+async function resolvePublicCosmeticsForPokerSeats(seats) {
+  const humanIds = humanIdsFromSeats(seats);
+  const byUserId = new Map();
+  if (humanIds.length === 0) {
+    return {
+      byUserId,
+      activeTableTheme: null,
+      activeTableAsset: null,
+    };
+  }
+
+  const [equippedMap, vipMap] = await Promise.all([
+    cosmeticsService.resolveEquippedPayloadForUsers(humanIds),
+    vipService.getVipLevelsForUsers(humanIds),
+  ]);
+
+  const seatedForTable = [];
+  for (const s of seats || []) {
+    if (!s || s.isBot || !s.userId) continue;
+    if (toSafeChips(s.chips) <= 0) continue;
+    const uid = String(s.userId);
+    const vipLevel = vipMap.get(uid) || null;
+    seatedForTable.push({ vipLevel });
+  }
+
+  for (const uid of humanIds) {
+    const vipLevel = vipMap.get(uid) || null;
+    const equipped = equippedMap.get(uid) || {};
+    const cosmetics = resolveSeatCardCosmetics({ equipped, vipLevel });
+    byUserId.set(uid, { vipLevel, cosmetics });
+  }
+
+  const { activeTableTheme, activeTableAsset } =
+    resolveActiveTableCosmetics(seatedForTable);
+
+  return { byUserId, activeTableTheme, activeTableAsset };
+}
+
+/**
+ * Trix / Tarneeb: profile skin only.
+ * @returns {Promise<Map<string, object>>}
+ */
+async function resolveProfileOnlyCosmeticsForSeats(seats) {
+  const humanIds = humanIdsFromSeats(seats);
   const out = new Map();
   if (humanIds.length === 0) return out;
 
@@ -44,37 +143,47 @@ async function resolvePublicCosmeticsForSeats(seats) {
   for (const uid of humanIds) {
     const vipLevel = vipMap.get(uid) || null;
     const equipped = equippedMap.get(uid) || {};
-    const effective = resolveEffectiveSeatCosmetics({ equipped, vipLevel });
-    out.set(uid, {
-      vipLevel,
-      cosmetics: {
-        skin: effective.skin,
-        avatarFrame: effective.skin,
-        tableTheme: effective.tableTheme,
-        cardSkin: effective.cardSkin,
-        tableAsset: effective.tableAsset,
-        cardAssets: effective.cardAssets,
-      },
-    });
+    const cosmetics = resolveProfileOnlyCosmetics({ equipped, vipLevel });
+    out.set(uid, { vipLevel, cosmetics });
   }
   return out;
 }
 
-function publicCosmeticsPayload(cosmetics) {
+/** Backward-compatible alias for poker resolvers. */
+async function resolvePublicCosmeticsForSeats(seats) {
+  const { byUserId } = await resolvePublicCosmeticsForPokerSeats(seats);
+  return byUserId;
+}
+
+function publicSeatCosmeticsPayload(cosmetics) {
   const c = cosmetics && typeof cosmetics === "object" ? cosmetics : {};
   return {
     skin: c.skin || c.avatarFrame || null,
     avatarFrame: c.skin || c.avatarFrame || null,
-    tableTheme: c.tableTheme || null,
     cardSkin: c.cardSkin || null,
-    tableAsset: c.tableAsset || null,
     cardAssets: Array.isArray(c.cardAssets) ? c.cardAssets : null,
   };
 }
 
+function publicCosmeticsPayload(cosmetics) {
+  return publicSeatCosmeticsPayload(cosmetics);
+}
+
+function toSafeChips(v) {
+  const n = Number(v);
+  return Number.isFinite(n) ? Math.max(0, Math.floor(n)) : 0;
+}
+
 module.exports = {
   emptyCosmetics,
+  emptySeatCosmetics,
+  resolveSeatCardCosmetics,
+  resolveProfileOnlyCosmetics,
+  resolveActiveTableCosmetics,
   resolvePublicCosmeticsForSeats,
+  resolvePublicCosmeticsForPokerSeats,
+  resolveProfileOnlyCosmeticsForSeats,
   publicCosmeticsPayload,
+  publicSeatCosmeticsPayload,
   vipCosmeticsForLevel,
 };

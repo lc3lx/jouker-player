@@ -12,7 +12,7 @@ const timerManager = require("../../engine/TimerManager");
 const StateMachine = require("../../engine/StateMachine");
 const { STATE: T41_STATE, TRANSITIONS: T41_TRANSITIONS } = require("../../engine/states/tarneeb41States");
 const {
-  resolvePublicCosmeticsForSeats,
+  resolveProfileOnlyCosmeticsForSeats,
   publicCosmeticsPayload,
   emptyCosmetics,
 } = require("../../services/playerPublicCosmeticsService");
@@ -253,7 +253,7 @@ class Tarneeb41Game extends BaseGameEngine {
       userId: p.userId,
       isBot: !!p.isBot,
     }));
-    const map = await resolvePublicCosmeticsForSeats(seatsForResolve);
+    const map = await resolveProfileOnlyCosmeticsForSeats(seatsForResolve);
     for (const p of this.players) {
       if (p.isBot || !p.userId) {
         p.cosmetics = emptyCosmetics();
