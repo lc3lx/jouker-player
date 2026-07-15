@@ -27,7 +27,7 @@ const vipSubscriptionSchema = new mongoose.Schema(
     autoRenew: { type: Boolean, default: true },
     purchaseProvider: {
       type: String,
-      enum: ["google_play", "apple", "stripe", "admin", "restore"],
+      enum: ["google_play", "apple", "stripe", "admin", "agent", "restore"],
       default: "admin",
     },
     status: {

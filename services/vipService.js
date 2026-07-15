@@ -28,7 +28,7 @@ const WeeklyCashback = require("../models/vipWeeklyCashbackModel");
 const VIPQuizQuestion = require("../models/vipQuizQuestionModel");
 const VIPQuizAttempt = require("../models/vipQuizAttemptModel");
 const User = require("../models/userModel");
-const VIPPurchaseRequest = require("../models/vipPurchaseRequestModel");
+const DepositTicket = require("../models/depositTicketModel");
 const WalletTransaction = require("../models/walletTransactionModel");
 const { withMongoTransaction, ledgerDeposit } = require("./walletLedgerService");
 const {
@@ -431,10 +431,15 @@ async function assertProviderRefUnused(providerRef) {
 
 async function buildStatusPayload(userId) {
   const uid = toIdStr(userId);
-  const [sub, levels, pendingReq] = await Promise.all([
+  const { ACTIVE_STATUSES } = DepositTicket;
+  const [sub, levels, pendingTicket] = await Promise.all([
     VIPSubscription.findOne({ userId: uid }).lean(),
     getPublicVipTiers(),
-    VIPPurchaseRequest.findOne({ userId: uid, status: "pending" })
+    DepositTicket.findOne({
+      user: uid,
+      ticketType: "vip",
+      status: { $in: ACTIVE_STATUSES },
+    })
       .sort({ createdAt: -1 })
       .lean(),
   ]);
@@ -452,21 +457,20 @@ async function buildStatusPayload(userId) {
     purchaseProvider: sub?.purchaseProvider || null,
     benefits: cfg ? publicBenefits(level) : null,
     levels,
-    pendingPurchaseRequest: serializePurchaseRequest(pendingReq),
+    pendingPurchaseRequest: serializeVipAgentTicket(pendingTicket),
   };
 }
 
-function serializePurchaseRequest(doc) {
+function serializeVipAgentTicket(doc) {
   if (!doc) return null;
   return {
     id: String(doc._id),
-    level: doc.level,
+    ticketId: String(doc._id),
+    level: doc.vipLevel,
     status: doc.status,
     priceUsd: doc.priceUsd,
-    userNote: doc.userNote || null,
-    adminNote: doc.adminNote || null,
+    ticketType: "vip",
     createdAt: doc.createdAt,
-    reviewedAt: doc.reviewedAt || null,
   };
 }
 
@@ -1101,46 +1105,27 @@ exports.getHistory = asyncHandler(async (req, res) => {
 });
 
 exports.postPurchaseRequest = asyncHandler(async (req, res, next) => {
-  const uid = toIdStr(req.user._id);
-  const level = normalizeVipLevel(req.body?.level);
-  if (!level) return next(new ApiError("Invalid VIP level", 400));
-
-  const tiers = await getPublicVipTiers();
-  const tier = tiers.find((t) => t.level === level);
-  if (!tier) return next(new ApiError("VIP package not available", 404));
-
-  const existing = await VIPPurchaseRequest.findOne({ userId: uid, status: "pending" }).lean();
-  if (existing) {
-    return next(new ApiError("You already have a pending VIP purchase request", 409));
-  }
-
-  const userNote = String(req.body?.userNote || "").trim().slice(0, 500) || null;
-  const doc = await VIPPurchaseRequest.create({
-    userId: uid,
-    level,
-    status: "pending",
-    priceUsd: tier.priceUsd,
-    userNote,
-  });
-
-  res.status(201).json({
-    status: "success",
-    data: {
-      request: serializePurchaseRequest(doc),
-      message:
-        "تم إرسال طلب الشراء. تواصل مع الدعم من صفحة المزيد لترتيب طريقة الدفع.",
-    },
-  });
+  return next(
+    new ApiError(
+      "VIP purchases are handled via deposit agents. Open the VIP store and choose an agent.",
+      410
+    )
+  );
 });
 
 exports.getMyPurchaseRequest = asyncHandler(async (req, res) => {
   const uid = toIdStr(req.user._id);
-  const doc = await VIPPurchaseRequest.findOne({ userId: uid, status: "pending" })
+  const { ACTIVE_STATUSES } = DepositTicket;
+  const doc = await DepositTicket.findOne({
+    user: uid,
+    ticketType: "vip",
+    status: { $in: ACTIVE_STATUSES },
+  })
     .sort({ createdAt: -1 })
     .lean();
   res.status(200).json({
     status: "success",
-    data: { request: serializePurchaseRequest(doc) },
+    data: { request: serializeVipAgentTicket(doc) },
   });
 });
 
@@ -1334,90 +1319,40 @@ exports.adminUserVip = asyncHandler(async (req, res) => {
 });
 
 exports.adminListPurchaseRequests = asyncHandler(async (req, res) => {
-  const status = String(req.query.status || "pending").toLowerCase();
-  const filter = status === "all" ? {} : { status };
+  const status = String(req.query.status || "all").toLowerCase();
+  const q = { ticketType: "vip" };
+  if (status !== "all") q.status = status;
   const limit = Math.min(200, parseInt(req.query.limit || "50", 10) || 50);
-  const rows = await VIPPurchaseRequest.find(filter)
+  const rows = await DepositTicket.find(q)
     .sort({ createdAt: -1 })
     .limit(limit)
-    .populate("userId", "name email")
-    .populate("reviewedBy", "name email")
+    .populate("user", "name email")
+    .populate("agentUser", "name email")
+    .populate("approvedBy", "name email")
     .lean();
 
   res.status(200).json({
     status: "success",
     data: {
       requests: rows.map((r) => ({
-        ...serializePurchaseRequest(r),
-        user: r.userId
-          ? { id: r.userId._id, name: r.userId.name, email: r.userId.email }
+        id: String(r._id),
+        ticketId: String(r._id),
+        level: r.vipLevel,
+        status: r.status,
+        priceUsd: r.priceUsd,
+        user: r.user
+          ? { id: r.user._id, name: r.user.name, email: r.user.email }
           : null,
-        reviewedBy: r.reviewedBy
-          ? { id: r.reviewedBy._id, name: r.reviewedBy.name, email: r.reviewedBy.email }
+        agent: r.agentUser
+          ? { id: r.agentUser._id, name: r.agentUser.name, email: r.agentUser.email }
           : null,
+        approvedBy: r.approvedBy
+          ? { id: r.approvedBy._id, name: r.approvedBy.name, email: r.approvedBy.email }
+          : null,
+        approvedAt: r.approvedAt || null,
+        createdAt: r.createdAt,
       })),
     },
-  });
-});
-
-exports.adminApprovePurchaseRequest = asyncHandler(async (req, res, next) => {
-  const id = req.params.id;
-  const doc = await VIPPurchaseRequest.findById(id);
-  if (!doc) return next(new ApiError("Purchase request not found", 404));
-  if (doc.status !== "pending") {
-    return next(new ApiError(`Request is already ${doc.status}`, 409));
-  }
-
-  const adminNote = String(req.body?.adminNote || "").trim().slice(0, 500) || null;
-  const days = req.body?.days;
-
-  const { subscription, action } = await applyMembershipChange({
-    userId: doc.userId,
-    level: doc.level,
-    kind: "admin_gift",
-    days,
-    actorId: req.user._id,
-    note: adminNote || `Approved VIP purchase request ${doc._id}`,
-    priceCents: Math.round((doc.priceUsd || 0) * 100),
-  });
-
-  doc.status = "approved";
-  doc.adminNote = adminNote;
-  doc.reviewedBy = req.user._id;
-  doc.reviewedAt = new Date();
-  await doc.save();
-
-  res.status(200).json({
-    status: "success",
-    data: {
-      request: serializePurchaseRequest(doc),
-      subscription: {
-        action,
-        level: subscription.currentLevel,
-        expireDate: subscription.expireDate,
-      },
-    },
-  });
-});
-
-exports.adminRejectPurchaseRequest = asyncHandler(async (req, res, next) => {
-  const id = req.params.id;
-  const doc = await VIPPurchaseRequest.findById(id);
-  if (!doc) return next(new ApiError("Purchase request not found", 404));
-  if (doc.status !== "pending") {
-    return next(new ApiError(`Request is already ${doc.status}`, 409));
-  }
-
-  const adminNote = String(req.body?.adminNote || "").trim().slice(0, 500) || null;
-  doc.status = "rejected";
-  doc.adminNote = adminNote;
-  doc.reviewedBy = req.user._id;
-  doc.reviewedAt = new Date();
-  await doc.save();
-
-  res.status(200).json({
-    status: "success",
-    data: { request: serializePurchaseRequest(doc) },
   });
 });
 

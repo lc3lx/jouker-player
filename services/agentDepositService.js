@@ -30,6 +30,8 @@ const {
 const { createNotification } = require("./notificationService");
 const { sendPushToUser } = require("./pushService");
 const { logEvent } = require("./auditService");
+const { normalizeVipLevel } = require("../config/vipConfig");
+const { priceUsdForLevel } = require("./vipPricingService");
 
 const { ACTIVE_STATUSES } = DepositTicket;
 const APPROVABLE_STATUSES = ["accepted", "waiting_payment", "receipt_uploaded"];
@@ -105,15 +107,31 @@ function serializeMessage(row) {
   };
 }
 
+function vipLevelLabelAr(level) {
+  const map = {
+    bronze: "برونز",
+    silver: "فضة",
+    gold: "ذهب",
+    platinum: "بلاتينيوم",
+  };
+  return map[String(level || "").toLowerCase()] || level || "VIP";
+}
+
 function serializeTicket(row, viewer = "user") {
   const agentProfile =
     row.agentProfile && typeof row.agentProfile === "object" ? row.agentProfile : null;
+  const ticketType = row.ticketType || "deposit";
+  const isVip = ticketType === "vip";
   return {
     id: String(row._id),
+    ticketType,
     status: row.status,
     country: row.country,
     amountRequested: row.amountRequested,
     amountApproved: row.amountApproved,
+    vipLevel: row.vipLevel || null,
+    priceUsd: row.priceUsd ?? null,
+    vipLevelLabel: isVip ? vipLevelLabelAr(row.vipLevel) : null,
     currency: row.currency || "",
     paymentMethod: row.paymentMethod || "",
     user: briefUser(row.user),
@@ -469,6 +487,83 @@ exports.createTicket = asyncHandler(async (req, res) => {
   res.status(201).json({ status: "success", data: serializeTicket(populated, "user") });
 });
 
+exports.createVipTicket = asyncHandler(async (req, res) => {
+  const { agentProfileId, vipLevel: rawLevel, paymentMethod = "", currency = "" } = req.body || {};
+  const level = normalizeVipLevel(rawLevel);
+  if (!level) throw new ApiError("باقة VIP غير صالحة", 400);
+
+  const priceUsd = await priceUsdForLevel(level);
+  if (!Number.isFinite(priceUsd) || priceUsd < 0) {
+    throw new ApiError("سعر الباقة غير متاح", 400);
+  }
+
+  const profile = await AgentProfile.findOne({
+    _id: agentProfileId,
+    status: "approved",
+    "deposit.enabled": true,
+  }).populate("user", "name profileImg");
+  if (!profile) throw new ApiError("الوكيل غير متاح", 404);
+  if (String(profile.user._id) === String(req.user._id)) {
+    throw new ApiError("لا يمكنك فتح طلب مع نفسك", 400);
+  }
+
+  const country = (profile.deposit.countries || [])[0] || req.user.country || "";
+
+  const [pairActive, totalVipActive] = await Promise.all([
+    DepositTicket.countDocuments({
+      user: req.user._id,
+      agentProfile: profile._id,
+      ticketType: "vip",
+      status: { $in: ACTIVE_STATUSES },
+    }),
+    DepositTicket.countDocuments({
+      user: req.user._id,
+      ticketType: "vip",
+      status: { $in: ACTIVE_STATUSES },
+    }),
+  ]);
+  if (pairActive > 0) throw new ApiError("لديك طلب VIP مفتوح مع هذا الوكيل بالفعل", 400);
+  if (totalVipActive > 0) throw new ApiError("لديك طلب VIP قيد المعالجة بالفعل", 400);
+
+  const requestedCountry = String(req.body.country || country || "").toUpperCase();
+  const levelLabel = vipLevelLabelAr(level);
+  const ticket = await DepositTicket.create({
+    user: req.user._id,
+    agentProfile: profile._id,
+    agentUser: profile.user._id,
+    country: findCountry(requestedCountry) ? requestedCountry : country,
+    ticketType: "vip",
+    vipLevel: level,
+    priceUsd,
+    amountRequested: 0,
+    currency: String(currency).slice(0, 12),
+    paymentMethod: sanitizeBody(paymentMethod).slice(0, 60),
+    meta: {
+      ip: req.ip || "",
+      userAgent: String(req.headers["user-agent"] || "").slice(0, 200),
+    },
+  });
+
+  await sendDepositMessage({
+    ticketId: ticket._id,
+    senderId: req.user._id,
+    system: true,
+    body: `طلب شراء VIP ${levelLabel} ($${priceUsd.toFixed(2)}) — بانتظار موافقة الوكيل.`,
+  });
+
+  await notifyAndPush(profile.user._id, {
+    title: "طلب شراء VIP جديد",
+    subtitle: `${req.user.name || "عميل"} يطلب VIP ${levelLabel}`,
+    sourceType: "vip_ticket",
+    sourceId: String(ticket._id),
+    data: { ticketId: String(ticket._id), vipLevel: level },
+  });
+
+  const populated = await loadTicket(ticket._id);
+  emitTicketUpdate(populated);
+  res.status(201).json({ status: "success", data: serializeTicket(populated, "user") });
+});
+
 exports.getMyTickets = asyncHandler(async (req, res) => {
   const rows = await DepositTicket.find({ user: req.user._id })
     .sort({ lastMessageAt: -1 })
@@ -743,18 +838,116 @@ exports.rejectTicket = asyncHandler(async (req, res) => {
   res.status(200).json({ status: "success", data: serializeTicket(updated, "agent") });
 });
 
+async function approveVipTicket(req, res, candidate) {
+  const { applyMembershipChange } = require("./vipService");
+  const level = normalizeVipLevel(candidate.vipLevel);
+  if (!level) throw new ApiError("باقة VIP غير صالحة", 400);
+
+  const prev = await DepositTicket.findOneAndUpdate(
+    {
+      _id: candidate._id,
+      agentUser: req.user._id,
+      ticketType: "vip",
+      status: { $in: APPROVABLE_STATUSES },
+    },
+    { status: "reviewing" },
+    { new: false }
+  );
+  if (!prev) throw new ApiError("الطلب غير قابل للموافقة في حالته الحالية", 409);
+
+  try {
+    await applyMembershipChange({
+      userId: prev.user,
+      level,
+      kind: "purchase",
+      provider: "agent",
+      providerRef: String(prev._id),
+      actorId: req.user._id,
+      note: `Agent approved VIP ticket ${prev._id}`,
+      priceCents: Math.round((prev.priceUsd || 0) * 100),
+    });
+    await DepositTicket.updateOne(
+      { _id: prev._id },
+      {
+        status: "completed",
+        amountApproved: 0,
+        approvedAt: new Date(),
+        approvedBy: req.user._id,
+      }
+    );
+  } catch (err) {
+    await DepositTicket.updateOne(
+      { _id: prev._id, status: "reviewing" },
+      { status: prev.status }
+    );
+    throw err;
+  }
+
+  const levelLabel = vipLevelLabelAr(level);
+  logEvent({
+    event: "agent_vip_completed",
+    actor: req.user._id,
+    targetUser: prev.user,
+    meta: {
+      ticketId: String(prev._id),
+      vipLevel: level,
+      priceUsd: prev.priceUsd,
+      country: prev.country,
+      paymentMethod: prev.paymentMethod,
+    },
+    ip: req.ip,
+    userAgent: req.headers["user-agent"],
+  });
+
+  await sendDepositMessage({
+    ticketId: prev._id,
+    senderId: req.user._id,
+    system: true,
+    body: `✅ تم تفعيل عضوية VIP ${levelLabel} بنجاح.`,
+  });
+  await notifyAndPush(prev.user, {
+    title: "تم تفعيل VIP 🎉",
+    subtitle: `عضوية VIP ${levelLabel} مفعّلة على حسابك`,
+    sourceType: "vip_completed",
+    sourceId: String(prev._id),
+    data: { ticketId: String(prev._id), vipLevel: level },
+  });
+
+  const updated = await loadTicket(prev._id);
+  emitTicketUpdate(updated, { vipLevel: level });
+  if (depositIo) {
+    depositIo.to(userRoom(prev.user)).emit("deposit:completed", {
+      ticketId: String(prev._id),
+      ticketType: "vip",
+      vipLevel: level,
+    });
+  }
+
+  res.status(200).json({ status: "success", data: serializeTicket(updated, "agent") });
+}
+
 /**
- * THE atomic transfer: agent wallet → user wallet.
- * Double-approval / races are blocked by the conditional status claim; the
- * money movement + ticket completion happen inside one Mongo transaction.
+ * THE atomic transfer: agent wallet → user wallet (deposit tickets only).
+ * VIP tickets activate membership instead of moving coins.
  */
 exports.approveDeposit = asyncHandler(async (req, res) => {
+  const candidate = await DepositTicket.findOne({
+    _id: req.params.ticketId,
+    agentUser: req.user._id,
+    status: { $in: APPROVABLE_STATUSES },
+  });
+  if (!candidate) throw new ApiError("الطلب غير قابل للموافقة في حالته الحالية", 409);
+  if (candidate.ticketType === "vip") {
+    return approveVipTicket(req, res, candidate);
+  }
+
   const amount = Math.round(Number(req.body?.amount));
 
   const prev = await DepositTicket.findOneAndUpdate(
     {
       _id: req.params.ticketId,
       agentUser: req.user._id,
+      ticketType: { $ne: "vip" },
       status: { $in: APPROVABLE_STATUSES },
     },
     { status: "reviewing" },
@@ -1128,6 +1321,7 @@ exports.adminListTickets = asyncHandler(async (req, res) => {
   if (req.query.status && req.query.status !== "all") q.status = req.query.status;
   if (req.query.country) q.country = String(req.query.country).toUpperCase();
   if (req.query.agentProfileId) q.agentProfile = req.query.agentProfileId;
+  if (req.query.ticketType) q.ticketType = String(req.query.ticketType).toLowerCase();
 
   const page = Math.max(Number(req.query.page) || 1, 1);
   const limit = Math.min(Number(req.query.limit) || 40, 100);
@@ -1212,13 +1406,14 @@ exports.adminTransferTicket = asyncHandler(async (req, res) => {
 });
 
 exports.adminStatistics = asyncHandler(async (req, res) => {
-  const [byStatus, volume, agents] = await Promise.all([
+  const [byStatus, volume, agents, vipCompleted] = await Promise.all([
     DepositTicket.aggregate([{ $group: { _id: "$status", n: { $sum: 1 } } }]),
     DepositTicket.aggregate([
-      { $match: { status: "completed" } },
+      { $match: { status: "completed", ticketType: { $ne: "vip" } } },
       { $group: { _id: null, total: { $sum: "$amountApproved" }, count: { $sum: 1 } } },
     ]),
     AgentProfile.countDocuments({ "deposit.enabled": true, status: "approved" }),
+    DepositTicket.countDocuments({ ticketType: "vip", status: "completed" }),
   ]);
   res.status(200).json({
     status: "success",
@@ -1226,6 +1421,7 @@ exports.adminStatistics = asyncHandler(async (req, res) => {
       tickets: Object.fromEntries(byStatus.map((r) => [r._id, r.n])),
       completedVolume: volume?.[0]?.total || 0,
       completedCount: volume?.[0]?.count || 0,
+      vipCompletedCount: vipCompleted,
       activeAgents: agents,
     },
   });

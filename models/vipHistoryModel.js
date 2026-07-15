@@ -33,7 +33,7 @@ const vipHistorySchema = new mongoose.Schema(
     previousLevel: { type: String, enum: [...VIP_LEVELS, null], default: null },
     provider: {
       type: String,
-      enum: ["google_play", "apple", "stripe", "admin", "restore", null],
+      enum: ["google_play", "apple", "stripe", "admin", "agent", "restore", null],
       default: null,
     },
     priceCents: { type: Number, default: 0 },

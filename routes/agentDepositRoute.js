@@ -5,6 +5,7 @@ const {
   listCountries,
   listAgents,
   createTicket,
+  createVipTicket,
   getMyTickets,
   getTicket,
   getMessages,
@@ -37,6 +38,7 @@ const {
 } = require("../services/agentDepositService");
 const {
   createTicketValidator,
+  createVipTicketValidator,
   ticketIdValidator,
   approveDepositValidator,
   adminCreateAgentValidator,
@@ -51,6 +53,7 @@ router.use(authService.protect);
 router.get("/countries", listCountries);
 router.get("/countries/:country/agents", listAgents);
 router.post("/tickets", createTicketValidator, createTicket);
+router.post("/vip-tickets", createVipTicketValidator, createVipTicket);
 router.get("/tickets", getMyTickets);
 router.get("/tickets/:ticketId", ticketIdValidator, getTicket);
 router.get("/tickets/:ticketId/messages", ticketIdValidator, getMessages);

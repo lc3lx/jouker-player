@@ -12,8 +12,6 @@ router.post("/give", vipService.adminGiveVip);
 router.post("/remove", vipService.adminRemoveVip);
 router.post("/update", vipService.adminUpdateVip);
 router.get("/purchase-requests", vipService.adminListPurchaseRequests);
-router.post("/purchase-requests/:id/approve", vipService.adminApprovePurchaseRequest);
-router.post("/purchase-requests/:id/reject", vipService.adminRejectPurchaseRequest);
 router.get("/pricing", vipService.adminGetPricing);
 router.put("/pricing", vipService.adminUpdatePricing);
 router.get("/questions", vipService.adminListQuestions);

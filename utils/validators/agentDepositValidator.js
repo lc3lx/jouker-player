@@ -12,6 +12,18 @@ exports.createTicketValidator = [
   validatorMiddleware,
 ];
 
+exports.createVipTicketValidator = [
+  check("agentProfileId").isMongoId().withMessage("agentProfileId غير صالح"),
+  check("vipLevel")
+    .isString()
+    .isIn(["bronze", "silver", "gold", "platinum"])
+    .withMessage("باقة VIP غير صالحة"),
+  check("paymentMethod").optional().isString().isLength({ max: 60 }),
+  check("currency").optional().isString().isLength({ max: 12 }),
+  check("country").optional().isString().isLength({ min: 2, max: 2 }),
+  validatorMiddleware,
+];
+
 exports.ticketIdValidator = [
   check("ticketId").isMongoId().withMessage("ticketId غير صالح"),
   validatorMiddleware,
