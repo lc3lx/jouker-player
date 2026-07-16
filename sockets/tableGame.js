@@ -3531,6 +3531,9 @@ class PokerTable {
       activeTableAsset: this.activeTableAsset || null,
       seats: this.seats.map((s, i) => ({
         seatIndex: i,
+        // Physical chair (0–8). The client maps players to table chairs by this;
+        // without it, live state falls back to engine array order → wrong seats.
+        seatPosition: toSafeInt(s.seatPosition, i),
         userId: s.userId,
         name: s.name,
         avatar: s.avatar,
