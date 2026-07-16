@@ -13,6 +13,7 @@ const agentRoute = require("./agentRoute");
 const adminRoute = require("./adminRoute");
 const analyticsRoute = require("./analyticsRoute");
 const cosmeticsRoute = require("./cosmeticsRoute");
+const interactionRoute = require("./interactionRoute");
 const videoRoute = require("./videoRoute");
 const kingArthRoute = require("./kingArthRoute");
 const activityRoute = require("./activityRoute");
@@ -76,6 +77,7 @@ const mountRoutes = (app) => {
   app.use("/api/v1/vip", vipRoute);
   app.use("/api/v1/analytics", analyticsRoute);
   app.use("/api/v1/cosmetics", cosmeticsRoute);
+  app.use("/api/v1/interactions", interactionRoute);
   app.use("/api/v1/video", videoRoute);
   app.use("/api/v1/king-arth", kingArthRoute);
   app.use("/api/v1/activities", activityRoute);

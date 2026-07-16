@@ -4228,6 +4228,11 @@ function initTableGame(io, options = {}) {
   activeRegistry = registry;
   registry.startOwnershipLoops();
 
+  // Shared interactions economy (paid emojis / throwables / gifts) — same
+  // implementation as Trix/Tarneeb, bound to poker's `tg:` rooms.
+  const { registerTableInteractionHandlers } = require("./tableInteractions");
+  registerTableInteractionHandlers(nsp, (gameType, tableId) => `tg:${tableId}`);
+
   // ── H-3 action routing: follower → owner command bus ────────────────────────
   const commandBus = new PokerTableCommandBus(options.redis || null, {
     instanceId: registry.instanceId,

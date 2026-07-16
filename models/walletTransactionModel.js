@@ -28,6 +28,8 @@ const walletTransactionSchema = new mongoose.Schema(
         "pending_withdraw",
         "completed_withdraw",
         "cosmetic_purchase",
+        "interaction_purchase",
+        "interaction_use",
         "game_buyin",
         "game_win",
         "game_loss",

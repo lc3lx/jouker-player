@@ -31,6 +31,15 @@ function initGameServer(io, gameOptions = {}) {
   });
 
   registerGameHandlers(nsp);
+
+  // Shared interactions economy (paid emojis / throwables / gifts) — one
+  // implementation across games; rooms differ per game type.
+  const { registerTableInteractionHandlers } = require("../sockets/tableInteractions");
+  registerTableInteractionHandlers(nsp, (gameType, tableId) => {
+    if (gameType === "trix") return `trix:${tableId}`;
+    if (gameType === "tarneeb41") return `tarneeb41:${tableId}`;
+    return null;
+  });
 }
 
 module.exports = { initGameServer };
