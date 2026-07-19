@@ -29,6 +29,7 @@ const friendService = require("../services/friendService");
 const moderation = require("../services/adminUserModerationService");
 const cosmeticsService = require("../services/cosmeticsService");
 const giftService = require("../services/giftService");
+const gameStatsService = require("../services/gameStatsService");
 const Achievement = require("../models/achievementModel");
 
 let replSet = null;
@@ -262,6 +263,35 @@ test("gift cosmetic: charges sender, adds to receiver inventory", async () => {
   assert.equal(await balanceOf(sender._id), 4200);
   const row = await UserCosmetics.findOne({ user: target._id }).lean();
   assert.ok(row.ownedItems.some((id) => String(id) === String(item._id)), "cosmetic granted to receiver");
+});
+
+// ── deep game statistics framework + clan-ready ──────────────────────────────
+
+test("deep stats: recorded metrics merge into perGame; new games auto-appear; clan reserved", async () => {
+  const viewer = await makeUser({ name: "SV" });
+  const target = await makeUser({ name: "Grinder", pokerHandsPlayed: 100, pokerHandsWon: 30 });
+  await Player.create({ user: target._id, displayName: "Grinder", stats: { gamesPlayed: 100, wins: 30 } });
+
+  // Poker deep metrics + a brand-new game (tarneeb41) with contracts — no code change.
+  await gameStatsService.record(target._id, "poker", { showdowns: 12, allIns: 3, handsPlayed: 100 });
+  await gameStatsService.setGauge(target._id, "poker", { biggestPot: 45000, vpip: 24 });
+  await gameStatsService.record(target._id, "tarneeb41", { games: 8, wins: 5, contractsWon: 20, contractsLost: 4 });
+  profileSvc.invalidate(target._id);
+
+  const p = await profileSvc.getPublicProfile(viewer._id, target._id);
+  const poker = p.perGame.find((g) => g.key === "poker");
+  assert.equal(poker.stats.handsWon, 30, "user counter preserved");
+  assert.equal(poker.stats.showdowns, 12, "deep metric merged");
+  assert.equal(poker.stats.allIns, 3);
+  assert.equal(poker.stats.biggestPot, 45000, "gauge merged");
+  assert.equal(poker.stats.vpip, 24);
+
+  const tarneeb = p.perGame.find((g) => g.key === "tarneeb41");
+  assert.ok(tarneeb, "new game appeared automatically");
+  assert.equal(tarneeb.stats.contractsWon, 20);
+  assert.equal(tarneeb.label, "طرنيب 41", "registry label applied");
+
+  assert.equal(p.clan, null, "clan section reserved (null until Clans ship)");
 });
 
 test("gift guards: self / blocked / insufficient balance", async () => {

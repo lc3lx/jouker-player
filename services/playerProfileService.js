@@ -25,6 +25,7 @@ const vipService = require("./vipService");
 const vipLevelRegistry = require("./vipLevelRegistry");
 const cosmeticsService = require("./cosmeticsService");
 const friendService = require("./friendService");
+const gameStatsService = require("./gameStatsService");
 
 const WIN_TYPES = ["win", "game_win", "island_jackpot_win"];
 const LOSS_TYPES = ["game_loss", "bet"];
@@ -90,7 +91,7 @@ function _cosmeticView(c) {
 
 /** Build the cacheable, viewer-independent snapshot for one target user. */
 async function _buildSnapshot(targetId) {
-  const [user, player, coin, presence, vipLevel, vipSub, cos, agent] = await Promise.all([
+  const [user, player, coin, presence, vipLevel, vipSub, cos, agent, gameStats] = await Promise.all([
     User.findById(targetId)
       .select(
         "name country profileImg createdAt role active muted preferences.hideProfile " +
@@ -106,6 +107,7 @@ async function _buildSnapshot(targetId) {
     VIPSubscription.findOne({ userId: targetId }).lean(),
     cosmeticsService.getProfileCosmetics(targetId),
     AgentProfile.findOne({ user: targetId, status: "approved" }).lean(),
+    gameStatsService.getForUser(targetId),
   ]);
   if (!user) return null;
 
@@ -139,6 +141,11 @@ async function _buildSnapshot(targetId) {
     category: a.category || "general",
   }));
 
+  // Per-game statistics: poker always shown (user counters + any recorded deep
+  // metrics); every other game with recorded stats appears automatically.
+  const recordedByGame = new Map((gameStats || []).map((g) => [g.key, g]));
+  const pokerRec = recordedByGame.get("poker");
+  recordedByGame.delete("poker");
   const perGame = [
     {
       key: "poker",
@@ -147,8 +154,10 @@ async function _buildSnapshot(targetId) {
         handsPlayed: user.pokerHandsPlayed || 0,
         handsWon: user.pokerHandsWon || 0,
         winStreak: user.pokerWinStreak || 0,
+        ...(pokerRec?.stats || {}),
       },
     },
+    ...recordedByGame.values(),
   ];
 
   return {
@@ -200,6 +209,9 @@ async function _buildSnapshot(targetId) {
       inventoryCount: cos.ownedCount || 0,
     },
     achievements,
+    // Reserved for the upcoming Clan system — always null until Clans ship, so
+    // the Flutter profile can render a clan section with zero further changes.
+    clan: null,
     stats: {
       general: {
         gamesPlayed,
