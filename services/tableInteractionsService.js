@@ -17,12 +17,15 @@
 
 const InteractionItem = require("../models/interactionItemModel");
 const PlayerInventory = require("../models/playerInventoryModel");
+const InteractionUsageDaily = require("../models/interactionUsageDailyModel");
 const User = require("../models/userModel");
 const {
   withMongoTransaction,
   ledgerWithdraw,
 } = require("./walletLedgerService");
 const vipService = require("./vipService");
+const economyDiscountService = require("./economyDiscountService");
+const economySeasonService = require("./economySeasonService");
 const logger = require("../utils/logger");
 
 // ── catalog cache ─────────────────────────────────────────────────────────────
@@ -46,15 +49,60 @@ function invalidateCatalogCache() {
   _catalogCacheAt = 0;
 }
 
-/** Public catalog for pickers/shop (enabled items only). */
-async function listCatalog() {
+/** An item is shop-visible when published, not hidden, and its season (if any) is live. */
+function _isVisible(item, liveSeasonKeys) {
+  const published = item.status ? item.status === "published" : item.enabled;
+  if (!published || item.hidden) return false;
+  if (item.requiredSeason && !liveSeasonKeys.includes(item.requiredSeason)) return false;
+  return true;
+}
+
+/**
+ * Attach the effective (discounted) Coin price to each item without mutating the
+ * base `price` — clients see `price` (list) and `effectivePrice` (what they pay).
+ */
+async function _withEffectivePrices(items, { isVip = false, liveSeasonKeys = [] } = {}) {
+  const out = [];
+  for (const i of items) {
+    let eff = { price: i.price, discount: null };
+    try {
+      eff = await economyDiscountService.resolveEffectivePrice(i, { isVip, liveSeasonKeys });
+    } catch (_) { /* pricing falls back to base on any error */ }
+    out.push({ ...i, effectivePrice: eff.price, discount: eff.discount });
+  }
+  return out;
+}
+
+/**
+ * Public catalog for pickers/shop — published, non-hidden, in-season items with
+ * effective prices. Back-compatible: still returns an array; `price` unchanged.
+ * @param {{ isVip?: boolean }} [opts]
+ */
+async function listCatalog(opts = {}) {
   const map = await _loadCatalog();
-  return [...map.values()].filter((i) => i.enabled);
+  let liveSeasonKeys = [];
+  try { liveSeasonKeys = await economySeasonService.liveSeasonKeys(); } catch (_) { /* no seasons */ }
+  const items = [...map.values()].filter((i) => _isVisible(i, liveSeasonKeys));
+  return _withEffectivePrices(items, { isVip: !!opts.isVip, liveSeasonKeys });
 }
 
 async function getItem(itemKey) {
   const map = await _loadCatalog();
   return map.get(String(itemKey)) || null;
+}
+
+/** Increment per-item/day usage counters powering the analytics APIs. Never throws. */
+async function _recordUsage({ itemKey, sends = 0, receives = 0, purchases = 0, revenue = 0 }) {
+  try {
+    const day = InteractionUsageDaily.dayKey();
+    await InteractionUsageDaily.updateOne(
+      { itemKey: String(itemKey), day },
+      { $inc: { sends, receives, purchases, revenue } },
+      { upsert: true }
+    );
+  } catch (e) {
+    logger.warn("interaction_usage_record_failed", { itemKey, reason: e?.message || "unknown" });
+  }
 }
 
 // ── anti-spam / idempotency (per-instance; interactions are cosmetic) ─────────
@@ -155,18 +203,21 @@ async function grantItem({ userId, itemKey, quantity = 1, unlimited = false, sou
 async function purchaseItem({ userId, itemKey, quantity = 1, mode = "consumable" }) {
   const item = await getItem(itemKey);
   if (!item || !item.enabled) return { ok: false, reason: "ITEM_NOT_FOUND" };
-  if (item.vipOnly) {
-    const gate = await _vipGate(userId);
-    if (!gate) return { ok: false, reason: "VIP_REQUIRED" };
-  }
+  const isVip = await _vipGate(userId);
+  if (item.vipOnly && !isVip) return { ok: false, reason: "VIP_REQUIRED" };
 
   const qty = Math.max(1, Math.min(99, Math.floor(quantity)));
+  let liveSeasonKeys = [];
+  try { liveSeasonKeys = await economySeasonService.liveSeasonKeys(); } catch (_) { /* no seasons */ }
+
   let cost;
   if (mode === "unlimited") {
     if (item.unlimitedPrice == null) return { ok: false, reason: "NOT_PURCHASABLE" };
-    cost = item.unlimitedPrice;
+    const eff = await economyDiscountService.resolveEffectivePrice(item, { isVip, liveSeasonKeys, basePriceField: "unlimitedPrice" });
+    cost = eff.price;
   } else {
-    cost = item.price * qty;
+    const eff = await economyDiscountService.resolveEffectivePrice(item, { isVip, liveSeasonKeys });
+    cost = eff.price * qty;
   }
 
   try {
@@ -177,7 +228,7 @@ async function purchaseItem({ userId, itemKey, quantity = 1, mode = "consumable"
           userId,
           amount: cost,
           ledgerType: "interaction_purchase",
-          meta: { itemKey: item.key, mode, quantity: qty },
+          meta: { itemKey: item.key, mode, quantity: qty, currencyId: item.currencyId || "coins" },
         });
       }
       const update = mode === "unlimited"
@@ -193,6 +244,7 @@ async function purchaseItem({ userId, itemKey, quantity = 1, mode = "consumable"
     if (e.message === "INSUFFICIENT_BALANCE") return { ok: false, reason: "INSUFFICIENT_BALANCE" };
     throw e;
   }
+  await _recordUsage({ itemKey: item.key, purchases: mode === "unlimited" ? 1 : qty, revenue: cost });
   return { ok: true, itemKey: item.key, mode, quantity: qty, cost };
 }
 
@@ -216,15 +268,22 @@ async function sendInteraction({ userId, itemKey, targetUserId = null, actionId 
   const item = await getItem(itemKey);
   if (!item || !item.enabled) return { ok: false, reason: "ITEM_NOT_FOUND" };
 
-  if (item.vipOnly) {
-    const gate = await _vipGate(userId);
-    if (!gate) return { ok: false, reason: "VIP_REQUIRED" };
-  }
+  const isVip = await _vipGate(userId);
+  if (item.vipOnly && !isVip) return { ok: false, reason: "VIP_REQUIRED" };
 
   const spam = _checkSpam(userId, item, actionId);
   if (!spam.ok) return spam;
 
-  let charge = { mode: "pay_per_use", cost: item.price };
+  // Pay-per-use uses the effective (discounted) shop price; owners pay perUseCost.
+  let payPerUse = item.price;
+  try {
+    let liveSeasonKeys = [];
+    try { liveSeasonKeys = await economySeasonService.liveSeasonKeys(); } catch (_) { /* none */ }
+    const eff = await economyDiscountService.resolveEffectivePrice(item, { isVip, liveSeasonKeys });
+    payPerUse = eff.price;
+  } catch (_) { /* fall back to base price */ }
+
+  let charge = { mode: "pay_per_use", cost: payPerUse };
   try {
     await withMongoTransaction(async (session) => {
       const opts = session ? { session } : {};
@@ -244,7 +303,7 @@ async function sendInteraction({ userId, itemKey, targetUserId = null, actionId 
         null,
         opts
       );
-      const cost = owned ? item.perUseCost : item.price;
+      const cost = owned ? item.perUseCost : payPerUse;
       charge = { mode: owned ? "unlimited" : "pay_per_use", cost };
       if (cost > 0) {
         await ledgerWithdraw({
@@ -252,7 +311,7 @@ async function sendInteraction({ userId, itemKey, targetUserId = null, actionId 
           userId,
           amount: cost,
           ledgerType: "interaction_use",
-          meta: { itemKey: item.key, mode: charge.mode, targetUserId },
+          meta: { itemKey: item.key, mode: charge.mode, targetUserId, currencyId: item.currencyId || "coins" },
         });
       }
     });
@@ -261,6 +320,13 @@ async function sendInteraction({ userId, itemKey, targetUserId = null, actionId 
     logger.warn("interaction_send_failed", { userId: String(userId), itemKey, reason: e.message });
     return { ok: false, reason: "SEND_FAILED" };
   }
+
+  await _recordUsage({
+    itemKey: item.key,
+    sends: 1,
+    receives: targetUserId ? 1 : 0,
+    revenue: charge.cost || 0,
+  });
 
   const sender = await User.findById(userId).select("name").lean().catch(() => null);
   return {

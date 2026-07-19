@@ -40,6 +40,9 @@ const supportRoute = require("./supportRoute");
 const agentDepositRoute = require("./agentDepositRoute");
 const referralRoute = require("./referralRoute");
 const adminReferralRoute = require("./adminReferralRoute");
+const adminEconomyRoute = require("./adminEconomyRoute");
+const adminCosmeticsRoute = require("./adminCosmeticsRoute");
+const adminUserRoute = require("./adminUserRoute");
 const mountInviteLanding = require("./inviteLandingRoute");
 
 const mountRoutes = (app) => {
@@ -73,6 +76,10 @@ const mountRoutes = (app) => {
   app.use("/api/v1/agents", agentRoute);
   app.use("/api/v1/admin/vip", adminVipRoute);
   app.use("/api/v1/admin/island-jackpot", adminIslandJackpotRoute);
+  // Mounted BEFORE the generic /admin router so these sub-paths resolve here.
+  app.use("/api/v1/admin/economy", adminEconomyRoute);
+  app.use("/api/v1/admin/cosmetics", adminCosmeticsRoute);
+  app.use("/api/v1/admin/users", adminUserRoute);
   app.use("/api/v1/admin", adminRoute);
   app.use("/api/v1/vip", vipRoute);
   app.use("/api/v1/analytics", analyticsRoute);

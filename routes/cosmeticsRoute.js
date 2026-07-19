@@ -7,6 +7,7 @@ const router = express.Router();
 router.use(authService.protect);
 
 router.get("/catalog", authService.allowedTo("user"), cosmeticsController.getCatalog);
+router.get("/categories", authService.allowedTo("user"), cosmeticsController.getCategories);
 router.get("/featured", authService.allowedTo("user"), cosmeticsController.getFeatured);
 router.get("/recommended", authService.allowedTo("user"), cosmeticsController.getRecommended);
 router.get("/me", authService.allowedTo("user"), cosmeticsController.getMe);

@@ -59,6 +59,8 @@ async function set(userId, payload) {
     cardSkin: payload.cardSkin ?? null,
     avatarFrame: payload.avatarFrame ?? null,
     skin: payload.skin ?? payload.avatarFrame ?? null,
+    // Data-driven equip map (unlimited slots) — must survive caching.
+    bySlot: payload.bySlot && typeof payload.bySlot === "object" ? payload.bySlot : {},
   });
   memoryTrim();
 }

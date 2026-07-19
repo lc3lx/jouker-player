@@ -53,6 +53,9 @@ const agentProfileSchema = new mongoose.Schema(
       paymentMethods: [{ type: String, trim: true, maxlength: 60 }],
       workingHours: { type: String, default: "", trim: true, maxlength: 120 },
       rating: { type: Number, default: 5, min: 0, max: 5 },
+      // Optional contact handles surfaced on the player profile popup.
+      whatsapp: { type: String, default: "", trim: true, maxlength: 60 },
+      telegram: { type: String, default: "", trim: true, maxlength: 60 },
       stats: {
         totalDeposits: { type: Number, default: 0 },
         totalVolume: { type: Number, default: 0 },

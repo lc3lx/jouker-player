@@ -83,8 +83,25 @@ const VIP_QUIZ_DEFAULT_REWARD = Math.max(
   parseInt(process.env.VIP_QUIZ_DEFAULT_REWARD || "150000", 10) || 150000
 );
 
+/**
+ * The exported accessors below delegate to the DB-backed vipLevelRegistry (lazy
+ * required to avoid load-order coupling) so admin-created levels work everywhere,
+ * while the built-in constants above remain the always-available fallback.
+ */
+function _registry() {
+  try {
+    return require("../services/vipLevelRegistry");
+  } catch (_) {
+    return null;
+  }
+}
+
 function isValidVipLevel(level) {
-  return typeof level === "string" && VIP_LEVELS.includes(level);
+  const l = String(level || "").toLowerCase().trim();
+  if (!l) return false;
+  const reg = _registry();
+  if (reg && reg.isValid(l)) return true;
+  return VIP_LEVELS.includes(l);
 }
 
 function normalizeVipLevel(level) {
@@ -94,12 +111,32 @@ function normalizeVipLevel(level) {
 
 function vipLevelRank(level) {
   const l = normalizeVipLevel(level);
-  return l ? VIP_LEVEL_RANK[l] : 0;
+  if (!l) return 0;
+  const reg = _registry();
+  const r = reg ? reg.rank(l) : 0;
+  return r || VIP_LEVEL_RANK[l] || 0;
 }
 
 function vipLevelConfig(level) {
   const l = normalizeVipLevel(level);
-  return l ? VIP_LEVEL_CONFIG[l] : null;
+  if (!l) return null;
+  const reg = _registry();
+  return (reg && reg.config(l)) || VIP_LEVEL_CONFIG[l] || null;
+}
+
+/** Dynamic enabled level keys (registry-backed; defaults as fallback). */
+function getVipLevels() {
+  const reg = _registry();
+  const list = reg ? reg.levels() : [];
+  return list.length ? list : VIP_LEVELS.slice();
+}
+
+/** Dynamic { key: config } map for admin overviews. */
+function getVipLevelConfigMap() {
+  const reg = _registry();
+  const all = reg ? reg.allConfigs() : [];
+  if (all.length) return Object.fromEntries(all.map((c) => [c.level, c]));
+  return { ...VIP_LEVEL_CONFIG };
 }
 
 /**
@@ -150,6 +187,11 @@ function dailyQuestionIndex(userId, dayUtc, poolSize) {
 
 /** Public benefits payload for clients (per level). */
 function publicBenefits(level) {
+  const reg = _registry();
+  if (reg) {
+    const pb = reg.publicBenefits(level);
+    if (pb) return pb;
+  }
   const cfg = vipLevelConfig(level);
   if (!cfg) return null;
   return {
@@ -161,7 +203,8 @@ function publicBenefits(level) {
     dailyChips: cfg.dailyChips,
     quiz: cfg.quiz,
     priorityQueue: cfg.priorityQueue,
-    highestPriority: cfg.level === "platinum",
+    // Highest tier = max rank among enabled levels (was hardcoded "platinum").
+    highestPriority: cfg.rank === Math.max(...Object.values(VIP_LEVEL_RANK)),
   };
 }
 
@@ -176,6 +219,8 @@ module.exports = {
   normalizeVipLevel,
   vipLevelRank,
   vipLevelConfig,
+  getVipLevels,
+  getVipLevelConfigMap,
   computeCashbackAmount,
   utcDayStr,
   mondayOfUtc,

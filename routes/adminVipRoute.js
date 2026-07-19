@@ -1,10 +1,23 @@
 const express = require("express");
 const authService = require("../services/authService");
 const vipService = require("../services/vipService");
+const vipAdminService = require("../services/vipAdminService");
 
 const router = express.Router();
 
 router.use(authService.protect, authService.allowedTo("admin", "manager"));
+
+// ── VIP levels (unlimited, admin-managed) ────────────────────────────────────
+router.get("/levels", vipAdminService.adminListLevels);
+router.post("/levels", vipAdminService.adminCreateLevel);
+router.put("/levels/:key", vipAdminService.adminUpdateLevel);
+router.delete("/levels/:key", vipAdminService.adminDeleteLevel);
+
+// ── VIP rewards (level → cosmetic) ───────────────────────────────────────────
+router.get("/rewards", vipAdminService.adminListRewards);
+router.post("/rewards", vipAdminService.adminCreateReward);
+router.put("/rewards/:id", vipAdminService.adminUpdateReward);
+router.delete("/rewards/:id", vipAdminService.adminDeleteReward);
 
 router.get("/", vipService.adminOverview);
 router.get("/users/:userId", vipService.adminUserVip);

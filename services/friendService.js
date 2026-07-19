@@ -178,6 +178,32 @@ async function unblockUser(blockerId, blockedId) {
   return { ok: true };
 }
 
+/**
+ * Viewer-relative relationship for the player profile popup.
+ * @returns {{ isSelf, isFriend, requestPending: 'none'|'outgoing'|'incoming', requestId, isBlocked }}
+ */
+async function getRelationship(viewerId, targetId) {
+  const v = String(viewerId);
+  const t = String(targetId);
+  if (v === t) {
+    return { isSelf: true, isFriend: false, requestPending: "none", requestId: null, isBlocked: false };
+  }
+  const [u1, u2] = pairKey(v, t);
+  const [friendship, blocked, outReq, inReq] = await Promise.all([
+    Friendship.findOne({ users: [u1, u2] }).lean(),
+    isBlocked(v, t),
+    FriendRequest.findOne({ from: v, to: t, status: "pending" }).lean(),
+    FriendRequest.findOne({ from: t, to: v, status: "pending" }).lean(),
+  ]);
+  return {
+    isSelf: false,
+    isFriend: !!friendship,
+    requestPending: outReq ? "outgoing" : inReq ? "incoming" : "none",
+    requestId: outReq ? String(outReq._id) : inReq ? String(inReq._id) : null,
+    isBlocked: blocked,
+  };
+}
+
 async function listFriends(userId) {
   const rows = await Friendship.find({ users: userId }).lean();
   const friendIds = rows
@@ -217,4 +243,5 @@ module.exports = {
   listFriends,
   listPendingRequests,
   isBlocked,
+  getRelationship,
 };

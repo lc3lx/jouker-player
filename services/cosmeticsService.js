@@ -6,6 +6,24 @@ const { withMongoTransaction, ledgerWithdraw } = require("./walletLedgerService"
 const equippedCache = require("../utils/cosmeticsEquippedCache");
 const DEFAULT_CATALOG = require("../data/defaultCosmeticsCatalog");
 
+/** slotKey → legacy equipped.{field} mirror target (write-through compat). */
+const LEGACY_SLOT_FIELD = { avatar_frame: "avatarFrame", table_theme: "tableTheme", card_back: "cardSkin" };
+
+/** Resolve the equip slot for an item (explicit slot → type map → type; bundle → null). */
+function slotForItem(item) {
+  if (!item) return null;
+  if (item.slot) return item.slot;
+  if (item.type === "bundle") return null;
+  return Cosmetic.TYPE_TO_SLOT?.[item.type] ?? item.type ?? null;
+}
+
+/** Iterate equippedBySlot whether it's a Mongoose Map (doc) or plain object (lean). */
+function entriesOf(bySlot) {
+  if (!bySlot) return [];
+  if (bySlot instanceof Map) return [...bySlot.entries()];
+  return Object.entries(bySlot);
+}
+
 function toObjectId(id) {
   if (!id) return null;
   try {
@@ -66,35 +84,52 @@ function publicCosmeticDisplay(doc) {
       ? String(doc.promoMeta.skinFile).trim()
       : null;
   const assetPath = skinFile || previewImage;
-  let previewImageUrl = null;
-  if (assetPath) {
-    if (assetPath.startsWith("skin/") || assetPath.startsWith("vip/")) {
-      previewImageUrl = `/assets/${assetPath.replace(/^\/+/, "")}`;
-    } else if (assetPath.startsWith("/assets/") || assetPath.startsWith("http")) {
-      previewImageUrl = assetPath;
-    } else {
-      previewImageUrl = `/uploads/cosmetics/${assetPath}`;
-    }
-  }
+  const previewImageUrl = resolveAssetUrl(assetPath);
+  // Animated variant (gif / lottie / rive) — admin URL wins, else resolve asset key.
+  const animationUrl = doc.animationUrl
+    ? String(doc.animationUrl).trim()
+    : resolveAssetUrl(doc.animatedAssetKey);
   return {
     id: String(doc._id),
     type: doc.type,
+    category: doc.category || doc.type,
+    slot: doc.slot ?? slotForItem(doc),
+    games: Array.isArray(doc.games) && doc.games.length ? doc.games : Cosmetic.defaultGamesForType(doc.type),
     name: doc.name,
+    nameAr: doc.nameAr || null,
     assetKey: doc.assetKey,
     previewImage,
     previewImageUrl,
+    renderType: doc.renderType || "png",
+    animatedAssetKey: doc.animatedAssetKey || null,
+    animationUrl: animationUrl || null,
     price: finalPrice,
     finalPrice,
     basePrice: base,
+    currencyId: doc.currencyId || "coins",
     bundlePrice: doc.type === "bundle" ? finalPrice : undefined,
     rarity: doc.rarity || "common",
+    vipLevelRequired: doc.vipLevelRequired || null,
+    season: doc.season || null,
+    limitedEdition: !!doc.limitedEdition,
     isActive: !!doc.isActive,
+    status: doc.status || (doc.isActive === false ? "disabled" : "published"),
     promoMeta: doc.promoMeta || null,
     featured: !!(doc.featured || promoFeatured),
     featuredOrder: Number(doc.featuredOrder) || 0,
+    sortOrder: Number(doc.sortOrder) || 0,
     purchaseCount: Math.floor(Number(doc.purchaseCount) || 0),
     equipCount: Math.floor(Number(doc.equipCount) || 0),
   };
+}
+
+/** Resolve a stored asset path (skin/, vip/, /assets/, http, or uploads filename) to a URL. */
+function resolveAssetUrl(assetPath) {
+  const p = assetPath ? String(assetPath).trim() : "";
+  if (!p) return null;
+  if (p.startsWith("skin/") || p.startsWith("vip/")) return `/assets/${p.replace(/^\/+/, "")}`;
+  if (p.startsWith("/assets/") || p.startsWith("http")) return p;
+  return `/uploads/cosmetics/${p}`;
 }
 
 async function addBundleDerivedFields(publicList, leanRows) {
@@ -184,18 +219,31 @@ async function ensureDefaultCatalog() {
   }
 }
 
+// Cosmetics gated to a VIP level are granted, not sold — hidden from the store.
+// `{ vipLevelRequired: null }` also matches docs where the field is absent (legacy).
+const STORE_VISIBLE = { isActive: true, vipLevelRequired: null };
+
 async function listCatalog() {
   await ensureDefaultCatalog();
-  const rows = await Cosmetic.find({ isActive: true })
+  const rows = await Cosmetic.find(STORE_VISIBLE)
     .sort({ type: 1, rarity: 1, name: 1 })
     .lean();
   const pub = rows.map(publicCosmeticDisplay).filter(Boolean);
   return addBundleDerivedFields(pub, rows);
 }
 
+/** Dynamic store categories (enabled) — the store renders sections from these. */
+async function listCategories() {
+  const CosmeticCategory = require("../models/cosmeticCategoryModel");
+  await CosmeticCategory.ensureDefaults();
+  return CosmeticCategory.find({ enabled: true })
+    .sort({ sortOrder: 1, key: 1 })
+    .lean();
+}
+
 async function listFeatured(limit = 24) {
   await ensureDefaultCatalog();
-  const rows = await Cosmetic.find({ isActive: true, featured: true })
+  const rows = await Cosmetic.find({ ...STORE_VISIBLE, featured: true })
     .sort({ featuredOrder: 1, name: 1 })
     .limit(limit)
     .lean();
@@ -207,7 +255,7 @@ async function listRecommended(userId, limit = 16) {
   await ensureDefaultCatalog();
   const row = await UserCosmetics.findOne({ user: userId }).lean();
   const owned = new Set((row?.ownedItems || []).map((x) => String(x)));
-  const rows = await Cosmetic.find({ isActive: true }).lean();
+  const rows = await Cosmetic.find(STORE_VISIBLE).lean();
   const rarityW = { epic: 100, rare: 50, common: 10 };
   const scored = rows
     .filter((r) => !owned.has(String(r._id)))
@@ -230,6 +278,7 @@ async function getOrCreateUserRow(userId, session) {
     row = new UserCosmetics({
       user: userId,
       ownedItems: [],
+      equippedBySlot: new Map(),
       equipped: { tableTheme: null, cardSkin: null, avatarFrame: null },
     });
     await row.save(session ? { session } : {});
@@ -238,23 +287,30 @@ async function getOrCreateUserRow(userId, session) {
 }
 
 function payloadFromRowAndIdMap(row, idTo) {
-  let tableTheme = null;
-  let cardSkin = null;
-  let avatarFrame = null;
-  if (row.equipped?.tableTheme) {
-    const c = idTo.get(String(row.equipped.tableTheme));
-    if (c && c.type === "table_theme") tableTheme = c.assetKey;
+  // Data-driven: resolve every equipped slot to its asset key.
+  const bySlot = {};
+  for (const [slot, cid] of entriesOf(row.equippedBySlot)) {
+    if (!cid) continue;
+    const c = idTo.get(String(cid));
+    if (c) bySlot[slot] = c.assetKey;
   }
-  if (row.equipped?.cardSkin) {
-    const c = idTo.get(String(row.equipped.cardSkin));
-    if (c && c.type === "card_skin") cardSkin = c.assetKey;
+  // Legacy fallback for rows created before the equippedBySlot migration.
+  const legacyPairs = [
+    ["tableTheme", "table_theme"],
+    ["cardSkin", "card_back"],
+    ["avatarFrame", "avatar_frame"],
+  ];
+  for (const [field, slot] of legacyPairs) {
+    if (!bySlot[slot] && row.equipped?.[field]) {
+      const c = idTo.get(String(row.equipped[field]));
+      if (c) bySlot[slot] = c.assetKey;
+    }
   }
-  if (row.equipped?.avatarFrame) {
-    const c = idTo.get(String(row.equipped.avatarFrame));
-    if (c && c.type === "avatar_frame") avatarFrame = c.assetKey;
-  }
+  const tableTheme = bySlot.table_theme || null;
+  const cardSkin = bySlot.card_back || null;
+  const avatarFrame = bySlot.avatar_frame || null;
   // `skin` is the public alias for equipped avatar_frame (country skins).
-  return { tableTheme, cardSkin, avatarFrame, skin: avatarFrame };
+  return { tableTheme, cardSkin, avatarFrame, skin: avatarFrame, bySlot };
 }
 
 /**
@@ -275,6 +331,7 @@ async function resolveEquippedPayloadForUsers(userIds) {
         cardSkin: p.cardSkin ?? null,
         avatarFrame: p.avatarFrame ?? null,
         skin: p.skin ?? p.avatarFrame ?? null,
+        bySlot: p.bySlot ?? {},
       });
     } else {
       missing.push(uid);
@@ -285,7 +342,7 @@ async function resolveEquippedPayloadForUsers(userIds) {
   const objectIds = missing.map((s) => toObjectId(s)).filter(Boolean);
   if (objectIds.length === 0) {
     for (const uid of missing) {
-      const empty = { tableTheme: null, cardSkin: null, avatarFrame: null, skin: null };
+      const empty = { tableTheme: null, cardSkin: null, avatarFrame: null, skin: null, bySlot: {} };
       await equippedCache.set(uid, empty);
       out.set(uid, empty);
     }
@@ -297,6 +354,7 @@ async function resolveEquippedPayloadForUsers(userIds) {
 
   const cosmeticIds = new Set();
   for (const r of rows) {
+    for (const [, cid] of entriesOf(r.equippedBySlot)) if (cid) cosmeticIds.add(String(cid));
     if (r.equipped?.tableTheme) cosmeticIds.add(String(r.equipped.tableTheme));
     if (r.equipped?.cardSkin) cosmeticIds.add(String(r.equipped.cardSkin));
     if (r.equipped?.avatarFrame) cosmeticIds.add(String(r.equipped.avatarFrame));
@@ -322,7 +380,7 @@ async function resolveEquippedPayloadForUsers(userIds) {
   for (const oid of objectIds) {
     const uid = String(oid);
     if (!found.has(uid)) {
-      const empty = { tableTheme: null, cardSkin: null, avatarFrame: null, skin: null };
+      const empty = { tableTheme: null, cardSkin: null, avatarFrame: null, skin: null, bySlot: {} };
       await equippedCache.set(uid, empty);
       out.set(uid, empty);
     }
@@ -336,7 +394,7 @@ async function getMe(userId) {
   if (!row) {
     return {
       owned: [],
-      equipped: { tableTheme: null, cardSkin: null, avatarFrame: null },
+      equipped: { tableTheme: null, cardSkin: null, avatarFrame: null, skin: null, bySlot: {} },
       ownedIds: [],
     };
   }
@@ -454,28 +512,21 @@ async function equipCosmetic(userId, cosmeticIdRaw) {
   }
 
   row.equipped = row.equipped || {};
+  if (!(row.equippedBySlot instanceof Map)) row.equippedBySlot = new Map();
 
-  if (item.type === "table_theme") {
-    if (String(row.equipped.tableTheme || "") === String(cosmeticId)) {
-      invalidateEquippedCache(userId);
-      return getMe(userId);
-    }
-    row.equipped.tableTheme = cosmeticId;
-  } else if (item.type === "card_skin") {
-    if (String(row.equipped.cardSkin || "") === String(cosmeticId)) {
-      invalidateEquippedCache(userId);
-      return getMe(userId);
-    }
-    row.equipped.cardSkin = cosmeticId;
-  } else if (item.type === "avatar_frame") {
-    if (String(row.equipped.avatarFrame || "") === String(cosmeticId)) {
-      invalidateEquippedCache(userId);
-      return getMe(userId);
-    }
-    row.equipped.avatarFrame = cosmeticId;
-  } else {
-    throw new ApiError("Invalid cosmetic type", 400);
+  const slot = slotForItem(item);
+  if (!slot) throw new ApiError("Invalid cosmetic type", 400);
+
+  // Idempotent: already equipped in this slot → no-op.
+  if (String(row.equippedBySlot.get(slot) || "") === String(cosmeticId)) {
+    invalidateEquippedCache(userId);
+    return getMe(userId);
   }
+
+  // Data-driven equip + write-through legacy mirror.
+  row.equippedBySlot.set(slot, cosmeticId);
+  const legacyField = LEGACY_SLOT_FIELD[slot];
+  if (legacyField) row.equipped[legacyField] = cosmeticId;
 
   await row.save();
   invalidateEquippedCache(userId);
@@ -491,37 +542,31 @@ async function autoEquipAfterBuy(userId, cosmeticIdRaw) {
   if (!cosmeticId) return;
   const item = await Cosmetic.findOne({ _id: cosmeticId, isActive: true }).lean();
   if (!item) return;
-  if (item.type === "table_theme" || item.type === "card_skin" || item.type === "avatar_frame") {
-    try {
-      await equipCosmetic(userId, cosmeticIdRaw);
-    } catch (_) {
-      /* not owned race / duplicate */
+
+  if (item.type !== "bundle") {
+    if (slotForItem(item)) {
+      try {
+        await equipCosmetic(userId, cosmeticIdRaw);
+      } catch (_) {
+        /* not owned race / duplicate */
+      }
     }
     return;
   }
-  if (item.type !== "bundle") return;
 
+  // Bundle: equip the first granted cosmetic in each distinct slot.
   const grantIds = resolveBundleGrantIds(item);
   const docs =
     grantIds.length === 0
       ? []
       : await Cosmetic.find({ _id: { $in: grantIds }, isActive: true }).lean();
-  const themes = docs.filter((d) => d.type === "table_theme");
-  const skins = docs.filter((d) => d.type === "card_skin");
-  const frames = docs.filter((d) => d.type === "avatar_frame");
-  if (themes[0]) {
+  const seenSlots = new Set();
+  for (const d of docs) {
+    const slot = slotForItem(d);
+    if (!slot || seenSlots.has(slot)) continue;
+    seenSlots.add(slot);
     try {
-      await equipCosmetic(userId, String(themes[0]._id));
-    } catch (_) {}
-  }
-  if (skins[0]) {
-    try {
-      await equipCosmetic(userId, String(skins[0]._id));
-    } catch (_) {}
-  }
-  if (frames[0]) {
-    try {
-      await equipCosmetic(userId, String(frames[0]._id));
+      await equipCosmetic(userId, String(d._id));
     } catch (_) {}
   }
 }
@@ -549,6 +594,7 @@ async function mergeCosmeticsIntoPublicState(state) {
 
 module.exports = {
   listCatalog,
+  listCategories,
   listFeatured,
   listRecommended,
   getMe,

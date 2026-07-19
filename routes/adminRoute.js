@@ -8,15 +8,6 @@ const {
   adminForceEndHand,
 } = require("../services/adminService");
 const {
-  uploadCosmeticPreview,
-  resizeCosmeticPreview,
-  adminListCosmetics,
-  adminGetCosmetic,
-  adminCreateCosmetic,
-  adminUpdateCosmetic,
-  adminDeleteCosmetic,
-} = require("../services/adminCosmeticsService");
-const {
   adminGetCurrencySettings,
   adminUpdateCurrencySettings,
 } = require("../services/currencySettingsService");
@@ -36,21 +27,8 @@ router.post("/force-end-hand", adminForceEndHand);
 router.get("/players", adminListPlayers);
 router.get("/transactions", adminListTransactions);
 
-router.get("/cosmetics", adminListCosmetics);
-router.get("/cosmetics/:id", adminGetCosmetic);
-router.post(
-  "/cosmetics",
-  uploadCosmeticPreview,
-  resizeCosmeticPreview,
-  adminCreateCosmetic
-);
-router.put(
-  "/cosmetics/:id",
-  uploadCosmeticPreview,
-  resizeCosmeticPreview,
-  adminUpdateCosmetic
-);
-router.delete("/cosmetics/:id", adminDeleteCosmetic);
+// Cosmetics admin surface moved to routes/adminCosmeticsRoute.js
+// (mounted at /api/v1/admin/cosmetics before this router).
 
 router.get("/currency-settings", adminGetCurrencySettings);
 router.put("/currency-settings", adminUpdateCurrencySettings);

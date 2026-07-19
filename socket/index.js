@@ -40,6 +40,9 @@ function initGameServer(io, gameOptions = {}) {
     if (gameType === "tarneeb41") return `tarneeb41:${tableId}`;
     return null;
   });
+
+  // Live economy catalog updates broadcast to this namespace on admin CMS edits.
+  require("../services/economyBroadcast").registerNamespace(nsp);
 }
 
 module.exports = { initGameServer };

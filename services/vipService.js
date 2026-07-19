@@ -37,13 +37,13 @@ const {
   saveAdminPricingConfig,
 } = require("./vipPricingService");
 const {
-  VIP_LEVELS,
-  VIP_LEVEL_CONFIG,
   SUBSCRIPTION_DAYS,
   CASHBACK_LOSS_TX_TYPES,
   normalizeVipLevel,
   vipLevelRank,
   vipLevelConfig,
+  getVipLevels,
+  getVipLevelConfigMap,
   computeCashbackAmount,
   utcDayStr,
   previousWeekRangeUtc,
@@ -810,6 +810,9 @@ async function mondayCashbackSweep(batch = 500) {
 
 function startVipEngine() {
   if (_engineTimer) return;
+  // Warm the DB-backed level + reward registries (seeds defaults, loads overrides).
+  void require("./vipLevelRegistry").refresh().catch(() => {});
+  void require("./vipRewardService").refresh().catch(() => {});
   const intervalMs = Math.max(60_000, Number(process.env.VIP_ENGINE_INTERVAL_MS || 10 * 60 * 1000));
   _engineTimer = setInterval(() => {
     void expireDueSubscriptions().catch((e) =>
@@ -1153,9 +1156,12 @@ exports.adminOverview = asyncHandler(async (req, res) => {
     VIPHistory.find({}).sort({ createdAt: -1 }).limit(30).populate("userId", "name email").lean(),
   ]);
 
-  const activeByLevel = Object.fromEntries(VIP_LEVELS.map((l) => [l, 0]));
+  const levels = getVipLevels();
+  const levelConfigMap = getVipLevelConfigMap();
+  const activeByLevel = Object.fromEntries(levels.map((l) => [l, 0]));
   for (const row of byLevel) {
-    if (row._id in activeByLevel) activeByLevel[row._id] = row.count;
+    // Include any level present in data (incl. legacy keys not currently enabled).
+    activeByLevel[row._id] = (activeByLevel[row._id] || 0) + row.count;
   }
 
   res.status(200).json({
@@ -1183,7 +1189,7 @@ exports.adminOverview = asyncHandler(async (req, res) => {
         priceCents: h.priceCents || 0,
         createdAt: h.createdAt,
       })),
-      config: VIP_LEVELS.map((l) => VIP_LEVEL_CONFIG[l]),
+      config: levels.map((l) => levelConfigMap[l]).filter(Boolean),
     },
   });
 });

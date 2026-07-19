@@ -1,5 +1,6 @@
 const {
   listCatalog,
+  listCategories,
   listFeatured,
   listRecommended,
   getMe,
@@ -12,6 +13,15 @@ const { refreshCosmeticsForUserOnTables } = require("../sockets/tableGame");
 exports.getCatalog = async (req, res, next) => {
   try {
     const data = await listCatalog();
+    res.status(200).json({ status: "success", results: data.length, data });
+  } catch (e) {
+    next(e);
+  }
+};
+
+exports.getCategories = async (req, res, next) => {
+  try {
+    const data = await listCategories();
     res.status(200).json({ status: "success", results: data.length, data });
   } catch (e) {
     next(e);
