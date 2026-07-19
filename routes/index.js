@@ -43,6 +43,7 @@ const adminReferralRoute = require("./adminReferralRoute");
 const adminEconomyRoute = require("./adminEconomyRoute");
 const adminCosmeticsRoute = require("./adminCosmeticsRoute");
 const adminUserRoute = require("./adminUserRoute");
+const giftRoute = require("./giftRoute");
 const mountInviteLanding = require("./inviteLandingRoute");
 
 const mountRoutes = (app) => {
@@ -100,6 +101,7 @@ const mountRoutes = (app) => {
   app.use("/api/v1/sicbo", sicboRoute);
   app.use("/api/v1/admin/sicbo", adminSicboRoute);
   app.use("/api/v1/social", socialRoute);
+  app.use("/api/v1/gifts", giftRoute);
   app.use("/api/v1/chat", chatRoute);
   app.use("/api/v1/replay", replayRoute);
   app.use("/api/v1/platform", platformRoute);

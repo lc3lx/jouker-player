@@ -52,7 +52,8 @@ router.get(
   '/:id/profile',
   authService.allowedTo('user', 'admin', 'manager'),
   asyncHandler(async (req, res) => {
-    const data = await playerProfileService.getPublicProfile(req.user._id, req.params.id);
+    const fresh = req.query.fresh === '1' || req.query.fresh === 'true';
+    const data = await playerProfileService.getPublicProfile(req.user._id, req.params.id, { fresh });
     res.status(200).json({ status: 'success', data });
   })
 );

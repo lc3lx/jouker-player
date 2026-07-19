@@ -28,6 +28,8 @@ const profileSvc = require("../services/playerProfileService");
 const friendService = require("../services/friendService");
 const moderation = require("../services/adminUserModerationService");
 const cosmeticsService = require("../services/cosmeticsService");
+const giftService = require("../services/giftService");
+const Achievement = require("../models/achievementModel");
 
 let replSet = null;
 const savedEnv = {};
@@ -192,4 +194,83 @@ test("admin moderation: mute + ban flip flags and bust the cache", async () => {
 
   const afterBan = await profileSvc.getPublicProfile(admin._id, target._id);
   assert.equal(afterBan.moderation.active, false);
+});
+
+// ── enrichment: VIP expiry + benefits, achievements, inventory, inspect ───────
+
+test("enrichment: VIP expiry/daysRemaining/benefits + achievements + inventory + inspect (one call)", async () => {
+  const viewer = await makeUser({ name: "V4" });
+  const target = await makeUser({ name: "Rich" });
+  await VIPSubscription.create({ userId: target._id, currentLevel: "gold", startDate: new Date(), expireDate: new Date(Date.now() + 10 * 864e5), status: "active" });
+
+  const ach = await Achievement.create({ code: "FIRST_WIN", title: "أول فوز", icon: "trophy", points: 10, category: "milestone" });
+  await Player.create({ user: target._id, displayName: "Rich", stats: { gamesPlayed: 3, wins: 2 }, achievements: [ach._id] });
+
+  const frame = await Cosmetic.create({ type: "avatar_frame", slot: "avatar_frame", name: "Owned Frame", assetKey: "own_frame", price: 100, renderType: "png" });
+  const chip = await Cosmetic.create({ type: "chip_set", slot: "chip_set", name: "Gold Chips", assetKey: "gold_chips", price: 200 });
+  await UserCosmetics.create({ user: target._id, ownedItems: [frame._id, chip._id], equippedBySlot: new Map() });
+  await cosmeticsService.equipCosmetic(target._id, String(frame._id));
+  profileSvc.invalidate(target._id);
+
+  const p = await profileSvc.getPublicProfile(viewer._id, target._id);
+  // VIP enrichment
+  assert.ok(p.vip.expireDate, "vip expiry present");
+  assert.ok(p.vip.daysRemaining >= 9 && p.vip.daysRemaining <= 10, "days remaining computed");
+  assert.ok(p.vip.benefits && p.vip.benefits.dailyChips > 0, "benefits preview present");
+  // Achievements
+  assert.equal(p.achievements.length, 1);
+  assert.equal(p.achievements[0].code, "FIRST_WIN");
+  // Inventory (grouped) + counts
+  assert.ok(p.cosmetics.inventory.avatar_frame?.some((c) => c.assetKey === "own_frame"));
+  assert.ok(p.cosmetics.inventory.chip_set?.some((c) => c.assetKey === "gold_chips"));
+  assert.equal(p.cosmetics.inventoryCount, 2);
+  // Inspect (equipped detailed with render info)
+  assert.equal(p.cosmetics.equipped.avatar_frame.assetKey, "own_frame");
+  assert.equal(p.cosmetics.equipped.avatar_frame.renderType, "png");
+});
+
+test("fresh=true bypasses the snapshot cache", async () => {
+  const viewer = await makeUser({ name: "V5" });
+  const target = await makeUser({ name: "Fresh", country: "EG" });
+  await profileSvc.getPublicProfile(viewer._id, target._id); // warm
+  await User.updateOne({ _id: target._id }, { $set: { country: "US" } });
+  const cached = await profileSvc.getPublicProfile(viewer._id, target._id);
+  assert.equal(cached.identity.country, "EG", "cache still serves old value");
+  const fresh = await profileSvc.getPublicProfile(viewer._id, target._id, { fresh: true });
+  assert.equal(fresh.identity.country, "US", "fresh bypasses cache");
+});
+
+// ── gifts (coins + cosmetic + guards) ────────────────────────────────────────
+
+const balanceOf = async (u) => (await Wallet.findOne({ user: u }).lean())?.balance ?? 0;
+
+test("gift coins: debits sender, credits receiver atomically", async () => {
+  const sender = await makeUser({ name: "Giver", balance: 5000 });
+  const target = await makeUser({ name: "Getter", balance: 0 });
+  const r = await giftService.sendGift({ senderId: sender._id, targetId: target._id, type: "coins", amount: 1500 });
+  assert.equal(r.ok, true);
+  assert.equal(await balanceOf(sender._id), 3500);
+  assert.equal(await balanceOf(target._id), 1500);
+});
+
+test("gift cosmetic: charges sender, adds to receiver inventory", async () => {
+  const sender = await makeUser({ name: "Buyer", balance: 5000 });
+  const target = await makeUser({ name: "Recv", balance: 0 });
+  const item = await Cosmetic.create({ type: "avatar_frame", slot: "avatar_frame", name: "Gift Frame", assetKey: "gift_frame", price: 800, status: "published" });
+  const r = await giftService.sendGift({ senderId: sender._id, targetId: target._id, type: "cosmetic", cosmeticId: String(item._id) });
+  assert.equal(r.cost, 800);
+  assert.equal(await balanceOf(sender._id), 4200);
+  const row = await UserCosmetics.findOne({ user: target._id }).lean();
+  assert.ok(row.ownedItems.some((id) => String(id) === String(item._id)), "cosmetic granted to receiver");
+});
+
+test("gift guards: self / blocked / insufficient balance", async () => {
+  const a = await makeUser({ name: "GA", balance: 100 });
+  const b = await makeUser({ name: "GB", balance: 0 });
+  await assert.rejects(() => giftService.sendGift({ senderId: a._id, targetId: a._id, type: "coins", amount: 100 }), /yourself/);
+  await friendService.blockUser(b._id, a._id);
+  await assert.rejects(() => giftService.sendGift({ senderId: a._id, targetId: b._id, type: "coins", amount: 100 }), /blocked/);
+  const c = await makeUser({ name: "GC", balance: 50 });
+  const d = await makeUser({ name: "GD", balance: 0 });
+  await assert.rejects(() => giftService.sendGift({ senderId: c._id, targetId: d._id, type: "coins", amount: 5000 }), /Insufficient/);
 });

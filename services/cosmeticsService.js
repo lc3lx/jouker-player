@@ -419,6 +419,44 @@ async function getMe(userId) {
   };
 }
 
+/**
+ * Owned inventory grouped by category + equipped cosmetics with full render
+ * details (for the profile popup's Inventory / Inspect / Preview sections).
+ * Two queries total, reused inside the single profile endpoint.
+ */
+async function getProfileCosmetics(userId) {
+  const row = await UserCosmetics.findOne({ user: userId }).lean();
+  if (!row) return { ownedByCategory: {}, equippedDetailed: {}, ownedCount: 0 };
+
+  const ownedIds = (row.ownedItems || []).map(String);
+  const bySlot = row.equippedBySlot || {};
+  const equippedIds = Object.values(bySlot).map(String).filter(Boolean);
+  const legacy = row.equipped || {};
+  for (const f of ["tableTheme", "cardSkin", "avatarFrame"]) {
+    if (legacy[f]) equippedIds.push(String(legacy[f]));
+  }
+  const allIds = [...new Set([...ownedIds, ...equippedIds])].map(toObjectId).filter(Boolean);
+  const docs = allIds.length ? await Cosmetic.find({ _id: { $in: allIds } }).lean() : [];
+  const byId = new Map(docs.map((d) => [String(d._id), d]));
+
+  const ownedByCategory = {};
+  for (const id of ownedIds) {
+    const d = byId.get(id);
+    if (!d) continue;
+    const pub = publicCosmeticDisplay(d);
+    const cat = pub.category || pub.type || "other";
+    (ownedByCategory[cat] ||= []).push(pub);
+  }
+
+  const equippedDetailed = {};
+  for (const [slot, id] of Object.entries(bySlot)) {
+    const d = byId.get(String(id));
+    if (d) equippedDetailed[slot] = publicCosmeticDisplay(d);
+  }
+
+  return { ownedByCategory, equippedDetailed, ownedCount: ownedIds.length };
+}
+
 async function buyCosmetic(userId, cosmeticIdRaw) {
   const cosmeticId = toObjectId(cosmeticIdRaw);
   if (!cosmeticId) throw new ApiError("Invalid cosmetic id", 400);
@@ -598,6 +636,7 @@ module.exports = {
   listFeatured,
   listRecommended,
   getMe,
+  getProfileCosmetics,
   buyCosmetic,
   equipCosmetic,
   autoEquipAfterBuy,

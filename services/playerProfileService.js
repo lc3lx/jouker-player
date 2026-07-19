@@ -19,6 +19,7 @@ const User = require("../models/userModel");
 const Player = require("../models/playerModel");
 const WalletTransaction = require("../models/walletTransactionModel");
 const AgentProfile = require("../models/agentProfileModel");
+const VIPSubscription = require("../models/vipSubscriptionModel");
 const presenceService = require("./presenceService");
 const vipService = require("./vipService");
 const vipLevelRegistry = require("./vipLevelRegistry");
@@ -71,29 +72,72 @@ async function _coinStats(userId) {
   };
 }
 
+/** Trim a full cosmetic display to the render-relevant fields for the popup. */
+function _cosmeticView(c) {
+  if (!c) return null;
+  return {
+    id: c.id,
+    assetKey: c.assetKey,
+    name: c.name,
+    category: c.category || c.type,
+    slot: c.slot,
+    rarity: c.rarity,
+    renderType: c.renderType || "png",
+    previewImageUrl: c.previewImageUrl || null,
+    animationUrl: c.animationUrl || null,
+  };
+}
+
 /** Build the cacheable, viewer-independent snapshot for one target user. */
 async function _buildSnapshot(targetId) {
-  const [user, player, coin, presence, vipLevel, equippedMap, agent] = await Promise.all([
+  const [user, player, coin, presence, vipLevel, vipSub, cos, agent] = await Promise.all([
     User.findById(targetId)
       .select(
         "name country profileImg createdAt role active muted preferences.hideProfile " +
           "pokerHandsPlayed pokerHandsWon pokerWinStreak vip"
       )
       .lean(),
-    Player.findOne({ user: targetId }).lean(),
+    Player.findOne({ user: targetId })
+      .populate("achievements", "code title icon points category")
+      .lean(),
     _coinStats(targetId),
     presenceService.getPresence(targetId),
     vipService.getVipLevel(targetId),
-    cosmeticsService.resolveEquippedPayloadForUsers([targetId]),
+    VIPSubscription.findOne({ userId: targetId }).lean(),
+    cosmeticsService.getProfileCosmetics(targetId),
     AgentProfile.findOne({ user: targetId, status: "approved" }).lean(),
   ]);
   if (!user) return null;
 
+  const now = Date.now();
   const s = player?.stats || {};
   const gamesPlayed = s.gamesPlayed || 0;
   const wins = s.wins || 0;
   const vipCfg = vipLevel ? vipLevelRegistry.config(vipLevel) : null;
-  const equipped = equippedMap.get(String(targetId)) || {};
+
+  // VIP expiry + days remaining + benefits preview.
+  const vipExpire = vipLevel && vipSub?.expireDate && new Date(vipSub.expireDate).getTime() > now
+    ? vipSub.expireDate : null;
+  const daysRemaining = vipExpire ? Math.max(0, Math.ceil((new Date(vipExpire).getTime() - now) / 86400000)) : 0;
+
+  // Cosmetics: equipped inspect + owned inventory grouped by category.
+  const equippedDetailed = {};
+  for (const [slot, c] of Object.entries(cos.equippedDetailed || {})) {
+    equippedDetailed[slot] = _cosmeticView(c);
+  }
+  const inventory = {};
+  for (const [cat, list] of Object.entries(cos.ownedByCategory || {})) {
+    inventory[cat] = list.map(_cosmeticView);
+  }
+  const avatarFrame = equippedDetailed.avatar_frame?.assetKey || null;
+
+  const achievements = ((player?.achievements) || []).map((a) => ({
+    code: a.code,
+    title: a.title,
+    icon: a.icon || "star",
+    points: a.points || 0,
+    category: a.category || "general",
+  }));
 
   const perGame = [
     {
@@ -127,14 +171,22 @@ async function _buildSnapshot(targetId) {
       color: vipCfg?.color || null,
       badge: vipCfg?.badge || null,
       rank: vipCfg?.rank || 0,
+      expireDate: vipExpire,
+      daysRemaining,
+      benefits: vipCfg
+        ? { dailyChips: vipCfg.dailyChips, cashbackPercent: vipCfg.cashbackPercent, quiz: !!vipCfg.quiz, priorityQueue: !!vipCfg.priorityQueue }
+        : null,
     },
     agent: agent
       ? {
           isAgent: true,
           displayName: agent.deposit?.displayName || user.name,
+          level: agent.deposit?.level || 0,
+          rating: agent.deposit?.rating ?? null,
+          totalOperations: agent.deposit?.stats?.totalDeposits || 0,
+          avgResponseMinutes: agent.deposit?.avgResponseMinutes || 0,
           paymentMethods: agent.deposit?.paymentMethods || [],
           workingHours: agent.deposit?.workingHours || null,
-          rating: agent.deposit?.rating ?? null,
           countries: agent.deposit?.countries || [],
           whatsapp: agent.deposit?.whatsapp || null,
           telegram: agent.deposit?.telegram || null,
@@ -142,9 +194,12 @@ async function _buildSnapshot(targetId) {
         }
       : { isAgent: false },
     cosmetics: {
-      avatarFrame: equipped.avatarFrame || equipped.skin || null,
-      bySlot: equipped.bySlot || {},
+      avatarFrame,
+      equipped: equippedDetailed,
+      inventory,
+      inventoryCount: cos.ownedCount || 0,
     },
+    achievements,
     stats: {
       general: {
         gamesPlayed,
@@ -167,10 +222,12 @@ async function _buildSnapshot(targetId) {
   };
 }
 
-async function _getCachedSnapshot(targetId) {
+async function _getCachedSnapshot(targetId, fresh = false) {
   const key = String(targetId);
-  const hit = _snap.get(key);
-  if (hit && Date.now() - hit.at < SNAPSHOT_TTL_MS) return hit.data;
+  if (!fresh) {
+    const hit = _snap.get(key);
+    if (hit && Date.now() - hit.at < SNAPSHOT_TTL_MS) return hit.data;
+  }
   const data = await _buildSnapshot(targetId);
   if (data) {
     _snap.set(key, { at: Date.now(), data });
@@ -188,9 +245,9 @@ function invalidate(targetId) {
  * Adds viewer-relative relationship + admin flag; strips stats when the target
  * hides their profile (unless viewer is self or an admin).
  */
-async function getPublicProfile(viewerId, targetId) {
+async function getPublicProfile(viewerId, targetId, { fresh = false } = {}) {
   if (!toObjectId(targetId)) throw new ApiError("Invalid user id", 400);
-  const snap = await _getCachedSnapshot(targetId);
+  const snap = await _getCachedSnapshot(targetId, fresh);
   if (!snap) throw new ApiError("User not found", 404);
 
   const [relationship, viewer] = await Promise.all([
@@ -214,6 +271,8 @@ async function getPublicProfile(viewerId, targetId) {
     data.hidden = true;
     data.stats = null;
     data.perGame = [];
+    data.achievements = [];
+    data.cosmetics = { ...snap.cosmetics, inventory: {}, inventoryCount: 0 };
   }
   // Never leak the raw moderation flags to non-admins.
   if (!viewerIsAdmin) delete data.moderation;

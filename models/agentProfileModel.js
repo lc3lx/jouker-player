@@ -56,6 +56,9 @@ const agentProfileSchema = new mongoose.Schema(
       // Optional contact handles surfaced on the player profile popup.
       whatsapp: { type: String, default: "", trim: true, maxlength: 60 },
       telegram: { type: String, default: "", trim: true, maxlength: 60 },
+      // Optional presentation surfaced on the profile popup.
+      level: { type: Number, default: 0, min: 0 },
+      avgResponseMinutes: { type: Number, default: 0, min: 0 },
       stats: {
         totalDeposits: { type: Number, default: 0 },
         totalVolume: { type: Number, default: 0 },
