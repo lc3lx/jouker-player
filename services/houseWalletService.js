@@ -1,5 +1,6 @@
 const HouseWallet = require("../models/houseWalletModel");
 const HouseWalletTransaction = require("../models/houseWalletTransactionModel");
+const { sendAlert } = require("../utils/alert");
 
 const HOUSE_WALLET_KEY = process.env.HOUSE_WALLET_KEY || "house-main";
 
@@ -120,6 +121,18 @@ async function applyHouseDelta({
     }
   }
   if (nextBalance < 0) {
+    // Unlike every wallet-side underflow path in walletLedgerService.js, this
+    // throw previously had no alert — a house-wallet-insufficiency incident
+    // was only visible as a thrown exception, not a dispatched alert.
+    void sendAlert("house_wallet_insufficient_balance", {
+      deficit: Math.abs(nextBalance),
+      currentBalance: before.balance,
+      attemptedDelta: d,
+      type,
+      tableId,
+      handId,
+      settlementId,
+    });
     throw new Error("HOUSE_WALLET_INSUFFICIENT_BALANCE");
   }
   wallet.balance = nextBalance;

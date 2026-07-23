@@ -1,3 +1,15 @@
+/**
+ * @deprecated Legacy standalone-tournament REST controller layer. No longer
+ * reachable — routes/tournamentRoute.js was rewritten to a disable gate that
+ * doesn't require this file at all, so nothing in this module executes in
+ * production. Replaced by the ClanTournament bracket system
+ * (services/clanTournamentEngineService.js). Reason: registerTournament
+ * below debits the wallet non-transactionally before registration confirms,
+ * with no refund path on failure — see
+ * docs/STANDALONE_TOURNAMENT_DISABLED.md for the full audit. Kept, not
+ * deleted, for database compatibility and a possible future migration. Do
+ * not wire this module into any new route/service/socket handler.
+ */
 const asyncHandler = require("express-async-handler");
 const ApiError = require("../utils/apiError");
 const Tournament = require("../models/tournamentModel");

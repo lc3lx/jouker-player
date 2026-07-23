@@ -11,6 +11,40 @@ const LOBBY_EXCLUDED_STATUSES = ["closed", "archived"];
  */
 async function archiveTableDocument(tableId, { reason = "game_complete", session } = {}) {
   const tid = String(tableId);
+
+  // Static tables are permanent (the fixed 4-per-tier scaffold) — archiving
+  // them would hide them from the lobby for the rest of the process's
+  // uptime, with no runtime path back to "open". Reset instead, mirroring
+  // pokerTableGcService's existing tableKind-aware treatment.
+  const kindProbe = session
+    ? await Table.findById(tid).select("tableKind gameType").session(session)
+    : await Table.findById(tid).select("tableKind gameType");
+  if (!kindProbe) return { archived: false, reason: "not_found" };
+
+  if (kindProbe.tableKind === "static") {
+    const resetQ = Table.findByIdAndUpdate(
+      tid,
+      {
+        $set: {
+          status: kindProbe.gameType === "poker" ? "waiting" : "open",
+          seats: [],
+          waitingQueue: [],
+          activeSettlementId: null,
+        },
+      },
+      { new: true }
+    );
+    const resetDoc = session ? await resetQ.session(session) : await resetQ;
+    if (!resetDoc) return { archived: false, reason: "not_found" };
+
+    emitTablesUpdated({
+      gameType: resetDoc.gameType || "poker",
+      reason: "table_reset",
+      tableId: tid,
+    });
+    return { archived: false, reset: true, tableId: tid, gameType: resetDoc.gameType };
+  }
+
   const q = Table.findByIdAndUpdate(
     tid,
     {

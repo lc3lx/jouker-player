@@ -43,7 +43,10 @@ const adminReferralRoute = require("./adminReferralRoute");
 const adminEconomyRoute = require("./adminEconomyRoute");
 const adminCosmeticsRoute = require("./adminCosmeticsRoute");
 const adminUserRoute = require("./adminUserRoute");
+const adminBotRoute = require("./adminBotRoute");
+const adminClanRoute = require("./adminClanRoute");
 const giftRoute = require("./giftRoute");
+const clanRoute = require("./clanRoute");
 const mountInviteLanding = require("./inviteLandingRoute");
 
 const mountRoutes = (app) => {
@@ -81,6 +84,8 @@ const mountRoutes = (app) => {
   app.use("/api/v1/admin/economy", adminEconomyRoute);
   app.use("/api/v1/admin/cosmetics", adminCosmeticsRoute);
   app.use("/api/v1/admin/users", adminUserRoute);
+  app.use("/api/v1/admin/clans", adminClanRoute);
+  app.use("/api/v1/admin/bots", adminBotRoute);
   app.use("/api/v1/admin", adminRoute);
   app.use("/api/v1/vip", vipRoute);
   app.use("/api/v1/analytics", analyticsRoute);
@@ -101,6 +106,7 @@ const mountRoutes = (app) => {
   app.use("/api/v1/sicbo", sicboRoute);
   app.use("/api/v1/admin/sicbo", adminSicboRoute);
   app.use("/api/v1/social", socialRoute);
+  app.use("/api/v1/clans", clanRoute);
   app.use("/api/v1/gifts", giftRoute);
   app.use("/api/v1/chat", chatRoute);
   app.use("/api/v1/replay", replayRoute);

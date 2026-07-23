@@ -16,27 +16,39 @@ const {
 
 // ─── Card game helpers ────────────────────────────────────────────────────
 
+/**
+ * Atomic $push guarded by a "not already queued" filter — two concurrent
+ * enqueues on the same table can no longer race a read-modify-write
+ * table.save() and silently drop one entry (last-write-wins on the array).
+ */
 async function enqueueCard({ userId, playerId, tableId, buyIn }) {
-  const table = await Table.findById(tableId).select("waitingQueue");
-  if (!table) throw new Error("TABLE_NOT_FOUND");
-
-  const already = table.waitingQueue.find((e) => String(e.user) === String(userId));
-  if (already) throw new Error("ALREADY_QUEUED");
-
-  table.waitingQueue.push({ user: userId, player: playerId, buyIn });
-  await table.save();
-
-  return table.waitingQueue.findIndex((e) => String(e.user) === String(userId)) + 1;
+  const updated = await Table.findOneAndUpdate(
+    { _id: tableId, "waitingQueue.user": { $ne: userId } },
+    { $push: { waitingQueue: { user: userId, player: playerId, buyIn } } },
+    { new: true, select: "waitingQueue" }
+  );
+  if (!updated) {
+    const exists = await Table.exists({ _id: tableId });
+    if (!exists) throw new Error("TABLE_NOT_FOUND");
+    throw new Error("ALREADY_QUEUED");
+  }
+  return updated.waitingQueue.findIndex((e) => String(e.user) === String(userId)) + 1;
 }
 
+/**
+ * Atomic FIFO pop: findOneAndUpdate with new:false returns the pre-update
+ * document so we can read the entry that $pop just removed, in one op.
+ */
 async function dequeueNextCard(tableId) {
-  const table = await Table.findById(tableId).select("waitingQueue");
-  if (!table || table.waitingQueue.length === 0) return null;
-
-  const entry = table.waitingQueue[0];
-  table.waitingQueue.splice(0, 1);
-  await table.save();
-
+  const before = await Table.findOneAndUpdate(
+    { _id: tableId, "waitingQueue.0": { $exists: true } },
+    { $pop: { waitingQueue: -1 } },
+    { new: false, select: "waitingQueue" }
+  );
+  if (!before || !Array.isArray(before.waitingQueue) || before.waitingQueue.length === 0) {
+    return null;
+  }
+  const entry = before.waitingQueue[0];
   return { userId: String(entry.user), buyIn: entry.buyIn, tableId: String(tableId) };
 }
 
@@ -48,13 +60,12 @@ async function getPositionCard(userId, tableId) {
 }
 
 async function cancelCard(userId, tableId) {
-  const table = await Table.findById(tableId).select("waitingQueue");
-  if (!table) return false;
-  const before = table.waitingQueue.length;
-  table.waitingQueue = table.waitingQueue.filter((e) => String(e.user) !== String(userId));
-  if (table.waitingQueue.length === before) return false;
-  await table.save();
-  return true;
+  const updated = await Table.findOneAndUpdate(
+    { _id: tableId, "waitingQueue.user": userId },
+    { $pull: { waitingQueue: { user: userId } } },
+    { new: true, select: "_id" }
+  );
+  return !!updated;
 }
 
 async function getSizeCard(tableId) {

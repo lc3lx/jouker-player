@@ -36,6 +36,19 @@ async function reconcileUser(userId) {
       case "refund":
         locked += amt;
         break;
+      // Plain balance withdraw/deposit ledger types (ledgerWithdraw/ledgerDeposit
+      // in walletLedgerService.js) — never touch lockedBalance, unlike the
+      // seat-lock types above. Clan-tournament entry/prize/refund are the
+      // tournament-specific ledgerType values of these same two primitives.
+      case "withdraw":
+      case "clan_tournament_entry":
+        balance -= amt;
+        break;
+      case "deposit":
+      case "clan_tournament_prize":
+      case "clan_tournament_refund":
+        balance += amt;
+        break;
       case "game_buyin":
       case "settlement":
         break;

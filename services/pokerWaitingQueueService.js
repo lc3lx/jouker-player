@@ -174,11 +174,22 @@ async function getWaitingQueueSize(tableId) {
   return Array.isArray(table?.waitingQueue) ? table.waitingQueue.length : 0;
 }
 
+/** Which poker table (if any) has this user queued right now — Redis-aware. */
+async function findUserQueuedPokerTable(userId) {
+  if (pokerQueueRedis.isEnabled()) {
+    const tableId = await pokerQueueRedis.getQueuedTableForUser(userId);
+    return tableId ? String(tableId) : null;
+  }
+  const table = await Table.findOne({ gameType: "poker", "waitingQueue.user": userId }).select("_id");
+  return table ? String(table._id) : null;
+}
+
 module.exports = {
   enqueuePlayer,
   seatNextFromQueue,
   dequeuePlayer,
   getQueuePosition,
   getWaitingQueueSize,
+  findUserQueuedPokerTable,
   queueEntryUserId,
 };

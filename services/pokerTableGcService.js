@@ -159,7 +159,10 @@ async function destroyEmptyTable(tableId) {
   return true;
 }
 
+let lastSweepAt = null;
+
 async function gcSweep() {
+  lastSweepAt = Date.now();
   try {
     const candidates = await Table.find({
       gameType: "poker",
@@ -217,6 +220,10 @@ function stopPokerTableGc() {
   }
 }
 
+function getLastSweepAt() {
+  return lastSweepAt;
+}
+
 module.exports = {
   startPokerTableGc,
   stopPokerTableGc,
@@ -224,4 +231,5 @@ module.exports = {
   resetPokerTableWhenEmpty,
   destroyEmptyTable,
   gcSweep,
+  getLastSweepAt,
 };

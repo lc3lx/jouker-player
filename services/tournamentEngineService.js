@@ -1,6 +1,18 @@
 /**
+ * @deprecated Legacy standalone tournament lifecycle engine.
  * Tournament engine — lifecycle orchestration over Tournament model.
  * Supports SNG, MTT, scheduled, satellite, freeroll, knockout, PKO, bounty, rebuy, add-on.
+ *
+ * Replaced by the ClanTournament bracket system (services/clanTournamentEngineService.js),
+ * which has real transactional escrow, walkover, and cancellation handling
+ * this engine never had. startEngine() is no longer called from server.js,
+ * so its 15s-per-tournament lifecycle tick no longer runs, and
+ * routes/tournamentRoute.js no longer calls any function in this file — see
+ * docs/STANDALONE_TOURNAMENT_DISABLED.md for the full audit (including why:
+ * eliminatePlayer() below is never called anywhere in production, so
+ * advanceLifecycle can never reach "finished" for a 2+ player tournament,
+ * and distributePrizes() is never wired to an actual wallet payout). Kept,
+ * not deleted, for database compatibility and a possible future migration.
  */
 const Tournament = require("../models/tournamentModel");
 const ApiError = require("../utils/apiError");
@@ -299,6 +311,7 @@ function scheduleTick(tournamentId) {
       logger.warn("tournament_tick_failed", { tournamentId: String(tournamentId), reason: e?.message });
     });
   }, 15000);
+  if (typeof id.unref === "function") id.unref();
   timers.set(String(tournamentId), id);
 }
 

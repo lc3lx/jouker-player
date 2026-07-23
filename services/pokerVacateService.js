@@ -12,7 +12,8 @@ function getTableGameBridge() {
 }
 
 function vacateUntilDate() {
-  return new Date(Date.now() + POKER_TIMINGS.VACATE_WINDOW_MS);
+  const { getSettings } = require("./tableLifecycleSettingsService");
+  return new Date(Date.now() + getSettings().pokerVacateWindowMs);
 }
 
 function isVacateActive(entry) {
@@ -121,7 +122,7 @@ async function vacatePokerSeat({
     vacated: true,
     chips,
     vacateUntil,
-    vacateWindowMs: POKER_TIMINGS.VACATE_WINDOW_MS,
+    vacateWindowMs: require("./tableLifecycleSettingsService").getSettings().pokerVacateWindowMs,
   };
 }
 

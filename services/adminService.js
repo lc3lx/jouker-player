@@ -1,6 +1,11 @@
 const asyncHandler = require("express-async-handler");
 const Table = require("../models/tableModel");
 const WalletTransaction = require("../models/walletTransactionModel");
+const TableLifecycleSettings = require("../models/tableLifecycleSettingsModel");
+const tableLifecycleSettingsService = require("./tableLifecycleSettingsService");
+const SystemMonitorSettings = require("../models/systemMonitorSettingsModel");
+const systemMonitorSettingsService = require("./systemMonitorSettingsService");
+const systemHealthMonitorService = require("./systemHealthMonitorService");
 const {
   getTableGameDebugSnapshot,
   buildAdminRealtimeTablePayload,
@@ -120,5 +125,192 @@ exports.adminForceEndHand = asyncHandler(async (req, res) => {
   }
   const result = await adminForceEndHandTable(String(tableId));
   res.status(200).json({ status: "success", data: result });
+});
+
+exports.adminGetTableLifecycleSettings = asyncHandler(async (req, res) => {
+  const s = await TableLifecycleSettings.getDefaults();
+  res.status(200).json({ status: "success", data: s });
+});
+
+const TABLE_LIFECYCLE_SETTING_KEYS = [
+  "pokerReconnectWindowMs",
+  "pokerVacateWindowMs",
+  "pokerWaitForPlayersMs",
+  "tarneeb41VacateMs",
+  "trixVacateMs",
+  "cardIdleTimeoutMs",
+  "cardGcIntervalMs",
+  "pokerEmptyGcMs",
+  "pokerGcIntervalMs",
+];
+
+exports.adminUpdateTableLifecycleSettings = asyncHandler(async (req, res) => {
+  const patch = req.body || {};
+  const s = await TableLifecycleSettings.getDefaults();
+  for (const k of TABLE_LIFECYCLE_SETTING_KEYS) {
+    if (typeof patch[k] !== "undefined") s[k] = patch[k];
+  }
+  await s.save();
+  // Applies immediately: reconnect/vacate windows are read from this cache
+  // at the moment a timer is armed, not baked into a module-load constant.
+  tableLifecycleSettingsService.applySettings(s.toObject());
+  res.status(200).json({ status: "success", data: s });
+});
+
+/**
+ * Table-lifecycle dashboard: status/kind breakdown, bot vs human seat
+ * counts, live reconnect/vacate timers with remaining time, a ghost-seat
+ * signal (SITTING_OUT past its own reconnect deadline — should be near-zero
+ * now that the poker disconnect timeout hands off to the vacate pipeline
+ * instead of stopping at SITTING_OUT), and process memory.
+ */
+exports.adminTableLifecycleOverview = asyncHandler(async (req, res) => {
+  const now = Date.now();
+  const limit = Math.min(300, Number(req.query.limit || 200));
+
+  const tables = await Table.find(
+    {},
+    {
+      _id: 1,
+      gameType: 1,
+      tier: 1,
+      tableKind: 1,
+      tableNumber: 1,
+      status: 1,
+      seats: 1,
+      vacatingPlayers: 1,
+      updatedAt: 1,
+    }
+  ).limit(limit);
+
+  const byStatus = {};
+  const byKind = {};
+  let botSeats = 0;
+  let humanSeats = 0;
+  let activeReconnectTimers = 0;
+  let activeVacateTimers = 0;
+  let ghostSeats = 0;
+
+  const rows = await Promise.all(
+    tables.map(async (t) => {
+      byStatus[t.status] = (byStatus[t.status] || 0) + 1;
+      byKind[t.tableKind || "static"] = (byKind[t.tableKind || "static"] || 0) + 1;
+
+      const live =
+        t.gameType === "poker" ? buildAdminRealtimeTablePayload(await getLiveTableGameForAdmin(String(t._id))) : null;
+
+      let tableBotSeats = 0;
+      let tableHumanSeats = 0;
+      let reconnectTimers = [];
+      let ghostFlags = 0;
+
+      if (live && Array.isArray(live.seats)) {
+        for (const s of live.seats) {
+          if (s.isBot) tableBotSeats += 1;
+          else tableHumanSeats += 1;
+          if (!s.isBot && s.reconnectDeadline) {
+            const remainingMs = new Date(s.reconnectDeadline).getTime() - now;
+            if (remainingMs > 0) {
+              reconnectTimers.push({ userId: s.userId, remainingMs, kind: "reconnect" });
+            } else if (s.playerState === "SITTING_OUT" || s.playerState === "sitting_out") {
+              ghostFlags += 1;
+            }
+          }
+        }
+      } else {
+        tableHumanSeats = (t.seats || []).length;
+      }
+
+      const vacateTimers = (t.vacatingPlayers || [])
+        .filter((v) => new Date(v.vacateUntil).getTime() > now)
+        .map((v) => ({
+          userId: v.user,
+          remainingMs: new Date(v.vacateUntil).getTime() - now,
+          kind: "vacate",
+        }));
+
+      botSeats += tableBotSeats;
+      humanSeats += tableHumanSeats;
+      activeReconnectTimers += reconnectTimers.length;
+      activeVacateTimers += vacateTimers.length;
+      ghostSeats += ghostFlags;
+
+      return {
+        tableId: t._id,
+        gameType: t.gameType,
+        tier: t.tier,
+        tableKind: t.tableKind || "static",
+        tableNumber: t.tableNumber,
+        status: t.status,
+        humanSeats: tableHumanSeats,
+        botSeats: tableBotSeats,
+        timers: [...reconnectTimers, ...vacateTimers],
+        ghostSeats: ghostFlags,
+        updatedAt: t.updatedAt,
+      };
+    })
+  );
+
+  res.status(200).json({
+    status: "success",
+    data: {
+      summary: {
+        totalTables: tables.length,
+        byStatus,
+        byKind,
+        botSeats,
+        humanSeats,
+        activeReconnectTimers,
+        activeVacateTimers,
+        ghostSeats,
+        memoryUsage: process.memoryUsage(),
+      },
+      tables: rows,
+    },
+  });
+});
+
+/**
+ * Production monitoring dashboard: the latest system-health-monitor sweep
+ * snapshot (per-subsystem status/score, overall health %, and every finding
+ * from the most recent pass). Triggers a fresh sweep on demand if none has
+ * run yet (e.g. right after boot, before the first interval tick).
+ */
+exports.adminSystemHealth = asyncHandler(async (req, res) => {
+  let snapshot = systemHealthMonitorService.getSnapshot();
+  if (!snapshot) {
+    snapshot = await systemHealthMonitorService.runSweepOnce();
+  }
+  res.status(200).json({ status: "success", data: snapshot });
+});
+
+exports.adminGetMonitorSettings = asyncHandler(async (req, res) => {
+  const s = await SystemMonitorSettings.getDefaults();
+  res.status(200).json({ status: "success", data: s });
+});
+
+const MONITOR_SETTING_KEYS = [
+  "enabled",
+  "sweepIntervalMs",
+  "walletLockOrphanGraceMs",
+  "stuckHandGraceMs",
+  "tournamentMatchGraceMs",
+  "repeatedAnomalyThreshold",
+  "memoryWarningPct",
+  "memoryCriticalPct",
+  "eventLoopLagWarningMs",
+  "eventLoopLagCriticalMs",
+  "autoRepairEnabled",
+];
+
+exports.adminUpdateMonitorSettings = asyncHandler(async (req, res) => {
+  const patch = req.body || {};
+  const s = await SystemMonitorSettings.getDefaults();
+  for (const k of MONITOR_SETTING_KEYS) {
+    if (typeof patch[k] !== "undefined") s[k] = patch[k];
+  }
+  await s.save();
+  systemMonitorSettingsService.applySettings(s.toObject());
+  res.status(200).json({ status: "success", data: s });
 });
 

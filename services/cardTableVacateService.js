@@ -24,7 +24,12 @@ const TRIX_VACATE_MS = Math.max(
 );
 
 function vacateMsFor(gameType) {
-  return gameType === "trix" ? TRIX_VACATE_MS : VACATE_MS;
+  // Live-tunable via TableLifecycleSettings; falls back to the env-derived
+  // constants above when no admin override has ever been saved.
+  const { getSettings } = require("./tableLifecycleSettingsService");
+  const s = getSettings();
+  if (gameType === "trix") return s.trixVacateMs ?? TRIX_VACATE_MS;
+  return s.tarneeb41VacateMs ?? VACATE_MS;
 }
 
 /** @type {Map<string, NodeJS.Timeout>} */

@@ -1,6 +1,5 @@
 const Table = require("../models/tableModel");
 const { withMongoTransaction, transferToLocked } = require("./walletLedgerService");
-const { emitTablesUpdated } = require("../utils/lobbyRealtime");
 const {
   POKER_CAPACITY,
   derivePokerTableStatus,
@@ -12,6 +11,7 @@ const {
   registerSeatPresence,
 } = require("./pokerCollusionGuard");
 const { markTableActivity } = require("./pokerTableGcService");
+const tableFactory = require("./tableFactory");
 
 function getTableGameBridge() {
   return require("../sockets/pokerTableGameBridge");
@@ -70,34 +70,20 @@ async function findAvailablePokerTable(tier, buyIn, session) {
       .session(session || null);
     const tableNumber = (maxDoc?.tableNumber || 0) + 1 + attempt;
     const { smallBlind, bigBlind } = deriveBlindsFromBuyIn(buyIn);
-    const createOpts = session ? { session } : {};
     try {
-      table = await Table.create(
-        [
-          {
-            gameType: "poker",
-            tier,
-            tableNumber,
-            smallBlind,
-            bigBlind,
-            minBuyIn: buyIn,
-            maxBuyIn: buyIn,
-            capacity: cap,
-            isPrivate: false,
-            status: "waiting",
-            seats: [],
-            waitingQueue: [],
-          },
-        ],
-        createOpts
-      );
-      const created = Array.isArray(table) ? table[0] : table;
-      emitTablesUpdated({
+      // Overflow tables beyond the fixed static tables MUST go through
+      // tableFactory (the single Table.create() entrypoint) so they're
+      // correctly marked tableKind:"dynamic" — otherwise they default to
+      // "static" and pokerTableGcService refuses to ever GC them.
+      const created = await tableFactory.createDynamicTable({
         gameType: "poker",
-        reason: "table_created",
-        tableId: String(created._id),
         tier,
         buyIn,
+        capacity: cap,
+        tableNumber,
+        smallBlind,
+        bigBlind,
+        session,
       });
       return created;
     } catch (err) {
@@ -193,21 +179,15 @@ async function executePokerJoinTransaction({
     if (preferQueue) {
       return enqueuePlayer({ session, userId, playerId, buyIn, tableId: tableTx._id });
     }
-    tableTx = await findAvailablePokerTable(tableTx.tier, buyIn, session);
-
-    // Re-validate against the switched table: a concurrent request may have
-    // already seated or queued this user there (double-join / double-lock race).
-    if (tableTx) {
-      const seatedOnNew = tableTx.seats.find((s) => String(s.user) === String(userId));
-      if (seatedOnNew) throw new Error("ALREADY_SEATED");
-      const queuedOnNew = (tableTx.waitingQueue || []).find(
-        (q) => String(q.user) === String(userId)
-      );
-      if (queuedOnNew) throw new Error("ALREADY_QUEUED");
-      if (buyIn < tableTx.minBuyIn || buyIn > tableTx.maxBuyIn) {
-        throw new Error("INVALID_BUYIN");
-      }
-    }
+    // Do NOT find-or-create a replacement table here: that allocation must
+    // go through withPokerAllocationLock (per-tier+buyIn serialization) to
+    // avoid duplicate overflow tables under burst load, and that lock must
+    // never be acquired while an unrelated Mongo transaction/session is open
+    // (risks blocking other in-flight transactions). Throw TABLE_FULL and let
+    // joinPokerWithRetry's outer catch — which already calls
+    // withPokerAllocationLock outside any transaction — pick/create the next
+    // table and retry.
+    throw new Error("TABLE_FULL");
   }
 
   if (!tableTx) throw new Error("TABLE_NOT_FOUND");

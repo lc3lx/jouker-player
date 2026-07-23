@@ -84,6 +84,17 @@ const tableSchema = new mongoose.Schema(
     displayName: { type: String },
     /** VIP table owner. */
     owner: { type: mongoose.Schema.ObjectId, ref: "User" },
+    /**
+     * When set, this table is hosting a clan-tournament match. The unified
+     * game-finish hook uses this to resolve the match & advance the bracket.
+     * Null for all ordinary tables (fully additive / backward compatible).
+     */
+    clanTournamentMatch: {
+      type: mongoose.Schema.ObjectId,
+      ref: "ClanTournamentMatch",
+      default: null,
+      index: true,
+    },
     /** Per-table config knobs controlled by VIP owner or admin. */
     settings: {
       allowSpectators: { type: Boolean, default: true },

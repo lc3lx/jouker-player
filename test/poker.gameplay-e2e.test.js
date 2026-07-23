@@ -490,3 +490,94 @@ test("CHAOS: idempotent re-settlement never double-credits (same handId)", async
   g.disposeTimers();
   process.env.RAKE_PERCENT = "0.05";
 });
+
+// ── Table-lifecycle audit: poker disconnect -> vacate -> bot-takeover pipeline ──
+// Previously onPlayerSocketDisconnected's reconnect-window timeout only set
+// SITTING_OUT and stopped — the seat, and the player's locked buy-in, stayed
+// stuck forever with no automatic path back to a usable seat or a refund.
+// These tests cover the fix: vacatePokerSeat is now what the timeout hands
+// off to (Mongo-level), and the timeout callback actually calls it (wiring).
+
+test("VACATE PIPELINE: vacatePokerSeat moves the seat to vacatingPlayers; reconnecting within the window restores it exactly", async () => {
+  const { tableId, users, buyIn } = await makeSeatedGame(2, 10000);
+  const { vacatePokerSeat, tryRestoreVacatedSeat } = require("../services/pokerVacateService");
+
+  const uid = String(users[0]);
+  assert.equal(await walletLocked(uid), buyIn);
+
+  const result = await vacatePokerSeat({ tableId, userId: uid, reason: "disconnect_timeout" });
+  assert.equal(result.vacated, true);
+  assert.equal(result.chips, buyIn);
+
+  const afterVacate = await Table.findById(tableId);
+  assert.equal(
+    afterVacate.seats.some((s) => String(s.user) === uid),
+    false,
+    "seat removed from seats while vacating"
+  );
+  assert.equal(
+    afterVacate.vacatingPlayers.some((v) => String(v.user) === uid),
+    true,
+    "seat recorded in vacatingPlayers with a grace window"
+  );
+  // Money stays exactly where it was during the grace window — not lost, not moved.
+  assert.equal(await walletLocked(uid), buyIn);
+
+  const restored = await tryRestoreVacatedSeat({ tableId, userId: uid });
+  assert.equal(restored.restored, true);
+  assert.equal(restored.chips, buyIn);
+
+  const afterRestore = await Table.findById(tableId);
+  assert.equal(afterRestore.seats.some((s) => String(s.user) === uid), true, "seat restored on reconnect");
+  assert.equal(afterRestore.vacatingPlayers.length, 0, "vacating entry cleared on restore");
+  assert.equal(await walletLocked(uid), buyIn, "reconnect never touches the wallet lock");
+});
+
+test("VACATE PIPELINE: an expired vacate window forfeits the wallet lock instead of leaving it stuck forever", async () => {
+  const { tableId, users, buyIn } = await makeSeatedGame(2, 10000);
+  const { vacatePokerSeat, finalizeVacateWithBot } = require("../services/pokerVacateService");
+
+  const uid = String(users[0]);
+  await vacatePokerSeat({ tableId, userId: uid, reason: "disconnect_timeout" });
+  assert.equal(await walletLocked(uid), buyIn, "still locked during the grace window");
+
+  const result = await finalizeVacateWithBot({ tableId, userId: uid, chips: buyIn });
+  assert.equal(result.ok, true);
+  assert.equal(result.chips, buyIn);
+  assert.equal(await walletLocked(uid), 0, "lock forfeited once the grace window expires — never stuck");
+
+  const afterFinal = await Table.findById(tableId);
+  assert.equal(afterFinal.vacatingPlayers.length, 0, "vacating entry cleared after finalize");
+});
+
+test("WIRING: the reconnect-window timeout hands the seat to vacatePokerSeat instead of parking it at SITTING_OUT forever", async () => {
+  const tableLifecycleSettingsService = require("../services/tableLifecycleSettingsService");
+  const prevSettings = tableLifecycleSettingsService.getSettings();
+  tableLifecycleSettingsService.applySettings({ ...prevSettings, pokerReconnectWindowMs: 30 });
+
+  const pokerVacateService = require("../services/pokerVacateService");
+  const origVacate = pokerVacateService.vacatePokerSeat;
+  const calls = [];
+  pokerVacateService.vacatePokerSeat = async (args) => {
+    calls.push(args);
+    return { vacated: false, reason: "test_stub" };
+  };
+
+  try {
+    const { g, users } = await makeSeatedGame(2, 10000);
+    const uid = g.seats[0].userId;
+
+    g.onPlayerSocketDisconnected(uid);
+    assert.equal(g.seats[0].playerState, "DISCONNECTED");
+
+    await new Promise((resolve) => setTimeout(resolve, 150));
+
+    assert.equal(calls.length, 1, "vacatePokerSeat must fire once the reconnect window elapses");
+    assert.equal(String(calls[0].userId), uid);
+    assert.equal(calls[0].reason, "disconnect_timeout");
+    g.disposeTimers();
+  } finally {
+    pokerVacateService.vacatePokerSeat = origVacate;
+    tableLifecycleSettingsService.applySettings(prevSettings);
+  }
+});

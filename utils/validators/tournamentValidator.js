@@ -1,3 +1,10 @@
+/**
+ * @deprecated Validators for the legacy standalone Tournament REST routes.
+ * No longer referenced — routes/tournamentRoute.js was rewritten to a
+ * disable gate that doesn't import this file. Replaced by the ClanTournament
+ * bracket system. See docs/STANDALONE_TOURNAMENT_DISABLED.md. Kept, not
+ * deleted, for a possible future migration.
+ */
 const { body, param, query } = require("express-validator");
 const validatorMiddleware = require("../../middlewares/validatorMiddleware");
 

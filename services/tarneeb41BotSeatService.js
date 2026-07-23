@@ -259,6 +259,7 @@ async function tryClaimTarneeb41BotSeat({
 async function recordVacatedBotSeat({ tableId, userId, seatIndex, chips, playerId }) {
   const tid = String(tableId);
   const uid = String(userId);
+  const seatChips = Number(chips) || 0;
   await withMongoTransaction(async (session) => {
     const table = await Table.findById(tid).session(session);
     if (!table || table.gameType !== "tarneeb41") return;
@@ -269,11 +270,26 @@ async function recordVacatedBotSeat({ tableId, userId, seatIndex, chips, playerI
     table.vacatingPlayers.push({
       user: userId,
       player: playerId || undefined,
-      chips: Number(chips) || 0,
+      chips: seatChips,
       vacatedAt: new Date(),
       vacateUntil: vacateUntilDate(),
       seatIndex,
     });
+    // Forfeit now, mirroring Trix's releaseTrixMongoSeatOnVacate — a bot
+    // takes over play immediately, so the lock must not stay attributed to
+    // the vacated player until a future claimant or final settlement (which
+    // may never come if the table is torn down before then). Safe to also
+    // be a no-op later at claim time: forfeitTableSeatLock clamps to the
+    // remaining locked amount, so it never double-forfeits.
+    if (seatChips > 0) {
+      await forfeitTableSeatLock({
+        session,
+        userId,
+        tableId: tid,
+        seatChips,
+        meta: { reason: "tarneeb41_vacate_bot_takeover", seatIndex },
+      });
+    }
     await table.save({ session });
   });
 }

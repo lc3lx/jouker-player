@@ -1,6 +1,5 @@
 const jwt = require("jsonwebtoken");
 const Table = require("../models/tableModel");
-const Tournament = require("../models/tournamentModel");
 const { getTokenFromHandshake } = require("../utils/socketAuth");
 
 function initRTC(io) {
@@ -34,10 +33,11 @@ function initRTC(io) {
           const ok = table.seats.some((s) => String(s.user) === String(socket.userId));
           if (!ok) return socket.emit("join-denied", { reason: "not-at-this-table" });
         } else if (type === "tournament") {
-          const t = await Tournament.findById(roomId).select("participants");
-          if (!t) return socket.emit("join-denied", { reason: "tournament-not-found" });
-          const ok = t.participants.some((p) => String(p.user) === String(socket.userId));
-          if (!ok) return socket.emit("join-denied", { reason: "not-in-this-tournament" });
+          // The standalone legacy Tournament system is disabled (see
+          // docs/STANDALONE_TOURNAMENT_DISABLED.md) — no participant list
+          // can ever be legitimate going forward, so deny outright rather
+          // than querying the (deprecated) Tournament model.
+          return socket.emit("join-denied", { reason: "tournament-feature-disabled" });
         }
 
         socket.join(roomId);

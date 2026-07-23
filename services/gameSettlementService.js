@@ -535,6 +535,16 @@ async function settleGameOnFinish({
 
   const table = await Table.findById(tableId);
   if (!table) throw new Error("TABLE_NOT_FOUND");
+
+  // Clan-tournament match tables never move wallet coins (the tournament uses its
+  // own entry-fee escrow). Resolve the bracket from the game result and skip cash
+  // settlement entirely.
+  if (table.clanTournamentMatch) {
+    const clanTournamentEngine = require("./clanTournamentEngineService");
+    await clanTournamentEngine.onMatchFinished({ table, gameType, gameResult, gamePlayers });
+    return { skipped: true, reason: "clan_tournament_match" };
+  }
+
   await assertHouseWalletReady({ createIfMissing: process.env.NODE_ENV !== "production" });
 
   const participants = participantsFromTableAndGame(table, gamePlayers);

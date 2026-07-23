@@ -99,6 +99,13 @@ class TimerManager {
     }
     return count;
   }
+
+  /** Diagnostic: every distinct namespace currently holding at least one live timer. */
+  listNamespaces() {
+    const set = new Set();
+    for (const entry of this._timers.values()) set.add(entry.namespace);
+    return [...set];
+  }
 }
 
 const timerManager = new TimerManager();

@@ -10,6 +10,7 @@ const {
   findAvailablePokerTable,
   joinPokerWithRetry,
 } = require("./pokerTableAllocationService");
+const { findUserQueuedPokerTable } = require("./pokerWaitingQueueService");
 
 const MAX_JOIN_ATTEMPTS = 3;
 
@@ -29,6 +30,40 @@ async function findUserSeatedTable(userId, gameType, tier) {
     status: { $nin: LOBBY_EXCLUDED_STATUSES },
     "seats.user": userId,
   }).select("tableNumber seats minBuyIn maxBuyIn gameType tier status");
+}
+
+/**
+ * One-table-per-player enforcement: is this user active (seated, mid-vacate
+ * grace, or queued) at ANY other table, in ANY game type/tier? Unlike
+ * findUserSeatedTable (scoped to one gameType+tier, used as a reconnect
+ * anchor for the target table), this has no scope filter — it's the global
+ * gate called before allocating a seat/queue slot anywhere.
+ */
+async function findUserActiveTableAnywhere(userId, excludeTableId = null) {
+  const baseFilter = {
+    status: { $nin: LOBBY_EXCLUDED_STATUSES },
+    $or: [
+      { "seats.user": userId },
+      { "vacatingPlayers.user": userId },
+      { "waitingQueue.user": userId },
+    ],
+  };
+  const filter = excludeTableId
+    ? { ...baseFilter, _id: { $ne: excludeTableId } }
+    : baseFilter;
+  const mongoHit = await Table.findOne(filter).select("gameType tier tableNumber status");
+  if (mongoHit) {
+    return { tableId: String(mongoHit._id), gameType: mongoHit.gameType, tier: mongoHit.tier };
+  }
+
+  // Poker's Redis-backed queue (when enabled) isn't reflected in the Mongo
+  // waitingQueue array, so it needs its own reverse-index lookup.
+  const pokerQueueTableId = await findUserQueuedPokerTable(userId);
+  if (pokerQueueTableId && pokerQueueTableId !== String(excludeTableId || "")) {
+    return { tableId: pokerQueueTableId, gameType: "poker", tier: null };
+  }
+
+  return null;
 }
 
 /**
@@ -173,6 +208,7 @@ const findAvailableTrixTable = (tier, buyIn, session) =>
 module.exports = {
   MAX_JOIN_ATTEMPTS,
   findUserSeatedTable,
+  findUserActiveTableAnywhere,
   findAvailableTable,
   findAvailableTarneeb41Table,
   findAvailableTrixTable,

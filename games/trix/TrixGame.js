@@ -6,6 +6,9 @@ const RoundManager = require('./managers/RoundManager');
 const ScoreManager = require('./managers/ScoreManager');
 const GameManager = require('./managers/GameManager');
 const BotAI = require('./ai/BotAI');
+const botPoolService = require('../../services/botPoolService');
+const botProfileService = require('../../services/botProfileService');
+const botChatService = require('../../services/botChatService');
 const timerManager = require('../../engine/TimerManager');
 const StateMachine = require('../../engine/StateMachine');
 const { STATE: TRIX_STATE, TRANSITIONS: TRIX_TRANSITIONS } = require('../../engine/states/trixStates');
@@ -143,6 +146,12 @@ class TrixGame extends BaseGameEngine {
     this.clearBotTimer();
     this.clearTurnTimer();
     timerManager.clearAll(this.roomId);
+    // Free any persistent bot identities this game was holding.
+    try {
+      for (const p of this.players || []) {
+        if (p && p.isBot) botPoolService.release(p.botUserId || p.userId);
+      }
+    } catch (_) { /* best-effort */ }
     this.onStateChanged = null;
     this.onGameEvent = null;
     this.onAfterMove = null;
@@ -275,6 +284,33 @@ class TrixGame extends BaseGameEngine {
     return this.players.filter((p) => !p.isBot).length;
   }
 
+  /**
+   * Overlay a persistent bot identity (name/avatar/personality) onto a bot
+   * player object. IDENTITY ONLY — `isBot:true` is preserved so the settlement
+   * money path still nulls the wallet. Falls back to the synthetic name when the
+   * pool is empty. `keepSeatKey` retains a vacate placeholder id for restore.
+   */
+  _applyBotIdentity(p, { fallbackName = 'بوت', keepSeatKey = null } = {}) {
+    try {
+      const existing = this.players
+        .filter((x) => x && x.isBot && x.userId)
+        .map((x) => String(x.userId));
+      const id = botPoolService.acquire(existing);
+      if (id) {
+        p.userId = keepSeatKey || id.userId;
+        p.botUserId = id.userId;
+        p.displayName = id.name || fallbackName;
+        p.avatar = id.avatar || p.avatar || null;
+        p.botPersonality = id.personality;
+        p.botSkill = id.skill;
+        p.botTuning = id.tuning;
+        p.botLang = id.language;
+        return;
+      }
+    } catch (_) { /* pool unavailable */ }
+    if (!p.displayName) p.displayName = fallbackName;
+  }
+
   convertHumanToBot(userId) {
     const p = this.players.find(
       (x) => !x.isBot && x.userId && String(x.userId) === String(userId)
@@ -288,6 +324,7 @@ class TrixGame extends BaseGameEngine {
     p.reconnectDeadline = null;
     p.cosmetics = emptyCosmetics();
     p.vipLevel = null;
+    this._applyBotIdentity(p, { keepSeatKey: p.userId });
     return true;
   }
 
@@ -374,7 +411,7 @@ class TrixGame extends BaseGameEngine {
     while (this.players.length < 4) {
       const botId = `bot_${Date.now()}_${bi}_${Math.random().toString(36).substr(2, 9)}`;
       bi += 1;
-      this.players.push({
+      const bot = {
         userId: botId,
         socketId: null,
         seatIndex: this.players.length,
@@ -384,7 +421,9 @@ class TrixGame extends BaseGameEngine {
         chips: 0,
         vipLevel: null,
         cosmetics: emptyCosmetics(),
-      });
+      };
+      this._applyBotIdentity(bot);
+      this.players.push(bot);
     }
     await this.applyCosmeticsToPlayers();
   }
@@ -422,7 +461,7 @@ class TrixGame extends BaseGameEngine {
 
     while (this.players.length < 4) {
       const botId = `bot_${Date.now()}_${Math.random().toString(36).substr(2, 5)}`;
-      this.players.push({
+      const bot = {
         userId: botId,
         socketId: null,
         seatIndex: this.players.length,
@@ -431,7 +470,9 @@ class TrixGame extends BaseGameEngine {
         chips: 0,
         vipLevel: null,
         cosmetics: emptyCosmetics(),
-      });
+      };
+      this._applyBotIdentity(bot);
+      this.players.push(bot);
     }
 
     await this.applyCosmeticsToPlayers();
@@ -536,7 +577,12 @@ class TrixGame extends BaseGameEngine {
       if (player.isBot) {
         const valid = GameManager.getValidCards(this.gameState, turnIndex);
         if (valid.length > 0) {
-          const card = BotAI.botChooseCard(this.gameState, turnIndex, valid);
+          // Personality/skill opts from the lobby seat (null → default behavior).
+          const lp = this.players.find((p) => p.seatIndex === turnIndex) || this.players[turnIndex];
+          const botOpts = lp && lp.isBot && lp.botTuning
+            ? { personality: lp.botPersonality, skill: lp.botSkill, tuning: lp.botTuning }
+            : null;
+          const card = BotAI.botChooseCard(this.gameState, turnIndex, valid, botOpts);
           if (card) {
             const result = this.applyMove(turnIndex, 'play_card', {
               card,
@@ -728,6 +774,26 @@ class TrixGame extends BaseGameEngine {
       this.clearBotTimer();
       this.clearTurnTimer();
       if (!this._finishedAt) this._finishedAt = Date.now();
+      // Believable bot profile drift (fire-and-forget; cosmetic, not settlement).
+      try {
+        const scores = this.gameState.scores || [];
+        const maxScore = Math.max(...scores);
+        botProfileService.recordSeats(
+          this.players.map((p) => ({
+            isBot: !!p.isBot,
+            botUserId: p.botUserId,
+            userId: p.userId,
+            won: scores[p.seatIndex] === maxScore,
+          })),
+          { gameType: 'trix' }
+        );
+      } catch (_) { /* cosmetic only */ }
+      // Occasional rate-limited bot chat (bridge forwards `bot_chat` to the room).
+      try {
+        const bots = this.players.filter((p) => p.isBot).map((p) => botChatService.botFromSeat(p));
+        const res = botChatService.maybeChat({ bots, tableId: this.roomId, event: 'hand_end' });
+        if (res) setTimeout(() => this._emit('bot_chat', res.message), res.delayMs);
+      } catch (_) { /* best-effort */ }
       this._notifyAfterMove({ success: true, gameEnded: true });
       return true;
     }

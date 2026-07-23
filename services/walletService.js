@@ -38,6 +38,11 @@ const TX_LABELS = {
   game_win: "فوز في لعبة",
   game_loss: "خسارة في لعبة",
   settlement: "تسوية لعبة",
+  clan_create: "إنشاء عشيرة",
+  clan_donation: "تبرع للعشيرة",
+  clan_tournament_entry: "رسوم بطولة عشيرة",
+  clan_tournament_prize: "جائزة بطولة عشيرة",
+  clan_tournament_refund: "استرداد بطولة عشيرة",
 };
 
 const CREDIT_TYPES = new Set([

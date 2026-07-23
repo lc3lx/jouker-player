@@ -229,6 +229,16 @@ async function sanitizeCardTableOnBoot(table) {
     return { tableId, action: "skipped", reason: "not_card_game" };
   }
 
+  // Ephemeral clan-tournament match tables must never be reopened as a
+  // normal bookable lobby table (the generic path below) — a crash mid-match
+  // would otherwise leave a stale ClanTournamentMatch doc pointing at a table
+  // that's silently back in the public lobby. Leave it untouched; the
+  // tournament engine's own deadlineAt walkover sweep (already running,
+  // idempotent) resolves and archives it once it starts ticking.
+  if (table.tableKind === "tournament") {
+    return { tableId, action: "skipped", reason: "tournament_match_deferred_to_engine" };
+  }
+
   if (!isBootZombieCardTable(table)) {
     return { tableId, action: "skipped", reason: "open_lobby_preserved" };
   }
@@ -287,6 +297,14 @@ async function sanitizeCardTableOnBoot(table) {
  */
 async function sanitizePokerTableOnBoot(table, redis) {
   const tableId = String(table._id);
+
+  // Same rationale as sanitizeCardTableOnBoot: never let the generic
+  // reset-to-"waiting" path touch an ephemeral clan-tournament poker match
+  // table — defer to the tournament engine's own walkover sweep.
+  if (table.tableKind === "tournament") {
+    return { tableId, action: "skipped", reason: "tournament_match_deferred_to_engine" };
+  }
+
   const stateStore = new RedisTableStateStore(redis);
   const snapshot = stateStore.isEnabled() ? await stateStore.load(tableId) : null;
 
@@ -426,6 +444,13 @@ async function forceCloseIdleCardTable(gameType, tableId) {
   if (tableDoc?.tableKind === "static") {
     cardIdleSince.delete(key);
     return { closed: false, reason: "static_table_exempt" };
+  }
+  // Tournament match tables have their own deadlineAt-driven walkover —
+  // the generic idle-abandon path would archive them out from under a
+  // still-"live" ClanTournamentMatch ahead of/independent from that.
+  if (tableDoc?.tableKind === "tournament") {
+    cardIdleSince.delete(key);
+    return { closed: false, reason: "tournament_table_exempt" };
   }
 
   const humans = Array.isArray(game.players)
@@ -579,6 +604,8 @@ async function sweepPokerRecoveredTables() {
   }
 }
 
+let lastSweepAt = null;
+
 async function gcSweep() {
   try {
     await sweepCardIdleTables();
@@ -590,6 +617,12 @@ async function gcSweep() {
   } catch (err) {
     logger.error("table_gc_poker_sweep_failed", { reason: (err && err.message) || "unknown" });
   }
+  lastSweepAt = Date.now();
+}
+
+/** Diagnostic: when this sweep last completed (ms epoch), or null if never. */
+function getLastSweepAt() {
+  return lastSweepAt;
 }
 
 function startTableGc(io, { redis = null } = {}) {
@@ -636,4 +669,7 @@ module.exports = {
   registerPokerRecoveryWatch,
   TABLE_IDLE_TIMEOUT_MS,
   POKER_RECOVERED_NO_SOCKETS_MS,
+  countSocketsInRoom,
+  cardRoomName,
+  getLastSweepAt,
 };

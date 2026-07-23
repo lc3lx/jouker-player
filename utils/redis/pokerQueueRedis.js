@@ -3,6 +3,8 @@
  * Key layout:
  *   poker:queue:z:{tableId}  — ZSET member=userId score=enqueueMs
  *   poker:queue:h:{tableId}  — HASH userId -> JSON { playerId, buyIn, queuedAt }
+ *   poker:queue:user:{userId} — STRING tableId (reverse index: is this user
+ *     queued anywhere, and where — used by the global one-table-per-player check)
  */
 
 let redisClient = null;
@@ -13,6 +15,10 @@ function queueZKey(tableId) {
 
 function queueHKey(tableId) {
   return `poker:queue:h:${String(tableId)}`;
+}
+
+function queueUserKey(userId) {
+  return `poker:queue:user:${String(userId)}`;
 }
 
 function setRedisClient(client) {
@@ -47,6 +53,7 @@ async function enqueue({ tableId, userId, playerId, buyIn }) {
       queuedAt: now,
     })
   );
+  multi.set(queueUserKey(uid), tid);
   await multi.exec();
 
   const rank = await redisClient.zRank(zKey, uid);
@@ -66,12 +73,14 @@ async function dequeueNext(tableId) {
   const rawMeta = await redisClient.hGet(hKey, uid);
   if (!rawMeta) {
     await redisClient.zRem(zKey, uid);
+    await redisClient.del(queueUserKey(uid));
     return dequeueNext(tableId);
   }
 
   const multi = redisClient.multi();
   multi.zRem(zKey, uid);
   multi.hDel(hKey, uid);
+  multi.del(queueUserKey(uid));
   await multi.exec();
 
   let meta;
@@ -107,8 +116,16 @@ async function removeFromQueue(tableId, userId) {
   const multi = redisClient.multi();
   multi.zRem(queueZKey(tid), uid);
   multi.hDel(queueHKey(tid), uid);
+  multi.del(queueUserKey(uid));
   const results = await multi.exec();
   return Array.isArray(results) && results.some((r) => r > 0);
+}
+
+/** Reverse lookup: which table (if any) has this user queued right now. */
+async function getQueuedTableForUser(userId) {
+  if (!redisClient) return null;
+  const tid = await redisClient.get(queueUserKey(userId));
+  return tid || null;
 }
 
 async function getPosition(tableId, userId) {
@@ -168,5 +185,6 @@ module.exports = {
   clearQueue,
   isUserQueued,
   listQueueEntries,
+  getQueuedTableForUser,
   queueZKey,
 };

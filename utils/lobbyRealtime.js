@@ -7,6 +7,10 @@ function setMainIo(io) {
   mainIo = io;
 }
 
+function getMainIo() {
+  return mainIo;
+}
+
 function emitTablesUpdated(payload = {}) {
   if (!mainIo) return;
   try {
@@ -19,4 +23,4 @@ function emitTablesUpdated(payload = {}) {
   }
 }
 
-module.exports = { setMainIo, emitTablesUpdated };
+module.exports = { setMainIo, getMainIo, emitTablesUpdated };

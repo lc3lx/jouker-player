@@ -6,6 +6,12 @@ const {
   adminListTransactions,
   adminRealtimeTables,
   adminForceEndHand,
+  adminGetTableLifecycleSettings,
+  adminUpdateTableLifecycleSettings,
+  adminTableLifecycleOverview,
+  adminSystemHealth,
+  adminGetMonitorSettings,
+  adminUpdateMonitorSettings,
 } = require("../services/adminService");
 const {
   adminGetCurrencySettings,
@@ -24,6 +30,12 @@ router.use(authService.protect, authService.allowedTo("admin", "manager"));
 router.get("/tables", adminListTables);
 router.get("/realtime-tables", adminRealtimeTables);
 router.post("/force-end-hand", adminForceEndHand);
+router.get("/table-lifecycle-overview", adminTableLifecycleOverview);
+router.get("/table-lifecycle-settings", adminGetTableLifecycleSettings);
+router.put("/table-lifecycle-settings", adminUpdateTableLifecycleSettings);
+router.get("/system-health", adminSystemHealth);
+router.get("/monitor-settings", adminGetMonitorSettings);
+router.put("/monitor-settings", adminUpdateMonitorSettings);
 router.get("/players", adminListPlayers);
 router.get("/transactions", adminListTransactions);
 

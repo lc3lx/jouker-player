@@ -8,6 +8,9 @@ const { newDeck, shuffle } = require("../utils/cards");
 const rules = require("./tarneeb41.rules");
 const { GAME_START_COUNTDOWN_SECONDS, TRICK_DISPLAY_MS } = require("./tarneeb41.constants");
 const TarneebBot = require("../../engine/bots/TarneebBot");
+const botPoolService = require("../../services/botPoolService");
+const botProfileService = require("../../services/botProfileService");
+const botChatService = require("../../services/botChatService");
 const timerManager = require("../../engine/TimerManager");
 const StateMachine = require("../../engine/StateMachine");
 const { STATE: T41_STATE, TRANSITIONS: T41_TRANSITIONS } = require("../../engine/states/tarneeb41States");
@@ -144,6 +147,33 @@ class Tarneeb41Game extends BaseGameEngine {
     this._countdownStartGate = typeof gateFn === "function" ? gateFn : null;
   }
 
+  /**
+   * Overlay a persistent bot identity (name/avatar/personality) onto a bot
+   * player. IDENTITY ONLY — `isBot:true` is preserved, so settlement still nulls
+   * the wallet. Falls back to the synthetic id/name when the pool is empty.
+   * `keepSeatKey` retains a vacate placeholder id for restore keying.
+   */
+  _applyBotIdentity(p, { fallbackName = "بوت", keepSeatKey = null } = {}) {
+    try {
+      const existing = this.players
+        .filter((x) => x && x.isBot && x.userId)
+        .map((x) => String(x.userId));
+      const id = botPoolService.acquire(existing);
+      if (id) {
+        p.userId = keepSeatKey || id.userId;
+        p.botUserId = id.userId; // real bot User id for profile clicks
+        p.displayName = id.name || fallbackName;
+        p.avatar = id.avatar || p.avatar || null;
+        p.botPersonality = id.personality;
+        p.botSkill = id.skill;
+        p.botTuning = id.tuning;
+        p.botLang = id.language;
+        return;
+      }
+    } catch (_) { /* pool unavailable */ }
+    if (!p.displayName) p.displayName = fallbackName;
+  }
+
   convertHumanToBot(userId) {
     const p = this.players.find(
       (x) => !x.isBot && x.userId && String(x.userId) === String(userId)
@@ -151,12 +181,14 @@ class Tarneeb41Game extends BaseGameEngine {
     if (!p) return false;
     p.vacatedFromUserId = String(userId);
     p.isBot = true;
+    // Keep the vacate placeholder id so restoreHumanAtSeat can find the seat.
     p.userId = `bot_vacate_${Date.now()}_${p.seatIndex ?? 0}`;
     p.socketId = null;
     p.displayName = "بوت";
     p.reconnectDeadline = null;
     p.cosmetics = emptyCosmetics();
     p.vipLevel = null;
+    this._applyBotIdentity(p, { keepSeatKey: p.userId });
     return true;
   }
 
@@ -361,7 +393,7 @@ class Tarneeb41Game extends BaseGameEngine {
     for (let i = 0; i < this.players.length; i++) {
       const p = this.players[i];
       if (!p.isBot && !p.userId) {
-        this.players[i] = {
+        const bot = {
           userId: `bot_fill_${ts}_${p.seatIndex}`,
           socketId: null,
           seatIndex: p.seatIndex,
@@ -369,20 +401,24 @@ class Tarneeb41Game extends BaseGameEngine {
           displayName: "بوت",
           chips: 0,
         };
+        this._applyBotIdentity(bot);
+        this.players[i] = bot;
       }
     }
     // Also append bots for any seats not yet in this.players
     const needed = this.maxPlayers - this.players.length;
     for (let i = 0; i < needed; i++) {
       const seatIndex = this.players.length;
-      this.players.push({
+      const bot = {
         userId: `bot_fill_${ts}_${seatIndex}`,
         socketId: null,
         seatIndex,
         isBot: true,
         displayName: "بوت",
         chips: 0,
-      });
+      };
+      this._applyBotIdentity(bot);
+      this.players.push(bot);
     }
     const started = await this.startGame();
     if (started) {
@@ -472,6 +508,12 @@ class Tarneeb41Game extends BaseGameEngine {
     this.clearCountdown();
     this.clearTrickResolveTimer();
     timerManager.clearAll(this.roomId);
+    // Free any persistent bot identities this game was holding.
+    try {
+      for (const p of this.players || []) {
+        if (p && p.isBot) botPoolService.release(p.botUserId || p.userId);
+      }
+    } catch (_) { /* best-effort */ }
     this._countdownStartGate = null;
     this.onGameEvent = null;
     this.onAfterMove = null;
@@ -526,8 +568,15 @@ class Tarneeb41Game extends BaseGameEngine {
     }
   }
 
-  _pickAutoPlayCard(hand) {
-    return TarneebBot.pickAutoPlayCard(hand, this.ledSuit, rules);
+  /** Personality/skill opts for a bot seat (null for humans → default behavior). */
+  _botOpts(idx) {
+    const p = this.players[idx];
+    if (!p || !p.isBot || !p.botTuning) return null;
+    return { personality: p.botPersonality, skill: p.botSkill, tuning: p.botTuning };
+  }
+
+  _pickAutoPlayCard(hand, opts = null) {
+    return TarneebBot.pickAutoPlayCard(hand, this.ledSuit, rules, opts);
   }
 
   _handleTurnTimeout() {
@@ -536,7 +585,7 @@ class Tarneeb41Game extends BaseGameEngine {
     if (this.state === "bidding_syrian") {
       this.applyMove(idx, "tarneeb41_declare", { value: 0, fromTimeout: true });
     } else if (this.state === "playing") {
-      const card = this._pickAutoPlayCard(this.hands[idx]);
+      const card = this._pickAutoPlayCard(this.hands[idx], this._botOpts(idx));
       if (!card) return;
       this.applyMove(idx, "play_card", {
         fromTimeout: true,
@@ -549,7 +598,7 @@ class Tarneeb41Game extends BaseGameEngine {
   _botBid() {
     const idx = this.currentPlayerIndex;
     const hand = this.hands[idx];
-    return TarneebBot.botBid(hand, this.trump);
+    return TarneebBot.botBid(hand, this.trump, this._botOpts(idx));
   }
 
   checkBotTurn() {
@@ -578,7 +627,7 @@ class Tarneeb41Game extends BaseGameEngine {
       const v = this._botBid();
       this.applyMove(idx, "tarneeb41_declare", { value: v });
     } else if (this.state === "playing") {
-      const card = this._pickAutoPlayCard(this.hands[idx]);
+      const card = this._pickAutoPlayCard(this.hands[idx], this._botOpts(idx));
       if (!card) return;
       this.applyMove(idx, "play_card", {
         card: { suit: rules.toApiSuit(card.suit), rank: rules.toApiRank(card.rank) },
@@ -765,6 +814,24 @@ class Tarneeb41Game extends BaseGameEngine {
       this._fsm.transition(T41_STATE.GAME_END);
       this.clearBotTimer();
       this._finishedAt = Date.now();
+      // Believable bot profile drift (fire-and-forget; cosmetic, not settlement).
+      try {
+        botProfileService.recordSeats(
+          this.players.map((p) => ({
+            isBot: !!p.isBot,
+            botUserId: p.botUserId,
+            userId: p.userId,
+            won: (p.seatIndex % 2) === end.winnerTeam,
+          })),
+          { gameType: "tarneeb41" }
+        );
+      } catch (_) { /* cosmetic only */ }
+      // Occasional rate-limited bot chat (bridge forwards `bot_chat` to the room).
+      try {
+        const bots = this.players.filter((p) => p.isBot).map((p) => botChatService.botFromSeat(p));
+        const res = botChatService.maybeChat({ bots, tableId: this.roomId, event: "hand_end" });
+        if (res) setTimeout(() => this._emit("bot_chat", res.message), res.delayMs);
+      } catch (_) { /* best-effort */ }
     } else {
       this.state = "round_end";
       this._fsm.transition(T41_STATE.ROUND_END);

@@ -117,6 +117,39 @@ const userSchema = new mongoose.Schema(
       active:    { type: Boolean, default: false },
       expiresAt: { type: Date },
     },
+    /**
+     * Denormalized clan membership snapshot for cheap badge/profile lookups across
+     * the app. Source of truth is the ClanMember collection; this cache is written
+     * inside the same transaction on join/leave/role-change. Null when clanless.
+     */
+    clan: {
+      id:   { type: mongoose.Schema.ObjectId, ref: "Clan", default: null, index: true },
+      tag:  { type: String, default: null },
+      role: { type: String, default: null },
+    },
+    /**
+     * Persistent AI bot marker. A bot is a real User (same model — no fake-player
+     * model) whose SEATS always carry `isBot:true`, so the settlement money path
+     * still nulls their wallet (see gameSettlementService). This flag/subdoc only
+     * carry identity + behavior config; they never touch the wallet ledger.
+     */
+    isBot: { type: Boolean, default: false, index: true },
+    bot: {
+      seedKey:      { type: String, default: null, index: true, sparse: true },
+      personality:  { type: String, default: null },
+      skill:        { type: String, default: null },
+      biography:    { type: String, default: null },
+      avatarKey:    { type: String, default: null },
+      themeKey:     { type: String, default: null },
+      enabled:      { type: Boolean, default: true },
+      /** Runtime: currently seated at a table (prevents the same bot at two tables). */
+      inUse:        { type: Boolean, default: false },
+      lastSeatedAt: { type: Date, default: null },
+      /** Believable presence label: playing | online | recently_online | idle | searching. */
+      activity:     { type: String, default: "recently_online" },
+      /** Per-bot tuning overrides (falls back to config PERSONALITY/SKILL tables). */
+      tuning:       { type: mongoose.Schema.Types.Mixed, default: null },
+    },
   },
   { timestamps: true }
 );

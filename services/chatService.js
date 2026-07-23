@@ -4,9 +4,20 @@ const UserBlock = require("../models/userBlockModel");
 const auditService = require("./auditService");
 
 let socialIo = null;
+let clanIo = null;
 
 function setSocialIo(io) {
   socialIo = io;
+}
+
+/** The /clan namespace routes clan-channel messages (kept separate from /social). */
+function setClanIo(io) {
+  clanIo = io;
+}
+
+/** Which namespace broadcasts a given channel's messages. */
+function ioForChannel(channel) {
+  return channel === "clan" ? clanIo : socialIo;
 }
 
 function roomForChannel(channel, channelId) {
@@ -23,6 +34,11 @@ async function assertCanMessage(senderId, channel, channelId, recipientId = null
       ],
     });
     if (blocked) throw new ApiError("Messaging blocked", 403);
+  } else if (channel === "clan") {
+    // Only active members of the clan may post to its channel.
+    const ClanMember = require("../models/clanMemberModel");
+    const isMember = await ClanMember.exists({ clan: channelId, user: senderId });
+    if (!isMember) throw new ApiError("You are not a member of this clan", 403);
   }
 }
 
@@ -34,12 +50,15 @@ async function sendMessage({
   emoji = null,
   recipientId = null,
   meta = null,
+  system = false,
 }) {
   const text = String(body || "").trim();
   const em = emoji ? String(emoji).slice(0, 32) : null;
   if (!text && !em) throw new ApiError("Message body required", 400);
 
-  await assertCanMessage(senderId, channel, channelId, recipientId);
+  // System messages (join/leave/promotion/tournament) bypass membership/block
+  // gating — the actor may already have left the clan.
+  if (!system) await assertCanMessage(senderId, channel, channelId, recipientId);
 
   const msg = await ChatMessage.create({
     channel,
@@ -59,19 +78,34 @@ async function sendMessage({
     recipientId: recipientId ? String(recipientId) : null,
     body: text,
     emoji: em,
+    system: !!(meta && meta.system) || !!system,
+    meta: meta || null,
     createdAt: msg.createdAt,
   };
 
-  if (socialIo) {
+  const io = ioForChannel(channel);
+  if (io) {
     if (channel === "private" || channel === "friend") {
-      socialIo.to(`user:${String(senderId)}`).emit("chat:message", payload);
-      socialIo.to(`user:${String(recipientId)}`).emit("chat:message", payload);
+      io.to(`user:${String(senderId)}`).emit("chat:message", payload);
+      io.to(`user:${String(recipientId)}`).emit("chat:message", payload);
     } else {
-      socialIo.to(roomForChannel(channel, channelId)).emit("chat:message", payload);
+      io.to(roomForChannel(channel, channelId)).emit("chat:message", payload);
     }
   }
 
   return msg;
+}
+
+/** Persist + broadcast a clan system line (join/leave/promotion/tournament). */
+async function sendSystemMessage({ channel, channelId, actorId, body, meta = {} }) {
+  return sendMessage({
+    senderId: actorId,
+    channel,
+    channelId,
+    body,
+    meta: { ...meta, system: true },
+    system: true,
+  });
 }
 
 async function getHistory({ channel, channelId, before = null, limit = 50 }) {
@@ -100,8 +134,9 @@ async function reportMessage(reporterId, messageId, reason = "") {
 }
 
 function emitTyping({ channel, channelId, userId, typing }) {
-  if (!socialIo) return;
-  socialIo.to(roomForChannel(channel, channelId)).emit("chat:typing", {
+  const io = ioForChannel(channel);
+  if (!io) return;
+  io.to(roomForChannel(channel, channelId)).emit("chat:typing", {
     channel,
     channelId: String(channelId),
     userId: String(userId),
@@ -115,7 +150,9 @@ function joinChannelRoom(socket, channel, channelId) {
 
 module.exports = {
   setSocialIo,
+  setClanIo,
   sendMessage,
+  sendSystemMessage,
   getHistory,
   reportMessage,
   emitTyping,

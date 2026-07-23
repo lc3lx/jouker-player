@@ -16,6 +16,10 @@ const { sendAlert } = require("../utils/alert");
 const { trackEventServerFireAndForget } = require("../services/analyticsService");
 const { evaluateHandChipDumpSuspect } = require("../services/fraudService");
 const cosmeticsService = require("../services/cosmeticsService");
+const botPoolService = require("../services/botPoolService");
+const botBehaviorService = require("../services/botBehaviorService");
+const botProfileService = require("../services/botProfileService");
+const botChatService = require("../services/botChatService");
 const { attachRedisClient: attachCosmeticsEquippedCache } = require("../utils/cosmeticsEquippedCache");
 const vipService = require("../services/vipService");
 const { attachRedisClient: attachVipLevelCache } = require("../utils/vipLevelCache");
@@ -55,6 +59,7 @@ const { verifyHandChipConservation } = require("../utils/poker/chipConservation"
 const { auditOrFreeze, auditChipConservation } = require("../utils/poker/chipAuditor");
 const { createOwnershipManager } = require("../services/pokerTableOwnership");
 const { PokerTableCommandBus } = require("../services/pokerTableCommandBus");
+const socketPresenceService = require("../services/socketPresenceService");
 const { deriveMinimumBet } = require("../utils/poker/tableBettingConfig");
 const { buildHandAuditLog } = require("../services/handHistoryAuditService");
 
@@ -573,6 +578,7 @@ class PokerTable {
     this.lockHeartbeatTimer = setInterval(() => {
       void Promise.resolve(this.lockManager.renew(this.tableId)).catch(() => {});
     }, periodMs);
+    if (typeof this.lockHeartbeatTimer.unref === "function") this.lockHeartbeatTimer.unref();
   }
 
   stopLockHeartbeat() {
@@ -973,6 +979,12 @@ class PokerTable {
     this.reconnectTimers.clear();
     for (const t of this.vacateTimers.values()) clearTimeout(t);
     this.vacateTimers.clear();
+    // Free any persistent bot identities this table was holding.
+    try {
+      for (const s of this.seats || []) {
+        if (s && s.isBot && s.userId) botPoolService.release(s.userId);
+      }
+    } catch (_) { /* best-effort */ }
   }
 
   scheduleNextHand() {
@@ -1002,6 +1014,9 @@ class PokerTable {
     }
 
     promoteWaitingToSeated(this.seats);
+    for (const s of this.seats) {
+      if (s && s.isBot && s.chips <= 0 && s.userId) botPoolService.release(s.userId);
+    }
     this.seats = this.seats.filter((s) => s.chips > 0);
     if (this.seats.length > 0) {
       this.dealerIndex =
@@ -1320,8 +1335,17 @@ class PokerTable {
       for (const ms of table.seats) {
         const uid = String(ms.user?._id || ms.user);
         if (this.findSeatIndexByUser(uid) >= 0) continue;
-        const chair =
+        let chair =
           ms.seatPosition != null ? clampSeatPosition(ms.seatPosition, this.capacity) : null;
+        // The Mongo-side seat allocator and the live engine's bot-aware seat
+        // picker are independent — a bot may already occupy this chair in
+        // the live engine mid-hand. Reassign rather than double-occupy it.
+        if (
+          chair != null &&
+          this.seats.some((s) => toSafeInt(s.seatPosition, -1) === chair)
+        ) {
+          chair = nextFreeSeatPosition(this.seats, this.capacity) ?? null;
+        }
         const row = {
           userId: uid,
           name: ms.user?.name || "Player",
@@ -1493,7 +1517,8 @@ class PokerTable {
 
     const deadlineMs = vacateUntil
       ? new Date(vacateUntil).getTime()
-      : Date.now() + POKER_TIMINGS.VACATE_WINDOW_MS;
+      : Date.now() +
+        require("../services/tableLifecycleSettingsService").getSettings().pokerVacateWindowMs;
     const delayMs = Math.max(0, deadlineMs - Date.now());
 
     this.pendingVacates.set(uid, {
@@ -1712,9 +1737,11 @@ class PokerTable {
     if (idx < 0) return;
     const seat = this.seats[idx];
     if (seat.isBot) return;
+    const reconnectWindowMs = require("../services/tableLifecycleSettingsService").getSettings()
+      .pokerReconnectWindowMs;
     this.clearReconnectTimer(userId);
     seat.disconnectedAt = Date.now();
-    seat.reconnectDeadline = seat.disconnectedAt + POKER_TIMINGS.RECONNECT_WINDOW_MS;
+    seat.reconnectDeadline = seat.disconnectedAt + reconnectWindowMs;
     seat.playerState = PLAYER_STATE.DISCONNECTED;
     const uid = String(userId);
     const timer = setTimeout(async () => {
@@ -1726,20 +1753,35 @@ class PokerTable {
         if (i < 0) return;
         const s = this.seats[i];
         if (s.playerState !== PLAYER_STATE.DISCONNECTED) return;
-        s.playerState = PLAYER_STATE.SITTING_OUT;
-        if (s.inHand && this.running) {
-          s.folded = true;
-          await this.broadcastState();
-          if (this.currentIndex === i) {
-            await this.advance();
-          }
+        // Still gone after the reconnect window: hand the seat to the vacate
+        // pipeline (Mongo seat -> vacatingPlayers, 30s bot-takeover grace,
+        // fund forfeiture on expiry) instead of leaving them SITTING_OUT
+        // forever with their buy-in permanently locked. applyEngineVacate
+        // (invoked via vacatePokerSeat -> the bridge) folds/advances the
+        // in-progress hand itself, so no manual fold here.
+        if (mongoose.isValidObjectId(this.tableId)) {
+          const { vacatePokerSeat } = require("../services/pokerVacateService");
+          await vacatePokerSeat({
+            tableId: this.tableId,
+            userId: uid,
+            reason: "disconnect_timeout",
+          });
         } else {
-          await this.broadcastState();
+          s.playerState = PLAYER_STATE.SITTING_OUT;
+          if (s.inHand && this.running) {
+            s.folded = true;
+            await this.broadcastState();
+            if (this.currentIndex === i) {
+              await this.advance();
+            }
+          } else {
+            await this.broadcastState();
+          }
         }
       } finally {
         await this.releaseActionLock();
       }
-    }, POKER_TIMINGS.RECONNECT_WINDOW_MS);
+    }, reconnectWindowMs);
     this.reconnectTimers.set(uid, timer);
     void this.broadcastState();
   }
@@ -1762,12 +1804,13 @@ class PokerTable {
 
   createBotSeat() {
     this.botSerial += 1;
-    const userId = `bot:${this.tableId}:${Date.now()}:${this.botSerial}`;
     const chair =
       nextFreeSeatPosition(this.seats, this.capacity) ??
       POKER_OPPOSITE_DEALER_SEAT;
-    return {
-      userId,
+
+    // Base synthetic seat (the fallback identity, unchanged from before).
+    const seat = {
+      userId: `bot:${this.tableId}:${Date.now()}:${this.botSerial}`,
       name: `Bot ${this.botSerial}`,
       avatar: null,
       chips: this.botBuyIn,
@@ -1782,10 +1825,38 @@ class PokerTable {
       actedThisStreet: false,
       seatPosition: chair,
       cosmetics: { tableTheme: null, cardSkin: null },
+      botPersonality: null,
+      botSkill: null,
+      botTuning: null,
     };
+
+    // Overlay a persistent bot identity if the pool has one available. Identity
+    // ONLY — `isBot:true` stays, so settlement never touches the bot's wallet.
+    try {
+      const existing = this.seats
+        .filter((s) => s && s.isBot && s.userId)
+        .map((s) => String(s.userId));
+      const id = botPoolService.acquire(existing);
+      if (id) {
+        seat.userId = id.userId;
+        seat.name = id.name || seat.name;
+        seat.avatar = id.avatar || null;
+        seat.botPersonality = id.personality;
+        seat.botSkill = id.skill;
+        seat.botTuning = id.tuning;
+        seat.botLang = id.language;
+      }
+    } catch (_) {
+      /* pool unavailable → keep the synthetic identity */
+    }
+
+    return seat;
   }
 
   addBotsForMissingSeats() {
+    for (const s of this.seats) {
+      if (s && s.isBot && s.chips <= 0 && s.userId) botPoolService.release(s.userId);
+    }
     this.seats = this.seats.filter((s) => s.chips > 0);
     if (this.seats.length > 0) {
       this.dealerIndex = ((this.dealerIndex % this.seats.length) + this.seats.length) % this.seats.length;
@@ -2291,7 +2362,19 @@ class PokerTable {
 
     if (seat.isBot) {
       this.actionDeadline = null;
-      const thinkMs = 900 + secureRandomInt(1500);
+      // Human-like, personality-scaled delay (falls back to the original range
+      // when the seat carries no personality).
+      let thinkMs = 900 + secureRandomInt(1500);
+      try {
+        if (seat.botPersonality || seat.botTuning) {
+          thinkMs = botBehaviorService.thinkDelay({
+            personality: seat.botPersonality,
+            skill: seat.botSkill,
+            tuning: seat.botTuning,
+            actionType: "act",
+          });
+        }
+      } catch (_) { /* keep default */ }
       this.botThinkTimer = setTimeout(() => {
         this.playBotTurn(this.currentIndex);
       }, thinkMs);
@@ -2374,8 +2457,13 @@ class PokerTable {
     const canRaise = this.botRaiseSize(seatIndex) > 0;
     const roll = secureRandomInt(1_000_000_000) / 1_000_000_000;
 
+    // Personality/skill tuning of the EXISTING thresholds (same branches). When
+    // the seat has no personality the multipliers are all 1 → original behavior.
+    const tun = seat.botTuning || null;
+    const T = (base, kind) => botBehaviorService.pokerThreshold(base, tun, kind);
+
     if (need === 0) {
-      if (canRaise && stack > this.bigBlind * 2 && roll < 0.22) {
+      if (canRaise && stack > this.bigBlind * 2 && roll < T(0.22, "raise")) {
         const raise = this.botRaiseSize(seatIndex);
         if (raise > 0) {
           this.applyBetOrRaise(seatIndex, raise);
@@ -2388,7 +2476,7 @@ class PokerTable {
         this.recordSeatAction(seatIndex, "check", paid);
       }
     } else if (need >= stack) {
-      if (roll < 0.72) {
+      if (roll < T(0.72, "call")) {
         const beforeChips = this.seats[seatIndex].chips;
         this.applyCall(seatIndex);
         const paid = Math.max(0, beforeChips - this.seats[seatIndex].chips);
@@ -2398,13 +2486,13 @@ class PokerTable {
         this.recordSeatAction(seatIndex, "fold");
       }
     } else if (need <= this.bigBlind) {
-      if (canRaise && roll < 0.16) {
+      if (canRaise && roll < T(0.16, "raise")) {
         const raise = this.botRaiseSize(seatIndex);
         if (raise > 0) {
           this.applyBetOrRaise(seatIndex, raise);
           this.recordSeatAction(seatIndex, "raise", raise);
         }
-      } else if (roll < 0.82) {
+      } else if (roll < T(0.82, "call")) {
         const beforeChips = this.seats[seatIndex].chips;
         this.applyCall(seatIndex);
         const paid = Math.max(0, beforeChips - this.seats[seatIndex].chips);
@@ -2414,13 +2502,13 @@ class PokerTable {
         this.recordSeatAction(seatIndex, "fold");
       }
     } else {
-      if (canRaise && roll < 0.1) {
+      if (canRaise && roll < T(0.1, "raise")) {
         const raise = this.botRaiseSize(seatIndex);
         if (raise > 0) {
           this.applyBetOrRaise(seatIndex, raise);
           this.recordSeatAction(seatIndex, "raise", raise);
         }
-      } else if (roll < 0.63) {
+      } else if (roll < T(0.63, "call")) {
         const beforeChips = this.seats[seatIndex].chips;
         this.applyCall(seatIndex);
         const paid = Math.max(0, beforeChips - this.seats[seatIndex].chips);
@@ -3184,6 +3272,27 @@ class PokerTable {
         handId: this.currentHandId,
       },
     };
+
+    // Believable bot profile drift (fire-and-forget, read-only from the already
+    // finalized hand result — never touches settlement or the wallet ledger).
+    try {
+      botProfileService.recordSeats(
+        seatSummaries.map((s) => ({ isBot: s.isBot, userId: s.userId, won: s.net > 0 })),
+        { gameType: "poker" }
+      );
+    } catch (_) { /* cosmetic only */ }
+
+    // Occasional, rate-limited bot reaction chat/emoji through the human chat path.
+    try {
+      const bots = this.seats.filter((s) => s.isBot).map((s) => botChatService.botFromSeat(s));
+      const res = botChatService.maybeChat({ bots, tableId: this.tableId, event: "hand_end" });
+      if (res) {
+        const room = `tg:${this.tableId}`;
+        setTimeout(() => {
+          try { this.nsp.to(room).emit("table_chat", res.message); } catch (_) {}
+        }, res.delayMs);
+      }
+    } catch (_) { /* chat is best-effort */ }
 
     // Atomic financial + history settlement
     const auditLog = buildHandAuditLog(this.currentHandActions, this.seats, community);
@@ -4417,7 +4526,18 @@ function initTableGame(io, options = {}) {
           (v) => String(v.user) === uid && new Date(v.vacateUntil).getTime() > Date.now()
         );
         if (!isSeated && !isVacating) return;
+
+        // Socket-only reconnect (no fresh REST POST /join): restore the seat
+        // from the vacate grace window here too, mirroring the REST join
+        // "reconnect anchor" (tableService.joinTable) so a client that only
+        // reconnects its socket still gets its seat/chips back.
+        if (!isSeated && isVacating) {
+          const { tryRestoreVacatedSeat } = require("../services/pokerVacateService");
+          await tryRestoreVacatedSeat({ tableId, userId: socket.userId });
+        }
+
         socket.join(`tg:${tableId}`);
+        await socketPresenceService.registerSocket(tableId, socket.userId);
 
         // H-3: the owner applies the (re)connect + emits initial state. On a
         // follower, forward it; the owner emits state to this socket cluster-wide.
@@ -4694,6 +4814,11 @@ function initTableGame(io, options = {}) {
       for (const { game } of registry.map.values()) {
         const idx = game.findSeatIndexByUser(socket.userId);
         if (idx < 0) continue;
+        // Duplicate-tab guard: if this user still has another live socket
+        // joined to this table (another tab/device), this disconnect is not
+        // real abandonment — skip starting a reconnect/vacate timer.
+        const remaining = await socketPresenceService.releaseSocket(game.tableId, socket.userId);
+        if (remaining > 0) continue;
         if (game.isOwner) {
           game.onPlayerSocketDisconnected(socket.userId);
           void game.broadcastState();
@@ -4922,6 +5047,12 @@ async function getLiveTableGameForAdmin(tableId) {
   return activeRegistry.get(String(tableId));
 }
 
+/** Diagnostic: tableIds of every poker table this instance currently owns in memory. */
+function listActivePokerTableIds() {
+  if (!activeRegistry) return [];
+  return [...activeRegistry.map.keys()];
+}
+
 async function adminForceEndHandTable(tableId) {
   const game = await getLiveTableGameForAdmin(tableId);
   if (!game) return { ok: false, reason: "TABLE_NOT_IN_MEMORY" };
@@ -4962,6 +5093,7 @@ module.exports = {
   restoreLiveEngineSeat,
   buildAdminRealtimeTablePayload,
   getLiveTableGameForAdmin,
+  listActivePokerTableIds,
   adminForceEndHandTable,
   refreshCosmeticsForUserOnTables,
   refreshVipForUserOnTables,

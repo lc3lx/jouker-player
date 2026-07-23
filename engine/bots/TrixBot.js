@@ -5,11 +5,35 @@
  * part of the engine/bots/ consolidation alongside TarneebBot.js. The old
  * path now re-exports this module so nothing importing it breaks.
  */
+const botBehaviorService = require('../../services/botBehaviorService');
+
 class TrixBot {
-  static botChooseCard(gameState, playerIndex, validCards) {
+  /**
+   * @param opts optional { personality, skill, tuning } — when supplied, lower-skill
+   *   bots occasionally pick a random valid card (a believable mistake) and
+   *   aggressive personalities lead higher. With NO opts the behavior is IDENTICAL
+   *   to before (every existing call site is unaffected).
+   */
+  static botChooseCard(gameState, playerIndex, validCards, opts = null) {
     if (!validCards || validCards.length === 0) return null;
 
+    // Skill-based misplay: return a random legal card instead of the heuristic pick.
+    if (opts && opts.skill && botBehaviorService.shouldMisplay(opts.skill, opts.tuning)) {
+      return validCards[Math.floor(botBehaviorService.rand01() * validCards.length)];
+    }
+
     const gameType = gameState.currentGameType;
+
+    // Aggressive/veteran personalities lead with a higher card in trick games.
+    const leadAggro = opts && opts.tuning ? (opts.tuning.leadAggro || 0) : 0;
+    if (
+      gameType !== 'Trix' &&
+      gameState.tableCards.length === 0 &&
+      leadAggro > 0.4 &&
+      botBehaviorService.rand01() < leadAggro
+    ) {
+      return [...validCards].sort((a, b) => b.value - a.value)[0];
+    }
 
     if (gameType === 'Trix') {
       // In Trix, J opens each suit chain.

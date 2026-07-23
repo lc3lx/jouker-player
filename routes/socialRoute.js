@@ -4,6 +4,7 @@ const authService = require("../services/authService");
 const friendService = require("../services/friendService");
 const invitationService = require("../services/invitationService");
 const presenceService = require("../services/presenceService");
+const clanBadgeService = require("../services/clanBadgeService");
 
 const router = express.Router();
 router.use(authService.protect, authService.allowedTo("user"));
@@ -11,10 +12,17 @@ router.use(authService.protect, authService.allowedTo("user"));
 router.get("/friends", asyncHandler(async (req, res) => {
   const friends = await friendService.listFriends(req.user._id);
   const ids = friends.map((f) => f.userId);
-  const presence = await presenceService.getPresenceBatch(ids);
+  const [presence, clanBadges] = await Promise.all([
+    presenceService.getPresenceBatch(ids),
+    clanBadgeService.attachBadges(ids),
+  ]);
   res.json({
     results: friends.length,
-    data: friends.map((f) => ({ ...f, presence: presence[f.userId] || null })),
+    data: friends.map((f) => ({
+      ...f,
+      presence: presence[f.userId] || null,
+      clan: clanBadges[f.userId] || null,
+    })),
   });
 }));
 

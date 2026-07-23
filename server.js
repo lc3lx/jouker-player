@@ -216,6 +216,7 @@ const { Server } = require("socket.io");
 const { initRTC } = require("./sockets/rtc");
 const { initTableGame } = require("./sockets/tableGame");
 const { initSocial } = require("./sockets/social");
+const { initClan } = require("./sockets/clan");
 const { initSupport } = require("./sockets/support");
 const { initDeposit } = require("./sockets/deposit");
 const { initSicbo } = require("./sockets/sicbo");
@@ -223,8 +224,20 @@ const { initGameServer } = require("./socket");
 const { setupSocketIoRedis } = require("./utils/realtimeRedis");
 
 const httpServer = http.createServer(app);
+// Faster dead-connection detection than the socket.io defaults (25s/20s):
+// disconnect handlers (reconnect windows, vacate timers, GC eligibility)
+// only start their clock once socket.io notices the transport is gone, so
+// tightening this shrinks the worst-case "still shown connected" window on
+// a hard network failure. Admin-configurable via env, same pattern as the
+// rest of the table-lifecycle timing knobs.
+function envMs(key, fallback) {
+  const v = parseInt(process.env[key] || "", 10);
+  return Number.isFinite(v) && v >= 0 ? v : fallback;
+}
 const io = new Server(httpServer, {
   cors: corsConfig,
+  pingInterval: envMs("SOCKET_PING_INTERVAL_MS", 10000),
+  pingTimeout: envMs("SOCKET_PING_TIMEOUT_MS", 10000),
 });
 
 const { setMainIo } = require("./utils/lobbyRealtime");
@@ -249,8 +262,12 @@ async function startServer() {
     logger.info("socketio_redis_enabled");
     const pokerQueueRedis = require("./utils/redis/pokerQueueRedis");
     const pokerCollusionGuard = require("./services/pokerCollusionGuard");
+    const socketPresenceService = require("./services/socketPresenceService");
+    const systemHealthMonitorService = require("./services/systemHealthMonitorService");
     pokerQueueRedis.setRedisClient(realtimeRedis.commandClient);
     pokerCollusionGuard.setRedisClient(realtimeRedis.commandClient);
+    socketPresenceService.setRedisClient(realtimeRedis.commandClient);
+    systemHealthMonitorService.setRedisClient(realtimeRedis.commandClient);
     const islandJackpotCache = require("./utils/islandJackpotCache");
     islandJackpotCache.attachRedisClient(realtimeRedis.commandClient);
   }
@@ -261,6 +278,26 @@ async function startServer() {
     startTableGc,
   } = require("./services/tableGcService");
 
+  // Backfill/create the permanent 4-tables-per-tier scaffold before the boot
+  // sanitizer scans tables — on a fresh DB nothing else guarantees these
+  // exist (previously only a legacy GET /tables handler ever called this).
+  const { ensureFixedTierTables } = require("./services/tableService");
+  await ensureFixedTierTables();
+
+  // Admin-configurable reconnect/vacate timing overrides (falls back to the
+  // env-derived defaults baked into the schema when nothing was ever saved).
+  try {
+    await require("./services/tableLifecycleSettingsService").loadFromDb();
+  } catch (e) {
+    logger.warn("table_lifecycle_settings_load_failed", { reason: e?.message });
+  }
+
+  try {
+    await require("./services/systemMonitorSettingsService").loadFromDb();
+  } catch (e) {
+    logger.warn("system_monitor_settings_load_failed", { reason: e?.message });
+  }
+
   await runBootSanitizer({ redis: realtimeRedis?.commandClient || null });
 
   startPokerTableGc();
@@ -268,13 +305,44 @@ async function startServer() {
   initRTC(io);
   initTableGame(io, { redis: realtimeRedis?.commandClient || null });
   initSocial(io, { redis: realtimeRedis?.commandClient || null });
+  initClan(io);
   initSupport(io);
   initDeposit(io);
   initSicbo(io, { redis: realtimeRedis?.commandClient || null });
   initGameServer(io, { redis: realtimeRedis?.commandClient || null });
 
-  const { startEngine: startTournamentEngine } = require("./services/tournamentEngineService");
-  startTournamentEngine();
+  // The standalone legacy Tournament engine is intentionally NOT started —
+  // its public routes are disabled (routes/tournamentRoute.js) per a known
+  // money-safety bug (see docs/STANDALONE_TOURNAMENT_DISABLED.md); its 15s
+  // per-tournament tick loop (tournamentEngineService.js#scheduleTick) would
+  // only ever re-arm itself for pre-existing stuck documents and never
+  // repairs/refunds anything, so there's no reason to run it while disabled.
+  // The engine code itself is left intact for a future proper fix.
+
+  const { startEngine: startClanTournamentEngine } = require("./services/clanTournamentEngineService");
+  startClanTournamentEngine();
+
+  // Production monitoring + self-healing sweep — starts after every engine
+  // it inspects (table game, clan tournaments) is already up.
+  require("./services/systemHealthMonitorService").startEngine();
+
+  // Bots: warm the persistent-identity pool, sync admin config into the live
+  // behavior/chat caches, and start the believable-activity heartbeat.
+  try {
+    const BotSettings = require("./models/botSettingsModel");
+    const botPoolService = require("./services/botPoolService");
+    const botBehaviorService = require("./services/botBehaviorService");
+    const botChatService = require("./services/botChatService");
+    const botProfileService = require("./services/botProfileService");
+    const botSettings = await BotSettings.getDefaults();
+    botBehaviorService.applySettings(botSettings);
+    botChatService.applySettings(botSettings);
+    await botPoolService.refresh();
+    botProfileService.startActivityHeartbeat();
+    logger.info("bot_system_ready", { pool: botPoolService.count() });
+  } catch (e) {
+    logger.warn("bot_system_init_failed", { reason: e?.message });
+  }
 
   startTableGc(io, { redis: realtimeRedis?.commandClient || null });
 

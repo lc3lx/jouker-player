@@ -4,7 +4,7 @@ const chatMessageSchema = new mongoose.Schema(
   {
     channel: {
       type: String,
-      enum: ["global", "lobby", "table", "private", "friend"],
+      enum: ["global", "lobby", "table", "private", "friend", "clan"],
       required: true,
       index: true,
     },

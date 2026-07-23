@@ -43,7 +43,16 @@ async function createStaticTable({ gameType, tier, buyIn, tableNumber, capacity,
  * tableNumber must be supplied by the caller (computed in the retry loop).
  * Sets tableKind:"dynamic" and displayName:"Dynamic #N".
  */
-async function createDynamicTable({ gameType, tier, buyIn, capacity, tableNumber, session }) {
+async function createDynamicTable({
+  gameType,
+  tier,
+  buyIn,
+  capacity,
+  tableNumber,
+  smallBlind = 0,
+  bigBlind = 0,
+  session,
+}) {
   const createOpts = session ? { session } : {};
   const [doc] = await Table.create(
     [
@@ -53,13 +62,13 @@ async function createDynamicTable({ gameType, tier, buyIn, capacity, tableNumber
         tableNumber,
         tableKind: "dynamic",
         displayName: `Dynamic #${tableNumber}`,
-        smallBlind: 0,
-        bigBlind: 0,
+        smallBlind,
+        bigBlind,
         minBuyIn: buyIn,
         maxBuyIn: buyIn,
         capacity,
         isPrivate: false,
-        status: "open",
+        status: gameType === "poker" ? "waiting" : "open",
         seats: [],
       },
     ],
@@ -125,6 +134,43 @@ async function createVipTable({
 }
 
 /**
+ * Creates an ephemeral private table that hosts a single clan-tournament match.
+ * Tagged with `clanTournamentMatch` so the game-finish hook resolves the bracket
+ * (and skips cash settlement — tournament matches never move wallet coins).
+ */
+async function createTournamentTable({ gameType, matchId, capacity, session }) {
+  const maxDoc = await Table.findOne({ gameType, tier: "private" })
+    .sort({ tableNumber: -1 })
+    .select("tableNumber");
+  const tableNumber = (maxDoc?.tableNumber || 100000) + 1;
+  const cap = capacity || (gameType === "poker" ? 9 : 4);
+  const createOpts = session ? { session } : {};
+  const [doc] = await Table.create(
+    [
+      {
+        gameType,
+        tier: "private",
+        tableNumber,
+        tableKind: "tournament",
+        displayName: "Tournament Match",
+        smallBlind: 0,
+        bigBlind: 0,
+        minBuyIn: 0,
+        maxBuyIn: 0,
+        capacity: cap,
+        isPrivate: true,
+        status: gameType === "poker" ? "waiting" : "open",
+        clanTournamentMatch: matchId,
+        seats: [],
+      },
+    ],
+    createOpts
+  );
+  emitTablesUpdated({ gameType, reason: "table_created", tableId: String(doc._id), tier: "private" });
+  return doc;
+}
+
+/**
  * Destroy or archive a table based on its kind:
  * - dynamic / vip → DELETE from Mongo (ephemeral; never permanent)
  * - static / tournament → archive (status:"archived", seats cleared — preserves history)
@@ -151,5 +197,6 @@ module.exports = {
   createStaticTable,
   createDynamicTable,
   createVipTable,
+  createTournamentTable,
   destroyOrArchiveTable,
 };

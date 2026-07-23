@@ -91,7 +91,8 @@ function _cosmeticView(c) {
 
 /** Build the cacheable, viewer-independent snapshot for one target user. */
 async function _buildSnapshot(targetId) {
-  const [user, player, coin, presence, vipLevel, vipSub, cos, agent, gameStats] = await Promise.all([
+  const clanBadgeService = require("./clanBadgeService");
+  const [user, player, coin, presence, vipLevel, vipSub, cos, agent, gameStats, clan] = await Promise.all([
     User.findById(targetId)
       .select(
         "name country profileImg createdAt role active muted preferences.hideProfile " +
@@ -108,6 +109,7 @@ async function _buildSnapshot(targetId) {
     cosmeticsService.getProfileCosmetics(targetId),
     AgentProfile.findOne({ user: targetId, status: "approved" }).lean(),
     gameStatsService.getForUser(targetId),
+    clanBadgeService.getClanForUser(targetId),
   ]);
   if (!user) return null;
 
@@ -209,9 +211,9 @@ async function _buildSnapshot(targetId) {
       inventoryCount: cos.ownedCount || 0,
     },
     achievements,
-    // Reserved for the upcoming Clan system — always null until Clans ship, so
-    // the Flutter profile can render a clan section with zero further changes.
-    clan: null,
+    // Clan membership block (null when the player is clanless). Rendered by the
+    // Flutter profile; tapping it opens the Clan Profile.
+    clan: clan || null,
     stats: {
       general: {
         gamesPlayed,

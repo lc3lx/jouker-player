@@ -8,7 +8,8 @@ const { isTableSettlementBlocked } = require("./gameSettlementService");
 const { getTableGameDebugSnapshot } = require("../sockets/tableGame");
 const { assertNotTrustRestricted, trackJoinLeaveEvent } = require("./fraudService");
 const { trackEventServerFireAndForget } = require("./analyticsService");
-const { emitTablesUpdated } = require("../utils/lobbyRealtime");
+const { emitTablesUpdated, getMainIo } = require("../utils/lobbyRealtime");
+const { finalizeCardTableVacate } = require("./cardTableVacateService");
 const roomManager = require("../rooms/roomManager");
 const {
   buildPokerLobbyFields,
@@ -22,6 +23,7 @@ const {
 } = require("./pokerTableAllocationService");
 const {
   findUserSeatedTable,
+  findUserActiveTableAnywhere,
   findAvailableTable,
   findAvailableTarneeb41Table,
   findAvailableTrixTable,
@@ -295,6 +297,8 @@ async function markTrixTablePlaying(tableId) {
   );
 }
 
+exports.ensureFixedTierTables = ensureFixedTierTables;
+exports.FIXED_TIER_TABLES = FIXED_TIER_TABLES;
 exports.findAvailableTarneeb41Table = findAvailableTarneeb41Table;
 exports.findAvailableTrixTable = findAvailableTrixTable;
 exports.findAvailableTable = findAvailableTable;
@@ -483,6 +487,14 @@ exports.joinTable = asyncHandler(async (req, res, next) => {
     } else {
       return next(new ApiError("Table is closed", 400));
     }
+  }
+
+  // One table per player: reject if the user is active (seated, mid-vacate
+  // grace, or queued) anywhere else — any game type, any tier. Excludes the
+  // target table itself so the reconnect-anchor branches below still work.
+  const activeElsewhere = await findUserActiveTableAnywhere(req.user._id, id);
+  if (activeElsewhere) {
+    return next(new ApiError("You are already active at another table", 409));
   }
 
   // Reconnect anchor: tarneeb41 vacate grace (bot replaced, mongo vacatingPlayers).
@@ -993,6 +1005,39 @@ exports.leaveTable = asyncHandler(async (req, res, next) => {
         permanentLeave: true,
         rtcRoom: { roomId: table._id, type: "table" },
       },
+    });
+  }
+
+  // Mid-hand voluntary leave: route through the same vacate pipeline used
+  // for disconnect/leave_room (bot takes over in place, wallet lock
+  // forfeited) instead of directly splicing the Mongo seat here. A raw
+  // splice mid-hand desyncs Mongo (seat gone) from the live engine (which
+  // keeps dealing to a player it doesn't know left) — see cardTableVacateService.
+  const liveGame =
+    table.gameType === "tarneeb41"
+      ? roomManager.getTarneeb41GameForTable(String(id))
+      : roomManager.getTrixGameForTable(String(id));
+  const liveHuman = liveGame?.players?.find(
+    (p) => !p.isBot && p.userId && String(p.userId) === String(req.user._id)
+  );
+  const handInProgress =
+    liveHuman && liveGame.state && !["waiting", "countdown", "game_end"].includes(liveGame.state);
+
+  if (handInProgress) {
+    const io = getMainIo();
+    const nsp = io ? io.of("/game") : null;
+    await finalizeCardTableVacate({
+      gameType: table.gameType,
+      tableId: String(id),
+      userId: req.user._id,
+      nsp,
+    });
+    void trackJoinLeaveEvent(req.user._id, "leave_table");
+    emitTablesUpdated({ gameType: table.gameType, reason: "leave", tableId: String(id) });
+    return res.status(200).json({
+      status: "success",
+      message: "Left table — a bot took over your seat for this hand",
+      data: { midHandLeave: true, rtcRoom: { roomId: table._id, type: "table" } },
     });
   }
 

@@ -1,3 +1,13 @@
+/**
+ * @deprecated Legacy standalone Tournament model. Replaced by the
+ * ClanTournament / ClanTournamentMatch bracket system
+ * (models/clanTournamentModel.js, models/clanTournamentMatchModel.js,
+ * services/clanTournamentEngineService.js). All public routes for this
+ * system are disabled (routes/tournamentRoute.js) due to a money-safety bug
+ * — see docs/STANDALONE_TOURNAMENT_DISABLED.md. Kept, not deleted, only for
+ * database compatibility with any pre-existing documents and as a reference
+ * for a possible future migration. Do not create new callers of this model.
+ */
 const mongoose = require("mongoose");
 
 const participantSchema = new mongoose.Schema(

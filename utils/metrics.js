@@ -26,6 +26,29 @@ const metrics = {
     help: "Suspicious events count",
     labelNames: ["event"],
   }),
+  systemHealthScore: new client.Gauge({
+    name: "system_health_score",
+    help: "Overall system health score from the monitoring sweep (0-100)",
+  }),
+  subsystemHealthScore: new client.Gauge({
+    name: "subsystem_health_score",
+    help: "Per-subsystem health score from the monitoring sweep (0-100)",
+    labelNames: ["subsystem"],
+  }),
+  monitorFindingsTotal: new client.Counter({
+    name: "monitor_findings_total",
+    help: "Total anomalies found by the system health monitor",
+    labelNames: ["check", "severity"],
+  }),
+  monitorRepairsTotal: new client.Counter({
+    name: "monitor_repairs_total",
+    help: "Total self-healing repair attempts by the system health monitor",
+    labelNames: ["check", "result"],
+  }),
+  eventLoopLagMs: new client.Gauge({
+    name: "event_loop_lag_ms",
+    help: "Sampled Node.js event loop lag in milliseconds",
+  }),
 };
 
 async function renderMetrics() {

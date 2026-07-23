@@ -10,7 +10,7 @@ const notificationSchema = new mongoose.Schema(
     },
     category: {
       type: String,
-      enum: ["task", "bonus", "tournament", "friend", "wallet", "system", "other"],
+      enum: ["task", "bonus", "tournament", "friend", "wallet", "clan", "system", "other"],
       default: "other",
       index: true,
     },

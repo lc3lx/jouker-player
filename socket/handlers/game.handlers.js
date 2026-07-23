@@ -26,6 +26,7 @@ const logger = require("../../utils/logger");
 const tableChat = require("../../sockets/tableChat");
 const ActionPipeline = require("../../engine/ActionPipeline");
 const spectatorService = require("../../services/spectatorService");
+const socketPresenceService = require("../../services/socketPresenceService");
 const DiceEngine = require("../../games/dice/DiceEngine");
 const kingArthRoundState = require("../../games/dice/kingArthRoundState");
 const kingArthSeedRotation = require("../../games/dice/kingArthSeedRotation");
@@ -145,6 +146,11 @@ function wireTrixGame(nsp, tableId, game) {
       event === "turn_timer_expired"
     ) {
       emitToTrixHumans(nsp, tid, event, payload);
+    } else if (event === "bot_chat" && payload) {
+      // Forward a bot's chat/emoji to seated players + spectators (same event
+      // humans use — no special client logic).
+      nsp.to(`trix:${tid}`).emit("table_chat", payload);
+      nsp.to(`spec:${tid}`).emit("table_chat", payload);
     }
   });
 }
@@ -223,6 +229,10 @@ function wireTarneeb41Game(nsp, tableId, game) {
       event === "game_start_countdown_cancelled"
     ) {
       emitToTarneeb41Humans(nsp, tid, event, payload);
+    } else if (event === "bot_chat" && payload) {
+      // Forward a bot's chat/emoji to seated players + spectators.
+      nsp.to(`tarneeb41:${tid}`).emit("table_chat", payload);
+      nsp.to(`spec:${tid}`).emit("table_chat", payload);
     }
   });
   game.setAfterMoveListener((result) => {
@@ -517,6 +527,7 @@ function registerGameHandlers(nsp, jwtVerify) {
         onCardTableRejoin({ gameType: "trix", tableId: table._id, userId });
         roomManager.setTrixUserSocket(String(userId), socket.id);
         roomManager.setUserTrixTable(String(userId), String(table._id));
+        await socketPresenceService.registerSocket(table._id, userId);
         const game = getOrCreateTrixGameWired(nsp, table._id);
 
         const liveHuman = game.players.find(
@@ -632,6 +643,7 @@ function registerGameHandlers(nsp, jwtVerify) {
         onCardTableRejoin({ gameType: "tarneeb41", tableId: table._id, userId });
         roomManager.setTarneeb41UserSocket(String(userId), socket.id);
         roomManager.setUserTarneeb41Table(String(userId), String(table._id));
+        await socketPresenceService.registerSocket(table._id, userId);
         let game = getOrCreateTarneeb41GameWired(nsp, table._id);
         await game.syncLobbyFromTable(table, (uid) => roomManager.getTarneeb41UserSocket(String(uid)));
         await game.applyCosmeticsToPlayers();
@@ -665,6 +677,12 @@ function registerGameHandlers(nsp, jwtVerify) {
             socket.emit("invalid_move", { reason: "join_tarneeb41_failed" });
             return;
           }
+          // Discard the stale in-memory game and rebuild from Mongo — but
+          // destroy() it first (not a raw Map delete) so its TimerManager
+          // entries (bot/turn/trick timers) are cleared. The replacement
+          // reuses the same roomId; leftover timers from an undestroyed
+          // instance would keep firing under that shared namespace.
+          if (typeof game.destroy === "function") game.destroy();
           roomManager.tarneeb41GamesByTableId.delete(String(table._id));
           game = getOrCreateTarneeb41GameWired(nsp, table._id);
           await game.syncLobbyFromTable(table, (uid) => roomManager.getTarneeb41UserSocket(String(uid)));
@@ -1453,7 +1471,7 @@ function registerGameHandlers(nsp, jwtVerify) {
       }
     });
 
-    socket.on("disconnect", () => {
+    socket.on("disconnect", async () => {
       // Clean up any spectator subscriptions on disconnect.
       // spectatorService stores userId → socketId; we use the socket.rooms to find spec: rooms.
       for (const room of socket.rooms) {
@@ -1465,6 +1483,12 @@ function registerGameHandlers(nsp, jwtVerify) {
       void kingArthRoundState.clearLocksForUser(userId);
       const t41 = roomManager.getTarneeb41TableIdForUser(userId);
       if (t41) {
+        // Duplicate-tab guard: another live socket for this user may still be
+        // joined to this table (another tab/device) — its connection already
+        // owns the roomManager socketId mapping, so don't clear it or start a
+        // vacate timer against a user who is still actually connected.
+        const remaining = await socketPresenceService.releaseSocket(t41, userId);
+        if (remaining > 0) return;
         roomManager.deleteTarneeb41UserSocket(userId);
         const game = roomManager.getTarneeb41GameForTable(t41);
         if (game) {
@@ -1482,6 +1506,8 @@ function registerGameHandlers(nsp, jwtVerify) {
       }
       const trixId = roomManager.getTrixTableIdForUser(userId);
       if (trixId) {
+        const remaining = await socketPresenceService.releaseSocket(trixId, userId);
+        if (remaining > 0) return;
         roomManager.deleteTrixUserSocket(userId);
         const game = roomManager.getTrixGameForTable(trixId);
         if (game) {
