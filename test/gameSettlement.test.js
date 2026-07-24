@@ -82,7 +82,7 @@ test("all winners — 4-way tie splits pool", () => {
   assert.ok(payouts.every((p) => p === 950));
 });
 
-test("tarneeb41 — winning team splits pool", () => {
+test("tarneeb41 — each partner gets half of pool after rake", () => {
   const participants = mkParticipants(4, 1000);
   const plan = buildSettlementPlan({
     gameType: "tarneeb41",
@@ -90,11 +90,29 @@ test("tarneeb41 — winning team splits pool", () => {
     participants,
     rakePercent: 5,
   });
-  const recon = validateReconciliation(plan);
-  assert.equal(recon.balanced, true);
-  assert.equal(plan.participants[0].isWinner, true);
-  assert.equal(plan.participants[2].isWinner, true);
-  assert.equal(plan.participants[0].payout + plan.participants[2].payout, plan.totalPayout);
+  // Table value 4000 − 5% rake 200 = 3800 → 1900 each partner.
+  assert.equal(plan.totalBuyIn, 4000);
+  assert.equal(plan.totalRake, 200);
+  assert.equal(plan.participants[0].payout, 1900);
+  assert.equal(plan.participants[2].payout, 1900);
+  assert.equal(plan.participants[0].netDelta, 900);
+  assert.equal(plan.participants[2].netDelta, 900);
+  assert.equal(plan.participants[1].payout, 0);
+  assert.equal(plan.participants[3].payout, 0);
+});
+
+test("trix — sole winner takes full table value minus rake", () => {
+  const participants = mkParticipants(4, 1000);
+  const plan = buildSettlementPlan({
+    gameType: "trix",
+    gameResult: { scores: [200, 50, 40, 30] },
+    participants,
+    rakePercent: 5,
+  });
+  assert.equal(plan.totalBuyIn, 4000);
+  assert.equal(plan.totalRake, 200);
+  assert.equal(plan.participants[0].payout, 3800);
+  assert.equal(plan.participants[0].netDelta, 2800);
 });
 
 test("bot winner — humans lose and house collects", () => {

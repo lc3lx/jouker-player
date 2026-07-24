@@ -344,11 +344,28 @@ async function runGameSettlement(nsp, ctx, gameResult) {
       gamePlayers: ctx.game?.players,
     });
     if (outcome?.settlement) {
+      const s = outcome.settlement;
+      const participants = Array.isArray(s.participants)
+        ? s.participants.map((p) => ({
+            seatIndex: p.seatIndex,
+            userId: p.userId != null ? String(p.userId) : null,
+            buyIn: p.buyIn,
+            payout: p.payout,
+            virtualPayout: p.virtualPayout,
+            netDelta: p.netDelta,
+            isWinner: !!p.isWinner,
+            isBot: !!p.isBot,
+          }))
+        : [];
       const payload = {
-        settlementId: outcome.settlement.settlementId,
-        totalPayout: outcome.settlement.totalPayout,
-        totalRake: outcome.settlement.totalRake,
-        reconciliation: outcome.settlement.reconciliation,
+        settlementId: s.settlementId,
+        totalBuyIn: s.totalBuyIn,
+        totalPayout: s.totalPayout,
+        totalRake: s.totalRake,
+        payoutPool: Math.max(0, (s.totalBuyIn || 0) - (s.totalRake || 0)),
+        participants,
+        winners: Array.isArray(s.winners) ? s.winners : [],
+        reconciliation: s.reconciliation,
       };
       void archiveCardGameMatch({
         gameType: ctx.type,
