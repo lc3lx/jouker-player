@@ -12,6 +12,11 @@ const MAX_WIN_MULTIPLIER = 10000;
 const REFERENCE_BET = 1;
 const TARGET_RTP = 0.9649;
 
+/** Progressive jackpot: 1 in JACKPOT_ODDS on paid main spins only. */
+const JACKPOT_ODDS = 1000;
+/** Jackpot award = bet × JACKPOT_MULTIPLIER (then capped by MAX_WIN_MULTIPLIER). */
+const JACKPOT_MULTIPLIER = 1000;
+
 /** Gamble: max attempts per round (random 1–8 assigned at spin). */
 const GAMBLE_MAX_ATTEMPTS_CAP = 8;
 /** Gamble allowed only when win ≤ bet × 35. */
@@ -119,6 +124,8 @@ module.exports = {
   MAX_WIN_MULTIPLIER,
   REFERENCE_BET,
   TARGET_RTP,
+  JACKPOT_ODDS,
+  JACKPOT_MULTIPLIER,
   GAMBLE_MAX_ATTEMPTS_CAP,
   GAMBLE_MAX_WIN_MULTIPLIER,
   FREE_SPINS_PER_BONUS,

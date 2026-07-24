@@ -221,3 +221,48 @@ test("RTP probe — main game simulation (informational)", () => {
   const rtp = totalReturned / (rounds * bet);
   assert.ok(rtp > 0.3 && rtp < 1.5, `RTP sample ${rtp.toFixed(4)} out of sanity band`);
 });
+
+test("jackpot roll — miss does not award", () => {
+  const { JACKPOT_MULTIPLIER } = require("../games/goldenTree/constants");
+  const miss = goldenTreeService.rollJackpot(10000, {
+    isBonusSpin: false,
+    rng: () => 1, // never 0 → miss
+  });
+  assert.equal(miss.jackpotHit, false);
+  assert.equal(miss.jackpotAmount, 0);
+  assert.ok(miss.meters);
+  assert.equal(typeof miss.meters.spade, "number");
+  assert.equal(JACKPOT_MULTIPLIER, 1000);
+});
+
+test("jackpot roll — hit awards bet × 1000", () => {
+  const hit = goldenTreeService.rollJackpot(10000, {
+    isBonusSpin: false,
+    rng: () => 0, // force hit
+  });
+  assert.equal(hit.jackpotHit, true);
+  assert.equal(hit.jackpotAmount, 10_000_000);
+  assert.ok(hit.meters);
+});
+
+test("jackpot roll — disabled on bonus spins", () => {
+  const bonus = goldenTreeService.rollJackpot(10000, {
+    isBonusSpin: true,
+    rng: () => 0,
+  });
+  assert.equal(bonus.jackpotHit, false);
+  assert.equal(bonus.jackpotAmount, 0);
+});
+
+test("spin response includes jackpot fields", async () => {
+  wallet.clearStubForTests();
+  roundManager.clearAllForTests();
+  wallet.seedStubBalance("u-jp", 500000);
+
+  const result = await goldenTreeService.executeSpin("u-jp", 10000);
+  assert.equal(typeof result.jackpotHit, "boolean");
+  assert.equal(typeof result.jackpotAmount, "number");
+  assert.ok(result.jackpotMeters);
+  assert.equal(typeof result.jackpotMeters.club, "number");
+  assert.equal(typeof result.jackpotMeters.spade, "number");
+});

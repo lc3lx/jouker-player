@@ -6,12 +6,15 @@ const {
   BUY_BONUS_TYPE,
   BUY_BONUS_COST,
   BONUS_GUARANTEED_WILDS,
+  JACKPOT_ODDS,
+  JACKPOT_MULTIPLIER,
   roundMoney,
 } = require("./constants");
 const { generateSpin, secureRandomInt } = require("./spinEngine");
 const { calculateWins } = require("./winCalculator");
 const roundManager = require("./roundManager");
 const wallet = require("./goldenTreeWalletAdapter");
+const jackpotMeters = require("./jackpotMeters");
 
 function mapWalletError(err) {
   if (
@@ -62,6 +65,36 @@ function buildSpinResponse(round, balance, extra = {}) {
   };
 }
 
+/**
+ * Paid main-game only: 1 in JACKPOT_ODDS chance to award bet × JACKPOT_MULTIPLIER.
+ * Returns { jackpotHit, jackpotAmount, meters }.
+ * @param {object} [opts]
+ * @param {boolean} [opts.isBonusSpin]
+ * @param {(max: number) => number} [opts.rng] — injectable for tests
+ */
+function rollJackpot(betAmount, { isBonusSpin, rng = secureRandomInt } = {}) {
+  if (isBonusSpin) {
+    return {
+      jackpotHit: false,
+      jackpotAmount: 0,
+      meters: jackpotMeters.snapshot(),
+    };
+  }
+
+  const meters = jackpotMeters.contribute(betAmount);
+  const hit = rng(JACKPOT_ODDS) === 0;
+  if (!hit) {
+    return { jackpotHit: false, jackpotAmount: 0, meters };
+  }
+
+  const { award, meters: afterHit } = jackpotMeters.hitJackpot(betAmount);
+  return {
+    jackpotHit: true,
+    jackpotAmount: award,
+    meters: afterHit,
+  };
+}
+
 async function executeSpin(userId, betAmountInput) {
   const userKey = String(userId);
   const bonusSession = roundManager.getBonusSession(userKey);
@@ -95,7 +128,14 @@ async function executeSpin(userId, betAmountInput) {
   });
 
   const winResult = calculateWins(matrix, wildMultipliers, betAmount);
-  const { totalWin, capped, cap } = capWin(winResult.totalWin, betAmount);
+  const jackpot = rollJackpot(betAmount, { isBonusSpin });
+  const combinedWin = roundMoney(winResult.totalWin + jackpot.jackpotAmount);
+  const { totalWin, capped, cap } = capWin(combinedWin, betAmount);
+  // If the global cap trimmed the pot, keep jackpotAmount as what was credited
+  // toward totalWin (may be reduced when line wins already near the cap).
+  const creditedJackpot = jackpot.jackpotHit
+    ? Math.min(jackpot.jackpotAmount, totalWin)
+    : 0;
 
   let balanceAfter;
   try {
@@ -104,6 +144,9 @@ async function executeSpin(userId, betAmountInput) {
       winAmount: totalWin,
       meta: {
         type: isBonusSpin ? "bonus_spin" : "main_spin",
+        jackpotHit: jackpot.jackpotHit,
+        jackpotAmount: creditedJackpot,
+        jackpotMultiplier: JACKPOT_MULTIPLIER,
       },
     });
   } catch (err) {
@@ -144,6 +187,9 @@ async function executeSpin(userId, betAmountInput) {
     isFreeSpin: isBonusSpin,
     bonusSessionId: bonusSession?.sessionId || null,
     freeSpinsRemaining: remainingBonus?.freeSpinsRemaining ?? 0,
+    jackpotHit: jackpot.jackpotHit,
+    jackpotAmount: creditedJackpot,
+    jackpotMeters: jackpot.meters,
   });
 }
 
@@ -254,4 +300,5 @@ module.exports = {
   executeBuyBonus,
   validateBet,
   capWin,
+  rollJackpot,
 };
