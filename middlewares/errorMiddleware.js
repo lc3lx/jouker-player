@@ -6,12 +6,14 @@ const sendErrorForDev = (err, res) =>
     error: err,
     message: err.message,
     stack: err.stack,
+    ...(err.data !== undefined ? { data: err.data } : {}),
   });
 
 const sendErrorForProd = (err, res) =>
   res.status(err.statusCode).json({
     status: err.status,
     message: err.message,
+    ...(err.data !== undefined ? { data: err.data } : {}),
   });
 
 const handleJwtInvalidSignature = () =>

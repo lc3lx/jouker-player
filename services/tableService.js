@@ -494,7 +494,9 @@ exports.joinTable = asyncHandler(async (req, res, next) => {
   // target table itself so the reconnect-anchor branches below still work.
   const activeElsewhere = await findUserActiveTableAnywhere(req.user._id, id);
   if (activeElsewhere) {
-    return next(new ApiError("You are already active at another table", 409));
+    return next(new ApiError("You are already active at another table", 409, {
+      activeTable: activeElsewhere,
+    }));
   }
 
   // Reconnect anchor: tarneeb41 vacate grace (bot replaced, mongo vacatingPlayers).
