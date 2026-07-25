@@ -269,3 +269,44 @@ test("Step5: chip-auditor freeze stamps frozenReason (no settlement math touched
   assert.equal(game.frozen, true);
   assert.equal(game.frozenReason, "chip_conservation");
 });
+
+// ---------------------------------------------------------------------------
+// Step 6 — heartbeat resync resolves the seat from the authenticated user
+// ---------------------------------------------------------------------------
+
+test("Step6: heartbeat resync uses the userId-resolved seat (own hand only, no leak)", async () => {
+  const game = await mkTrix(); // seats 0,1 human (u0,u1); 2,3 bots
+  try {
+    // Mirror the server handler's seat resolution for the authenticated user.
+    const seatIdx = game.players.findIndex(
+      (p) => p && !p.isBot && p.userId && String(p.userId) === "u1"
+    );
+    assert.equal(seatIdx, 1, "seat resolved from userId, not a client-sent index");
+
+    const state = game.getGameState(seatIdx);
+    assert.ok(
+      Array.isArray(state.hands[1]) && state.hands[1].every((c) => c && c.rank),
+      "requesting seat sees its own cards"
+    );
+    assert.ok(
+      state.hands[0].every((c) => c === null),
+      "opponent hand is hidden in the resync snapshot"
+    );
+    assert.equal(typeof state.stateRevision, "number");
+  } finally {
+    cleanup(game);
+  }
+});
+
+// ---------------------------------------------------------------------------
+// Step 7 — structured lifecycle audit log
+// ---------------------------------------------------------------------------
+
+test("Step7: lifecycleAudit emits a structured event and never throws", () => {
+  const { lifecycleAudit } = require("../utils/lifecycleAudit");
+  assert.equal(typeof lifecycleAudit, "function");
+  assert.doesNotThrow(() =>
+    lifecycleAudit("JOIN", { gameType: "trix", tableId: "t", userId: "u" })
+  );
+  assert.doesNotThrow(() => lifecycleAudit("FROZEN")); // tolerates no fields
+});

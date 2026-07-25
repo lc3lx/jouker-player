@@ -2,6 +2,7 @@ const { toSafeInt } = require("../pokerTableStatus");
 const { sendAlert } = require("../alert");
 const logger = require("../logger");
 const { metrics } = require("../metrics");
+const { lifecycleAudit } = require("../lifecycleAudit");
 
 /**
  * Strict chip conservation (immediate-pot model):
@@ -73,6 +74,12 @@ async function auditOrFreeze(game, context) {
   logger.error("poker_chip_conservation_violation", payload);
   metrics.errorsTotal.inc({ type: "chip_conservation_violation" });
   void sendAlert("poker_table_frozen", payload);
+  lifecycleAudit("FROZEN", {
+    gameType: "poker",
+    tableId: game.tableId,
+    handId: game.currentHandId,
+    frozenReason: "chip_conservation",
+  });
 
   try {
     await game.broadcastState?.();

@@ -5,6 +5,7 @@
 const Table = require("../models/tableModel");
 const roomManager = require("../rooms/roomManager");
 const logger = require("../utils/logger");
+const { lifecycleAudit } = require("../utils/lifecycleAudit");
 const { emitTablesUpdated } = require("../utils/lobbyRealtime");
 const { abandonTrixTableIfNoHumans } = require("./trixRecoveryService");
 
@@ -293,6 +294,11 @@ async function finalizeCardTableVacate({ gameType, tableId, userId, nsp }) {
   }
 
   logger.info("card_table_vacate_bot_replaced", {
+    gameType,
+    tableId: String(tableId),
+    userId: String(userId),
+  });
+  lifecycleAudit("BOT_TAKEOVER", {
     gameType,
     tableId: String(tableId),
     userId: String(userId),

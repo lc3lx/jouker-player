@@ -57,6 +57,7 @@ const {
 } = require("../utils/poker/playerState");
 const { verifyHandChipConservation } = require("../utils/poker/chipConservation");
 const { auditOrFreeze, auditChipConservation } = require("../utils/poker/chipAuditor");
+const { lifecycleAudit } = require("../utils/lifecycleAudit");
 const { createOwnershipManager } = require("../services/pokerTableOwnership");
 const { PokerTableCommandBus } = require("../services/pokerTableCommandBus");
 const socketPresenceService = require("../services/socketPresenceService");
@@ -3566,6 +3567,12 @@ class PokerTable {
       this.frozenReason = "settlement";
       this.running = false;
       this.tableStatusOverride = "frozen";
+      lifecycleAudit("FROZEN", {
+        gameType: "poker",
+        tableId: this.tableId,
+        handId: this.currentHandId,
+        frozenReason: "settlement",
+      });
       this.clearActionScheduling();
       this.clearBotFillTimer();
       void sendAlert("poker_settlement_failed", {

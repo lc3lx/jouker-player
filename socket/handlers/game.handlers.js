@@ -24,6 +24,7 @@ const {
   onCardTableRejoin,
 } = require("../../services/cardTableVacateService");
 const logger = require("../../utils/logger");
+const { lifecycleAudit } = require("../../utils/lifecycleAudit");
 const tableChat = require("../../sockets/tableChat");
 const ActionPipeline = require("../../engine/ActionPipeline");
 const spectatorService = require("../../services/spectatorService");
@@ -528,6 +529,7 @@ function registerGameHandlers(nsp, jwtVerify) {
           socket.emit("invalid_move", { reason: "tableId required" });
           return;
         }
+        lifecycleAudit("JOIN", { gameType: "trix", tableId: String(tableId), userId });
         const table = await Table.findById(tableId).populate({
           path: "seats.user",
           select: "name country profileImg",
@@ -644,6 +646,7 @@ function registerGameHandlers(nsp, jwtVerify) {
           socket.emit("invalid_move", { reason: "tableId required" });
           return;
         }
+        lifecycleAudit("JOIN", { gameType: "tarneeb41", tableId: String(tableId), userId });
         const table = await Table.findById(tableId).populate({
           path: "seats.user",
           select: "name country profileImg",
@@ -1371,6 +1374,7 @@ function registerGameHandlers(nsp, jwtVerify) {
       };
       const t41 = roomManager.getTarneeb41TableIdForUser(userId);
       if (roomId && t41 && String(t41) === String(roomId)) {
+        lifecycleAudit("LEAVE", { gameType: "tarneeb41", tableId: String(t41), userId });
         roomManager.deleteTarneeb41UserSocket(userId);
         socket.leave(`tarneeb41:${roomId}`);
         matchMaker.dequeue("tarneeb41", userId);
@@ -1386,6 +1390,7 @@ function registerGameHandlers(nsp, jwtVerify) {
       }
       const trixId = roomManager.getTrixTableIdForUser(userId);
       if (trixId && (!roomId || String(trixId) === String(roomId))) {
+        lifecycleAudit("LEAVE", { gameType: "trix", tableId: String(trixId), userId });
         roomManager.deleteTrixUserSocket(userId);
         if (roomId) socket.leave(`trix:${roomId}`);
         matchMaker.dequeue("trix", userId);
@@ -1406,6 +1411,45 @@ function registerGameHandlers(nsp, jwtVerify) {
         matchMaker.dequeue("trix", userId);
       }
       respond({ ok: true });
+    });
+
+    // card_heartbeat — recovery-only. If the client's last stateRevision is
+    // behind the authoritative game, re-send THIS socket the current snapshot.
+    // The seat is resolved from the AUTHENTICATED user (never a client-sent
+    // seat) so a heartbeat can't leak another seat's hand. Never mutates state.
+    socket.on("card_heartbeat", (payload) => {
+      const { tableId, gameType, stateRevision } = payload || {};
+      if (!tableId || (gameType !== "trix" && gameType !== "tarneeb41")) return;
+      const game =
+        gameType === "tarneeb41"
+          ? roomManager.getTarneeb41GameForTable(tableId)
+          : roomManager.getTrixGameForTable(tableId);
+      if (!game || typeof game.getGameState !== "function") return;
+      const serverRev =
+        typeof game.stateRevision === "number" ? game.stateRevision : 0;
+      const clientRev =
+        typeof stateRevision === "number" ? stateRevision : -1;
+      if (clientRev >= serverRev) return; // in sync — nothing to do
+      const seatIdx = Array.isArray(game.players)
+        ? game.players.findIndex(
+            (p) =>
+              p && !p.isBot && p.userId && String(p.userId) === String(userId)
+          )
+        : -1;
+      try {
+        const state = game.getGameState(seatIdx >= 0 ? seatIdx : -1);
+        if (state) {
+          socket.emit("game_state", state);
+          lifecycleAudit("RECOVERY", {
+            gameType,
+            tableId: String(tableId),
+            userId,
+            revision: serverRev,
+          });
+        }
+      } catch (_) {
+        /* ignore heartbeat resync errors */
+      }
     });
 
     // ── Spectator handlers ──────────────────────────────────────────────────
@@ -1534,6 +1578,7 @@ function registerGameHandlers(nsp, jwtVerify) {
           if (p) p.socketId = null;
           broadcastTarneeb41TableState(nsp, t41);
         }
+        lifecycleAudit("DISCONNECT", { gameType: "tarneeb41", tableId: String(t41), userId });
         scheduleCardTableVacate({
           gameType: "tarneeb41",
           tableId: t41,
@@ -1553,6 +1598,7 @@ function registerGameHandlers(nsp, jwtVerify) {
           if (p) p.socketId = null;
           broadcastTrixTableState(nsp, trixId);
         }
+        lifecycleAudit("DISCONNECT", { gameType: "trix", tableId: String(trixId), userId });
         scheduleCardTableVacate({
           gameType: "trix",
           tableId: trixId,
