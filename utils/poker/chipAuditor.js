@@ -56,6 +56,7 @@ async function auditOrFreeze(game, context) {
   if (result.ok) return true;
 
   game.frozen = true;
+  game.frozenReason = "chip_conservation";
   game.running = false;
   game.tableStatusOverride = "frozen";
   game.clearActionScheduling?.();

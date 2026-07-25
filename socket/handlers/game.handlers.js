@@ -20,6 +20,7 @@ const { markTrixTablePlaying } = require("../../services/tableService");
 const { emitTablesUpdated } = require("../../utils/lobbyRealtime");
 const {
   scheduleCardTableVacate,
+  finalizeCardTableVacateNow,
   onCardTableRejoin,
 } = require("../../services/cardTableVacateService");
 const logger = require("../../utils/logger");
@@ -68,6 +69,9 @@ function broadcastGameState(nsp, roomId) {
   const room = roomManager.getRoom(roomId);
   if (!room?.gameInstance) return;
   const game = room.gameInstance;
+  // Bump once per authoritative broadcast; every seat's snapshot below carries
+  // the same revision, so clients drop stale/reordered packets.
+  if (typeof game.bumpStateRevision === "function") game.bumpStateRevision();
   game.players.forEach((p) => {
     const sock = nsp.sockets.get(p.socketId);
     if (sock) {
@@ -80,6 +84,7 @@ function broadcastGameState(nsp, roomId) {
 function broadcastTrixTableState(nsp, mongoTableId) {
   const game = roomManager.getTrixGameForTable(mongoTableId);
   if (!game?.gameState) return;
+  if (typeof game.bumpStateRevision === "function") game.bumpStateRevision();
   game.players.forEach((p) => {
     if (p.isBot || !p.socketId) return;
     const sock = nsp.sockets.get(p.socketId);
@@ -106,6 +111,7 @@ function emitToTrixHumans(nsp, mongoTableId, event, payload) {
 function broadcastTarneeb41TableState(nsp, mongoTableId) {
   const game = roomManager.getTarneeb41GameForTable(mongoTableId);
   if (!game) return;
+  if (typeof game.bumpStateRevision === "function") game.bumpStateRevision();
   game.players.forEach((p) => {
     if (p.isBot || !p.socketId) return;
     const sock = nsp.sockets.get(p.socketId);
@@ -1348,21 +1354,34 @@ function registerGameHandlers(nsp, jwtVerify) {
       broadcastTarneeb41TableState(nsp, t41);
     });
 
-    // leave_room — 30s grace before bot replacement
-    socket.on("leave_room", (payload) => {
+    // leave_room — INTENTIONAL leave: finalize immediately (no grace) so other
+    // players stop seeing a ghost this instant. Accidental disconnect keeps its
+    // reconnect grace (see the `disconnect` handler). Backward compatible: the
+    // `ack` callback is optional (old clients emit without one).
+    socket.on("leave_room", async (payload, ack) => {
       const { roomId } = payload || {};
+      const respond = (r) => {
+        if (typeof ack === "function") {
+          try {
+            ack(r);
+          } catch (_) {
+            /* client gone */
+          }
+        }
+      };
       const t41 = roomManager.getTarneeb41TableIdForUser(userId);
       if (roomId && t41 && String(t41) === String(roomId)) {
         roomManager.deleteTarneeb41UserSocket(userId);
         socket.leave(`tarneeb41:${roomId}`);
         matchMaker.dequeue("tarneeb41", userId);
-        scheduleCardTableVacate({
+        await finalizeCardTableVacateNow({
           gameType: "tarneeb41",
           tableId: t41,
           userId,
           nsp,
         });
-        broadcastTarneeb41TableState(nsp, t41);
+        const game = roomManager.getTarneeb41GameForTable(t41);
+        respond({ ok: true, tableId: String(t41), stateRevision: game?.stateRevision });
         return;
       }
       const trixId = roomManager.getTrixTableIdForUser(userId);
@@ -1370,13 +1389,14 @@ function registerGameHandlers(nsp, jwtVerify) {
         roomManager.deleteTrixUserSocket(userId);
         if (roomId) socket.leave(`trix:${roomId}`);
         matchMaker.dequeue("trix", userId);
-        scheduleCardTableVacate({
+        await finalizeCardTableVacateNow({
           gameType: "trix",
           tableId: trixId,
           userId,
           nsp,
         });
-        broadcastTrixTableState(nsp, trixId);
+        const game = roomManager.getTrixGameForTable(trixId);
+        respond({ ok: true, tableId: String(trixId), stateRevision: game?.stateRevision });
         return;
       }
       const r = roomManager.removeUserFromRoom(userId);
@@ -1385,6 +1405,7 @@ function registerGameHandlers(nsp, jwtVerify) {
         matchMaker.dequeue("tarneeb", userId);
         matchMaker.dequeue("trix", userId);
       }
+      respond({ ok: true });
     });
 
     // ── Spectator handlers ──────────────────────────────────────────────────

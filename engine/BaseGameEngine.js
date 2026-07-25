@@ -19,6 +19,42 @@ class BaseGameEngine {
     this.state = "waiting"; // waiting | dealing | bidding | playing | round_end | game_end
     this.players = []; // [{ userId, socketId, seatIndex }]
     this.maxPlayers = 4;
+    // Monotonic snapshot counter — bumped once per authoritative broadcast so
+    // clients can drop stale/reordered `game_state` packets (mirrors poker's
+    // `stateRevision`; the client-side RevisionGuard consumes it). Additive:
+    // old clients ignore it, new clients require it after the first one seen.
+    this._stateRevision = 0;
+  }
+
+  /** Current monotonic snapshot revision (read-only). */
+  get stateRevision() {
+    return this._stateRevision;
+  }
+
+  /** Bump once per authoritative broadcast. Returns the new revision. */
+  bumpStateRevision() {
+    this._stateRevision += 1;
+    return this._stateRevision;
+  }
+
+  /**
+   * Normalized lifecycle phase for the client SessionPhase mirror + heartbeat.
+   * Maps game-specific `this.state` strings onto the shared lifecycle vocabulary
+   * (waiting | playing | showdown). Games may override for finer mapping.
+   */
+  getLifecyclePhase() {
+    switch (this.state) {
+      case "waiting":
+      case "dealing":
+      case "countdown":
+        return "waiting";
+      case "round_end":
+      case "showdown":
+      case "game_end":
+        return "showdown";
+      default:
+        return "playing";
+    }
   }
 
   /** Override: required player count for this game */

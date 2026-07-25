@@ -30,6 +30,15 @@ function clearManagedOrNativeInterval(id) {
 
 const ACTIVE_STATES = new Set(["bidding_syrian", "playing", "round_end", "game_end", "countdown"]);
 
+// Safety-net auto-advance out of round_end. A connected human normally clicks
+// "Continue" (next_round), but an idle/AFK human used to stall the table forever
+// (checkBotTurn only auto-advanced when ZERO humans were connected). This is the
+// server-owned fallback so the round always progresses. Env-tunable.
+const ROUND_END_AUTO_ADVANCE_MS = (() => {
+  const n = parseInt(process.env.TARNEEB41_ROUND_END_AUTO_MS || "15000", 10);
+  return Number.isFinite(n) && n >= 2000 ? Math.min(n, 60000) : 15000;
+})();
+
 function parseTurnTimeoutSeconds() {
   const n = parseInt(process.env.TURN_TIMEOUT_SECONDS || "30", 10);
   if (!Number.isFinite(n) || n < 5) return 30;
@@ -69,6 +78,7 @@ class Tarneeb41Game extends BaseGameEngine {
     this.pendingTrickWinner = null;
     this.trickResolveTimer = null;
     this.trickResolveEndsAt = null;
+    this._roundEndTimerId = null;
     this._lastSettlementPayload = null;
     this._lastSettlementFailure = null;
     this._settlementTriggered = false;
@@ -543,6 +553,7 @@ class Tarneeb41Game extends BaseGameEngine {
       phase: this.turnTimerPhase,
       playerIndex: this.currentPlayerIndex,
       remainingSeconds: this._remainingTurnSeconds(),
+      stateRevision: this.stateRevision,
       ...extra,
     };
   }
@@ -751,6 +762,7 @@ class Tarneeb41Game extends BaseGameEngine {
     if (action === "next_round") {
       if (this.state === "game_end") return { success: false };
       if (this.state !== "round_end") return { success: false, reason: "not_round_end" };
+      this._clearRoundEndAutoAdvance();
       this.dealRound(true);
       return { success: true };
     }
@@ -835,6 +847,32 @@ class Tarneeb41Game extends BaseGameEngine {
     } else {
       this.state = "round_end";
       this._fsm.transition(T41_STATE.ROUND_END);
+      this._armRoundEndAutoAdvance();
+    }
+  }
+
+  /**
+   * Server-owned safety net: if the table sits in round_end past the timeout
+   * (no human clicked Continue), auto-advance. Never blocks a human who clicks
+   * sooner — next_round clears this. Idempotent (single pending timer).
+   */
+  _armRoundEndAutoAdvance() {
+    this._clearRoundEndAutoAdvance();
+    this._roundEndTimerId = timerManager.schedule(
+      this.roomId,
+      "round_end_auto",
+      ROUND_END_AUTO_ADVANCE_MS,
+      () => {
+        this._roundEndTimerId = null;
+        if (this.state === "round_end") this.advanceNextRound();
+      }
+    );
+  }
+
+  _clearRoundEndAutoAdvance() {
+    if (this._roundEndTimerId != null) {
+      timerManager.clear(this._roundEndTimerId);
+      this._roundEndTimerId = null;
     }
   }
 
@@ -910,6 +948,10 @@ class Tarneeb41Game extends BaseGameEngine {
     return {
       state: this.state,
       gameType: this.gameType,
+      // Additive lifecycle envelope (clients drop stale packets by revision).
+      stateRevision: this.stateRevision,
+      roundId: this.roundNumber,
+      sessionPhase: this.getLifecyclePhase(),
       hands,
       handSizes,
       trick: this.trick.map((t) => ({

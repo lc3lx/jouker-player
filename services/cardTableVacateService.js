@@ -317,6 +317,20 @@ async function finalizeCardTableVacate({ gameType, tableId, userId, nsp }) {
   await abandonCardTableIfNoHumans(nsp, gameType, tableId);
 }
 
+/**
+ * Intentional leave (no grace). Drops any pending vacate timer + reconnect
+ * deadline, then finalizes immediately so the seat is converted to a bot (or the
+ * table abandoned + refunded for the last human) and the OTHER players stop
+ * seeing a ghost this instant. Disconnect keeps using scheduleCardTableVacate.
+ * Idempotent: if the human is already gone, finalize no-ops / abandons.
+ */
+async function finalizeCardTableVacateNow({ gameType, tableId, userId, nsp }) {
+  if (gameType !== "tarneeb41" && gameType !== "trix") return;
+  // cancel* nulls reconnectDeadline, so finalize won't early-return on grace.
+  cancelCardTableVacate({ gameType, tableId, userId });
+  await finalizeCardTableVacate({ gameType, tableId, userId, nsp });
+}
+
 function onCardTableRejoin({ gameType, tableId, userId }) {
   const game = getGame(gameType, tableId);
   const player = findHumanPlayer(game, userId);
@@ -342,6 +356,7 @@ module.exports = {
   scheduleCardTableVacate,
   cancelCardTableVacate,
   finalizeCardTableVacate,
+  finalizeCardTableVacateNow,
   onCardTableRejoin,
   abandonCardTableIfNoHumans,
   isTrixVacateGraceReconnect,

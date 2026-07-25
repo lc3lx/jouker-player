@@ -422,6 +422,10 @@ class PokerTable {
     this.handJackpotFees = 0;
     this.uncollectedRake = 0;
     this.frozen = false;
+    // Observational only (additive on the wire): why the table froze —
+    // settlement | database | wallet | timeout | chip_conservation | internal_error.
+    // Never affects settlement/commit rules; drives admin visibility + recovery.
+    this.frozenReason = null;
     this.tableStatusOverride = null;
     this.pacingBusy = false;
 
@@ -1004,6 +1008,7 @@ class PokerTable {
       const probe = auditChipConservation(this, "unfreeze_probe");
       if (probe.ok) {
         this.frozen = false;
+        this.frozenReason = null;
         this.tableStatusOverride = null;
       }
     }
@@ -1253,6 +1258,7 @@ class PokerTable {
     this.running = false;
     this.starting = false;
     this.frozen = false;
+    this.frozenReason = null;
     this.tableStatusOverride = null;
     this.clearActionScheduling();
     this.clearBotFillTimer();
@@ -1965,6 +1971,7 @@ class PokerTable {
         totalSeatedCount: active,
         playersNeeded,
         tableStatus: "frozen",
+        frozenReason: this.frozenReason || "internal_error",
         canStart: false,
       };
     }
@@ -1987,6 +1994,7 @@ class PokerTable {
       const probe = auditChipConservation(this, "unfreeze_probe");
       if (probe.ok) {
         this.frozen = false;
+        this.frozenReason = null;
         this.tableStatusOverride = null;
         this.logSuspicious("unfreeze_false_positive", { context: "bootstrap" });
       }
@@ -3555,6 +3563,7 @@ class PokerTable {
       });
       metrics.errorsTotal.inc({ type: "financial_settlement_failed" });
       this.frozen = true;
+      this.frozenReason = "settlement";
       this.running = false;
       this.tableStatusOverride = "frozen";
       this.clearActionScheduling();
@@ -3614,6 +3623,7 @@ class PokerTable {
       serverTime: Date.now(),
       round: this.round,
       frozen: this.frozen === true,
+      frozenReason: this.frozen === true ? this.frozenReason || "internal_error" : null,
       ...lobby,
       community: this.community,
       pot: this.pot,
@@ -4917,6 +4927,7 @@ async function resetLivePokerTableWhenEmpty(tableId) {
       serverTime: Date.now(),
       round: "idle",
       frozen: false,
+      frozenReason: null,
       capacity: normalizeCapacity(table?.capacity),
       seatedCount: 0,
       playersNeeded: POKER_MIN_PLAYERS,

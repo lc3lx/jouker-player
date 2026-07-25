@@ -171,6 +171,7 @@ class TrixGame extends BaseGameEngine {
       phase: this.turnTimerPhase,
       playerIndex,
       remainingSeconds: this._remainingTurnSeconds(),
+      stateRevision: this.stateRevision,
       ...extra,
     };
   }
@@ -311,6 +312,22 @@ class TrixGame extends BaseGameEngine {
     if (!p.displayName) p.displayName = fallbackName;
   }
 
+  /**
+   * Keep the parallel gameState `Player` in sync with a lobby-row bot/human flip.
+   * getGameState reads `gp.isBot`/`gp.name` and the 900ms bot loop gates on
+   * `gameState.players[idx].isBot` — without this the vacated seat renders as the
+   * human AND the bot loop won't drive it (it limps on the 30s human timeout).
+   */
+  _syncGameStateSeat(seatIndex, isBot, name) {
+    const gp =
+      this.gameState && this.gameState.players
+        ? this.gameState.players[seatIndex]
+        : null;
+    if (!gp) return;
+    gp.isBot = isBot;
+    if (name != null) gp.name = name;
+  }
+
   convertHumanToBot(userId) {
     const p = this.players.find(
       (x) => !x.isBot && x.userId && String(x.userId) === String(userId)
@@ -325,6 +342,7 @@ class TrixGame extends BaseGameEngine {
     p.cosmetics = emptyCosmetics();
     p.vipLevel = null;
     this._applyBotIdentity(p, { keepSeatKey: p.userId });
+    this._syncGameStateSeat(p.seatIndex, true, p.displayName);
     return true;
   }
 
@@ -355,6 +373,7 @@ class TrixGame extends BaseGameEngine {
     if (opts.chips != null) p.chips = opts.chips;
     p.reconnectDeadline = null;
     delete p.vacatedFromUserId;
+    this._syncGameStateSeat(seatIndex, false, p.displayName);
 
     if (
       (this.state === "selecting_game" || this.state === "playing") &&
@@ -640,6 +659,10 @@ class TrixGame extends BaseGameEngine {
     return {
       state: this.state,
       sessionId: this.sessionId,
+      // Additive lifecycle envelope (clients drop stale packets by revision).
+      stateRevision: this.stateRevision,
+      roundId: this.gameState.roundNumber,
+      sessionPhase: this.getLifecyclePhase(),
       hands,
       tableCards: this.gameState.tableCards.map((entry) => ({
         playerIndex: entry.playerIndex,
