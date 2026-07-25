@@ -33,7 +33,7 @@ const { LOBBY_EXCLUDED_STATUSES } = require("./tableLifecycleService");
 const { getQueuePosition, getWaitingQueueSize } = require("./pokerWaitingQueueService");
 const waitingQueueService = require("./waitingQueueService");
 const { syncLivePokerTableAfterJoin } = require("../sockets/tableGame");
-const { vacatePokerSeat, tryRestoreVacatedSeat, permanentLeavePokerTable } = require("./pokerVacateService");
+const { vacatePokerSeat, tryRestoreVacatedSeat, permanentLeavePokerTable, scheduleDeferredPermanentLeave } = require("./pokerVacateService");
 const {
   tryClaimTarneeb41BotSeat,
   tryRestoreVacatedTarneeb41Seat,
@@ -635,8 +635,18 @@ exports.joinTable = asyncHandler(async (req, res, next) => {
       }
     }
   } else if (table.gameType === "trix") {
+    // A mid-hand ("playing") trix table normally reroutes the player to another
+    // table. But if it has a BOT seat a new human can take over (and a free
+    // Mongo slot to append into), keep THIS table so the append-join + the
+    // socket-side engine bot-replacement can seat them here.
+    const trixGame = roomManager.getTrixGameForTable(id);
+    const canClaimBot =
+      trixGame &&
+      typeof trixGame.listReplaceableBotSeats === "function" &&
+      trixGame.listReplaceableBotSeats().length > 0 &&
+      table.seats.length < table.capacity;
     const isFull = table.status === "playing" || table.seats.length >= table.capacity;
-    if (isFull) {
+    if (isFull && !canClaimBot) {
       if (table.tableKind === "static") {
         // Static card game table full → queue the player
         const player = await Player.getOrCreateByUser(req.user._id);
@@ -672,7 +682,19 @@ exports.joinTable = asyncHandler(async (req, res, next) => {
   if (table.gameType === "poker") {
     // full-table routing handled inside joinPokerWithRetry
   } else if (table.seats.length >= table.capacity) {
-    return next(new ApiError("Table is full", 400));
+    // A "full" table may still have a BOT seat a new human can take over —
+    // don't reject; the bot-seat claim below (tryClaim*BotSeat) handles it.
+    // Without this, the claim at the tarneeb41 branch was shadowed and every
+    // newcomer got "Table is full" → forced to spectate.
+    const claimGame =
+      table.gameType === "tarneeb41"
+        ? roomManager.getTarneeb41GameForTable(id)
+        : null;
+    const hasClaimableBotSeat =
+      claimGame && listReplaceableBotSeats(claimGame).length > 0;
+    if (!hasClaimableBotSeat) {
+      return next(new ApiError("Table is full", 400));
+    }
   }
 
   // Check private table password. VIP tables store a bcrypt hash; legacy
@@ -966,6 +988,25 @@ exports.leaveTable = asyncHandler(async (req, res, next) => {
   }
 
   if (await isTableSettlementBlocked(id)) {
+    if (table.gameType === "poker") {
+      // Never strand the player: let them leave to the lobby now and cash out
+      // (safely, to balance) once the brief settlement clears. We do NOT touch
+      // seat chips mid-settlement (chip race) — the deferred retry uses the
+      // existing safe cash-out path.
+      scheduleDeferredPermanentLeave({
+        tableId: id,
+        userId: req.user._id,
+        clientIp: String(req.headers["x-forwarded-for"] || req.socket?.remoteAddress || ""),
+        deviceId: String(req.body?.deviceId || req.headers["x-device-id"] || "") || null,
+      });
+      void trackJoinLeaveEvent(req.user._id, "leave_table");
+      emitTablesUpdated({ gameType: "poker", reason: "leave_deferred", tableId: String(id) });
+      return res.status(200).json({
+        status: "success",
+        message: "Leaving — your cash-out completes right after the current hand settles",
+        data: { permanentLeave: true, deferred: true, rtcRoom: { roomId: table._id, type: "table" } },
+      });
+    }
     return next(
       new ApiError("Settlement in progress — leaving is temporarily blocked", 409)
     );
@@ -988,9 +1029,21 @@ exports.leaveTable = asyncHandler(async (req, res, next) => {
         return next(new ApiError("You are not seated at this table", 400));
       }
       if (result.reason === "SETTLEMENT_IN_PROGRESS") {
-        return next(
-          new ApiError("Settlement in progress — leaving is temporarily blocked", 409)
-        );
+        // Settlement started between the gate above and here — defer + free the
+        // player to the lobby (deferred cash-out, no chip race / forfeiture).
+        scheduleDeferredPermanentLeave({
+          tableId: id,
+          userId: req.user._id,
+          clientIp,
+          deviceId: deviceId || null,
+        });
+        void trackJoinLeaveEvent(req.user._id, "leave_table");
+        emitTablesUpdated({ gameType: "poker", reason: "leave_deferred", tableId: String(id) });
+        return res.status(200).json({
+          status: "success",
+          message: "Leaving — your cash-out completes right after the current hand settles",
+          data: { permanentLeave: true, deferred: true, rtcRoom: { roomId: table._id, type: "table" } },
+        });
       }
       return next(new ApiError("Could not leave table", 400));
     }

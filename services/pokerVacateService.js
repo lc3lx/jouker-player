@@ -334,11 +334,57 @@ function toSafeInt(value, fallback = 0) {
   return Math.floor(n);
 }
 
+/**
+ * Deferred cash-out for a leave requested while the table was mid-settlement.
+ *
+ * The client has already navigated to the lobby (so the player is never stuck);
+ * here we retry the SAFE `permanentLeavePokerTable` — which cashes out to
+ * balance — until the settlement lock clears. We deliberately do NOT route
+ * through `vacatePokerSeat` during settlement: that reads `table.seats[].chips`
+ * while settlement is writing the pot and could capture the pre-pot amount
+ * (chip race / lost winnings). Instead we simply wait settlement out (seconds)
+ * and then cash out cleanly. If we give up, the existing disconnect/vacate
+ * timer still covers the seat.
+ */
+function scheduleDeferredPermanentLeave({ tableId, userId, clientIp = null, deviceId = null }) {
+  const tid = String(tableId);
+  const uid = String(userId);
+  const delayMs = 1000;
+  const maxAttempts = 25; // ~25s; settlement is brief so this resolves fast
+  let attempt = 0;
+  const arm = () => {
+    const t = setTimeout(() => void tick(), delayMs);
+    if (typeof t.unref === "function") t.unref();
+  };
+  const tick = async () => {
+    attempt += 1;
+    try {
+      const res = await permanentLeavePokerTable({ tableId: tid, userId: uid, clientIp, deviceId });
+      if (res.left) {
+        logger.info("poker_deferred_leave_completed", {
+          tableId: tid, userId: uid, attempt, cashedOut: res.cashedOut,
+        });
+        return;
+      }
+      if (res.reason === "NOT_SEATED") return; // already gone (vacate timer / prior leave)
+      // SETTLEMENT_IN_PROGRESS → keep waiting.
+    } catch (e) {
+      logger.warn("poker_deferred_leave_error", {
+        tableId: tid, userId: uid, attempt, reason: e?.message,
+      });
+    }
+    if (attempt < maxAttempts) arm();
+    else logger.warn("poker_deferred_leave_gave_up", { tableId: tid, userId: uid });
+  };
+  arm();
+}
+
 module.exports = {
   vacatePokerSeat,
   tryRestoreVacatedSeat,
   finalizeVacateWithBot,
   permanentLeavePokerTable,
+  scheduleDeferredPermanentLeave,
   findUserVacatingTable,
   findActiveVacatingEntry,
   isVacateActive,

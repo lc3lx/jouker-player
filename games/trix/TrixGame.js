@@ -391,6 +391,20 @@ class TrixGame extends BaseGameEngine {
     return true;
   }
 
+  /**
+   * Bot seats a new human may take over (the engine is the source of truth for
+   * seat positions). Mirrors tarneeb41BotSeatService.listReplaceableBotSeats.
+   */
+  listReplaceableBotSeats() {
+    if (!Array.isArray(this.players)) return [];
+    return this.players
+      .filter((p) => p && p.isBot && typeof p.seatIndex === "number")
+      .map((p) => ({
+        seatIndex: p.seatIndex,
+        vacatedFromUserId: p.vacatedFromUserId ? String(p.vacatedFromUserId) : null,
+      }));
+  }
+
   async syncLobbyFromTable(tableDoc, resolveSocket) {
     if (this.gameState && ACTIVE_STATES.has(this.state)) {
       for (const p of this.players) {

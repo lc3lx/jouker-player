@@ -310,3 +310,53 @@ test("Step7: lifecycleAudit emits a structured event and never throws", () => {
   );
   assert.doesNotThrow(() => lifecycleAudit("FROZEN")); // tolerates no fields
 });
+
+// ---------------------------------------------------------------------------
+// Seat-claim repair — Trix bot-seat takeover (engine-level, DB-independent)
+// ---------------------------------------------------------------------------
+
+test("SeatClaim: Trix listReplaceableBotSeats reports vacated bot seats", async () => {
+  const game = await mkTrix(); // seats 0,1 human (u0,u1); 2,3 bots
+  try {
+    game.convertHumanToBot("u0"); // seat 0 → vacate bot
+    const botSeats = game.listReplaceableBotSeats();
+    const seat0 = botSeats.find((b) => b.seatIndex === 0);
+    assert.ok(seat0, "seat 0 is now a claimable bot seat");
+    assert.equal(seat0.vacatedFromUserId, "u0");
+    // seats 2,3 are native bots (no vacatedFromUserId)
+    assert.ok(botSeats.some((b) => b.seatIndex === 2));
+  } finally {
+    cleanup(game);
+  }
+});
+
+test("SeatClaim: a NEW human can take over a Trix bot seat (allowTakeover), guard holds without it", async () => {
+  const game = await mkTrix();
+  try {
+    game.convertHumanToBot("u0"); // seat 0 bot, vacatedFromUserId=u0
+    game.convertHumanToBot("u1"); // seat 1 bot, vacatedFromUserId=u1
+
+    // A DIFFERENT user takes seat 0 with allowTakeover → succeeds.
+    const ok = await game.replaceBotWithHuman(0, "newUser", "sock-new", "New", {
+      allowTakeover: true,
+      chips: 500,
+    });
+    assert.equal(ok, true, "takeover succeeds with allowTakeover");
+    assert.equal(game.players[0].isBot, false, "lobby row is human");
+    assert.equal(String(game.players[0].userId), "newUser");
+    assert.equal(
+      game.gameState.players[0].isBot,
+      false,
+      "gameState roster synced (no ghost, bot loop won't drive it)"
+    );
+
+    // Without allowTakeover, a non-vacater is rejected (protects a reconnecting
+    // original vacater's seat).
+    const rejected = await game.replaceBotWithHuman(1, "someoneElse", "s", "X", {
+      allowTakeover: false,
+    });
+    assert.equal(rejected, false, "allowTakeover:false rejects a non-vacater");
+  } finally {
+    cleanup(game);
+  }
+});
