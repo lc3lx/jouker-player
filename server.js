@@ -5,7 +5,7 @@ const dotenv = require("dotenv");
 const morgan = require("morgan");
 const cors = require("cors");
 const compression = require("compression");
-const rateLimit = require("express-rate-limit");
+// const rateLimit = require("express-rate-limit");
 const hpp = require("hpp");
 const helmet = require("helmet");
 const xss = require("xss-clean");
@@ -51,7 +51,12 @@ const corsConfig = buildCorsConfig();
 const app = express();
 
 // Enable other domains to access your application
-app.use(helmet());
+// cross-origin CORP so Flutter/web clients can load /uploads images.
+app.use(
+  helmet({
+    crossOriginResourcePolicy: { policy: "cross-origin" },
+  }),
+);
 app.use(cors(corsConfig));
 app.options("*", cors(corsConfig));
 
@@ -76,11 +81,25 @@ const ALLOWED_UPLOAD_EXTS = new Set([
   ".mp3", ".ogg", ".wav", ".aac",
   ".pdf", ".svg",
 ]);
-app.use("/uploads", (req, res, next) => {
+const uploadExtGuard = (req, res, next) => {
   const ext = path.extname(req.path).toLowerCase();
   if (!ALLOWED_UPLOAD_EXTS.has(ext)) return res.status(404).end();
   next();
-}, express.static(path.join(__dirname, "uploads"), { dotfiles: "deny", index: false }));
+};
+app.use(
+  "/uploads",
+  uploadExtGuard,
+  express.static(path.join(__dirname, "uploads"), { dotfiles: "deny", index: false }),
+);
+// Legacy avatar path used by older clients: /users/<file> → uploads/users/<file>
+app.use(
+  "/users",
+  uploadExtGuard,
+  express.static(path.join(__dirname, "uploads", "users"), {
+    dotfiles: "deny",
+    index: false,
+  }),
+);
 app.use("/games", express.static(path.join(__dirname, "games")));
 // Cosmetic skins + VIP table/card art (backend/assets/skin, backend/assets/vip)
 app.use(
@@ -104,16 +123,14 @@ if (process.env.NODE_ENV === "development") {
   console.log(`mode: ${process.env.NODE_ENV}`);
 }
 
-// Limit each IP to 100 requests per `window` (here, per 15 minutes)
-const limiter = rateLimit({
-  windowMs: 15 * 60 * 1000, // 15 minutes
-  max: 100,
-  message:
-    "Too many accounts created from this IP, please try again after an hour",
-});
-
-// Apply the rate limiting middleware to all requests
-app.use("/api", limiter);
+// Rate limit disabled (was: 100 req / 15 min per IP on /api).
+// const limiter = rateLimit({
+//   windowMs: 15 * 60 * 1000,
+//   max: 100,
+//   message:
+//     "Too many accounts created from this IP, please try again after an hour",
+// });
+// app.use("/api", limiter);
 
 // Middleware to protect against HTTP Parameter Pollution attacks
 app.use(
