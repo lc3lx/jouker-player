@@ -335,6 +335,28 @@ async function finalizeCardTableVacateNow({ gameType, tableId, userId, nsp }) {
   // cancel* nulls reconnectDeadline, so finalize won't early-return on grace.
   cancelCardTableVacate({ gameType, tableId, userId });
   await finalizeCardTableVacate({ gameType, tableId, userId, nsp });
+  // Intentional leave has NO reconnect grace — purge any vacatingPlayers entry
+  // so a stale grace record can never lock the player "active elsewhere".
+  await purgeVacatingEntry(tableId, userId);
+}
+
+/**
+ * Remove a user's reconnect-grace entry from a table (money already forfeited
+ * on finalize, so this touches no wallet — it just clears the lock record).
+ */
+async function purgeVacatingEntry(tableId, userId) {
+  try {
+    await Table.updateOne(
+      { _id: tableId },
+      { $pull: { vacatingPlayers: { user: userId } } }
+    );
+  } catch (err) {
+    logger.warn("card_vacating_entry_purge_failed", {
+      tableId: String(tableId),
+      userId: String(userId),
+      reason: err?.message,
+    });
+  }
 }
 
 function onCardTableRejoin({ gameType, tableId, userId }) {

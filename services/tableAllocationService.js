@@ -44,7 +44,14 @@ async function findUserActiveTableAnywhere(userId, excludeTableId = null) {
     status: { $nin: LOBBY_EXCLUDED_STATUSES },
     $or: [
       { "seats.user": userId },
-      { "vacatingPlayers.user": userId },
+      // Only an ACTIVE (non-expired) reconnect-grace entry blocks the player.
+      // An expired/stale vacatingPlayers entry must never lock the one-table
+      // rule forever (that was the "you're at another table" ghost).
+      {
+        vacatingPlayers: {
+          $elemMatch: { user: userId, vacateUntil: { $gt: new Date() } },
+        },
+      },
       { "waitingQueue.user": userId },
     ],
   };
