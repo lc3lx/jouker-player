@@ -604,42 +604,6 @@ function registerGameHandlers(nsp, jwtVerify) {
           }
         }
         if (seatIndex < 0) {
-          // New claimer taking over a BOT seat (wallet already locked by the
-          // REST join). Place them into the live engine by replacing a bot at
-          // its fixed seat index — allowTakeover bypasses the "original vacater
-          // only" guard so a different player can take the seat.
-          const botSeats =
-            typeof game.listReplaceableBotSeats === "function"
-              ? game.listReplaceableBotSeats()
-              : [];
-          if (botSeats.length > 0) {
-            const own = botSeats.find((b) => b.vacatedFromUserId === userIdStr);
-            const target = own ? own.seatIndex : botSeats[0].seatIndex;
-            const mongoSeat = table.seats.find(
-              (s) => seatUserId(s) === userIdStr
-            );
-            let nm = `لاعب ${target + 1}`;
-            if (
-              mongoSeat?.user &&
-              typeof mongoSeat.user === "object" &&
-              mongoSeat.user.name
-            ) {
-              nm = String(mongoSeat.user.name);
-            }
-            const chips = mongoSeat ? Number(mongoSeat.chips) || 0 : 0;
-            if (
-              await game.replaceBotWithHuman(target, userId, socket.id, nm, {
-                allowTakeover: true,
-                chips,
-              })
-            ) {
-              seatIndex = target;
-              await game.applyCosmeticsToPlayers();
-              if (typeof game.checkBotTurn === "function") game.checkBotTurn();
-            }
-          }
-        }
-        if (seatIndex < 0) {
           await game.syncLobbyFromTable(table, (uid) => roomManager.getTrixUserSocket(String(uid)));
           await game.applyCosmeticsToPlayers();
           seatIndex = game.getPlayerIndex(userId);

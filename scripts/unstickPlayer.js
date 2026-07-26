@@ -34,6 +34,10 @@ function arg(name) {
   return p ? p.split("=").slice(1).join("=") : null;
 }
 const APPLY = process.argv.includes("--apply");
+// --force also releases seats on "playing" (mid-hand) tables. Use only for a
+// stuck ORPHAN (a Mongo seat where the player isn't actually in the live hand,
+// e.g. a failed bot-seat claim) — not while genuinely seated mid-hand.
+const FORCE = process.argv.includes("--force");
 
 (async () => {
   await dbConnection();
@@ -91,9 +95,12 @@ const APPLY = process.argv.includes("--apply");
 
   for (const t of tables) {
     const id = String(t._id);
-    if (t.status === "playing") {
-      console.log(`SKIP (mid-hand): ${t.gameType} #${t.tableNumber} id=${id} — leave from inside the app so the hand settles.`);
+    if (t.status === "playing" && !FORCE) {
+      console.log(`SKIP (mid-hand): ${t.gameType} #${t.tableNumber} id=${id} — leave from inside the app so the hand settles, or re-run with --force if this is a stuck orphan (not a live hand).`);
       continue;
+    }
+    if (t.status === "playing" && FORCE) {
+      console.log(`FORCE releasing mid-hand table ${t.gameType} #${t.tableNumber} id=${id} — only safe for a stuck orphan.`);
     }
     try {
       await withMongoTransaction(async (session) => {

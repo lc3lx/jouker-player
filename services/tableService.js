@@ -635,18 +635,8 @@ exports.joinTable = asyncHandler(async (req, res, next) => {
       }
     }
   } else if (table.gameType === "trix") {
-    // A mid-hand ("playing") trix table normally reroutes the player to another
-    // table. But if it has a BOT seat a new human can take over (and a free
-    // Mongo slot to append into), keep THIS table so the append-join + the
-    // socket-side engine bot-replacement can seat them here.
-    const trixGame = roomManager.getTrixGameForTable(id);
-    const canClaimBot =
-      trixGame &&
-      typeof trixGame.listReplaceableBotSeats === "function" &&
-      trixGame.listReplaceableBotSeats().length > 0 &&
-      table.seats.length < table.capacity;
     const isFull = table.status === "playing" || table.seats.length >= table.capacity;
-    if (isFull && !canClaimBot) {
+    if (isFull) {
       if (table.tableKind === "static") {
         // Static card game table full → queue the player
         const player = await Player.getOrCreateByUser(req.user._id);
