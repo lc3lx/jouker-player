@@ -11,6 +11,15 @@ const { getMainIo } = require("../../utils/lobbyRealtime");
 const { countSocketsInRoom, cardRoomName } = require("../tableGcService");
 const { listActivePokerTableIds, getLiveTableGameForAdmin } = require("../../sockets/tableGame");
 const roomManager = require("../../rooms/roomManager");
+const { PLAYER_STATE } = require("../../utils/poker/playerState");
+
+// Seat states that SHOULD have a live socket (a disconnected/sitting-out seat
+// legitimately has none — that's normal reconnect grace, not a zombie).
+const CONNECTED_STATES = new Set([
+  PLAYER_STATE.ACTIVE_HAND,
+  PLAYER_STATE.SEATED,
+  PLAYER_STATE.WAITING,
+]);
 
 function makeFinding({ check, severity, tableId = null, message, meta = {} }) {
   return {
@@ -94,9 +103,47 @@ async function checkOrphanRoomMembership() {
   return findings;
 }
 
-async function run() {
-  const findings = await checkOrphanRoomMembership();
-  return { findings };
+/**
+ * Inverse of orphan-room: a poker seat whose human occupant SHOULD be connected
+ * but has no socket in the room — the seat-without-socket zombie (e.g. the
+ * spectate→sit→disconnect path that used to skip the vacate pipeline). Detection
+ * only: the source is fixed in the join/disconnect handlers; residuals are
+ * surfaced here for the dashboard + admin `unstickPlayer`, not auto-repaired
+ * (targeting a specific seat needs cluster-safe per-user presence).
+ */
+async function checkSeatWithoutSocket() {
+  const findings = [];
+  const io = getMainIo();
+  if (!io) return findings;
+  const pokerNsp = io.of("/table-game");
+  for (const tableId of listActivePokerTableIds()) {
+    const game = await getLiveTableGameForAdmin(tableId);
+    if (!game) continue;
+    const expected = game.seats.filter(
+      (s) => !s.isBot && CONNECTED_STATES.has(s.playerState)
+    ).length;
+    const roomSize = countSocketsInRoom(pokerNsp, `tg:${tableId}`);
+    if (expected > 0 && roomSize < expected) {
+      findings.push(
+        makeFinding({
+          check: "seat_without_socket",
+          severity: "warning",
+          tableId,
+          message: `Poker table ${tableId}: ${expected} connected human seat(s) but only ${roomSize} socket(s) in room — possible zombie seat`,
+          meta: { expected, roomSize },
+        })
+      );
+    }
+  }
+  return findings;
 }
 
-module.exports = { run, checkOrphanRoomMembership };
+async function run() {
+  const [orphan, zombie] = await Promise.all([
+    checkOrphanRoomMembership(),
+    checkSeatWithoutSocket(),
+  ]);
+  return { findings: [...orphan, ...zombie] };
+}
+
+module.exports = { run, checkOrphanRoomMembership, checkSeatWithoutSocket };

@@ -1,19 +1,16 @@
 /**
  * Poseidon – The God of Atlantis — core game constants.
  *
- * Matrix: 6 reels (columns) × 5 rows. Scatter-pays: 8+ matching symbols
+ * Matrix: 6 reels (columns) × 5 rows. Scatter-pays: 7+ matching symbols
  * anywhere on screen pay, winners explode and symbols tumble in until no new
- * win forms. Multiplier plaques (x2 → x1000) stay on screen for the whole
- * tumbling sequence; when the sequence ends with a win, their sum multiplies
- * it — in the base game AND in free spins (per-spin, no accumulation).
- * Plaques are also the free-spins trigger: 3+ on screen award free spins.
+ * win forms (cascade continues while any type still has 7+). Multiplier
+ * plaques (x2 → x1000) stay on screen for the whole tumbling sequence; when
+ * the sequence ends with a win, their sum multiplies it — in the base game
+ * AND in free spins (per-spin, no accumulation). Plaques are also the
+ * free-spins trigger: 3+ on screen award free spins.
  *
- * Simulated math (400k spins, seeded): RTP 93.0% (base 84.3% + free spins
- * 8.7%), hit rate 31.8%, trigger ~1/152, buy bonus EV 28.5× vs 30× cost
- * (buy RTP 95.2%). Plaque value distribution matches the design spec:
- * x2 90.2%, x5 7.0%, x10 1.8%, … x1000 ~0.002%. Multipliers land on 32% of
- * spins; ~35% of those coincide with a win (rest are wasted, by design).
- * Re-tune with the seeded sim in test/poseidon.test.js if weights change.
+ * RTP was originally tuned for MIN_MATCH=8; lowering to 7 raises hit rate.
+ * Re-tune with the seeded sim in test/poseidon.test.js if needed.
  */
 
 const REEL_COUNT = 6;
@@ -50,15 +47,54 @@ const SYMBOLS = Object.freeze({
 
 /**
  * Multiplier plaques are encoded straight into the matrix as `x<value>`.
- * Value selection is a gate cascade with the designer's literal percentages:
- * roll x2 at 90% — on miss roll x5 at 70% — … — x1000 at 0.5%; if every gate
- * misses, fall back to x2. So x2 appears ~90% of the time, and each higher
- * value gets progressively rarer (plaque EV ≈ 2.9× bet-multiplier units).
+ * Values are weighted (not the old ultra-rare gate cascade) so x20–x1000
+ * actually show up — richer in free spins / buy-bonus. Soft-capping in the
+ * spin engine still makes stacking several big plaques uncommon.
  */
 const MULTIPLIER_VALUES = Object.freeze([2, 5, 10, 20, 50, 100, 200, 500, 1000]);
-const MULTIPLIER_GATES = Object.freeze([
-  0.9, 0.7, 0.6, 0.4, 0.35, 0.3, 0.2, 0.1, 0.005,
+
+/** Base-game plaque value weights (sum ≈ 100). */
+const BASE_MULTIPLIER_WEIGHTS = Object.freeze([
+  55, 18, 12, 6.5, 3.8, 2.4, 1.2, 0.7, 0.4,
 ]);
+
+/** Buy-bonus / free-spins — mid & high plaques land more often. */
+const BONUS_MULTIPLIER_WEIGHTS = Object.freeze([
+  36, 16, 14, 11, 8, 6, 4, 3, 2,
+]);
+
+/**
+ * When a mid/big plaque (x20+) is already on screen, further draws collapse
+ * toward small values so several huge multipliers rarely stack.
+ */
+const SUPPRESSED_MULTIPLIER_WEIGHTS = Object.freeze([
+  75, 16, 7, 1.4, 0.4, 0.15, 0.04, 0.01, 0.005,
+]);
+
+/** @deprecated kept for any external reads — prefer BASE/BONUS_MULTIPLIER_WEIGHTS */
+const MULTIPLIER_GATES = Object.freeze([
+  0.48, 0.35, 0.33, 0.32, 0.35, 0.4, 0.4, 0.35, 0.4,
+]);
+
+/** Plaques at/above this count as "big" for soft-cap stacking. */
+const BIG_MULTIPLIER_THRESHOLD = 20;
+
+/**
+ * Hard ceiling on how large a plaque *sum* can multiply the win.
+ * Plaques still display their full face value (x1000 can show), but the
+ * applied product is capped so RTP stays sane. Bonus allows a higher ceiling.
+ */
+const APPLIED_MULTIPLIER_CAP_BASE = 12;
+const APPLIED_MULTIPLIER_CAP_BONUS = 40;
+
+/** Face-value plaque sum, clamped for payout (display stays uncapped). */
+function appliedMultiplierFor(sum, isBonus = false) {
+  if (!(sum > 0)) return 1;
+  const cap = isBonus
+    ? APPLIED_MULTIPLIER_CAP_BONUS
+    : APPLIED_MULTIPLIER_CAP_BASE;
+  return Math.min(sum, cap);
+}
 
 const PAYING_SYMBOLS = Object.freeze([
   SYMBOLS.CROWN,
@@ -74,17 +110,17 @@ const PAYING_SYMBOLS = Object.freeze([
 
 /**
  * Anywhere-pays paytable in bet multiples.
- * Bands: 8–9 matches / 10–11 matches / 12+ matches.
+ * Bands: 7–9 matches / 10–11 matches / 12+ matches.
  * Ranking per design: crown > fish > pearl > starfish > coral > letters
  * (letters all pay the same).
  */
-const LETTER_PAYS = Object.freeze([0.6, 1.2, 5]);
+const LETTER_PAYS = Object.freeze([0.08, 0.16, 0.7]);
 const PAYTABLE = Object.freeze({
-  [SYMBOLS.CROWN]: [12, 30, 60],
-  [SYMBOLS.FISH]: [3, 12, 30],
-  [SYMBOLS.PEARL]: [2.5, 6, 18],
-  [SYMBOLS.STARFISH]: [2, 2.5, 15],
-  [SYMBOLS.CORAL]: [1.5, 2, 12],
+  [SYMBOLS.CROWN]: [1.4, 3.0, 6],
+  [SYMBOLS.FISH]: [0.35, 1.4, 3.0],
+  [SYMBOLS.PEARL]: [0.28, 0.7, 2.0],
+  [SYMBOLS.STARFISH]: [0.2, 0.3, 1.5],
+  [SYMBOLS.CORAL]: [0.15, 0.2, 1.2],
   [SYMBOLS.A]: LETTER_PAYS,
   [SYMBOLS.E]: LETTER_PAYS,
   [SYMBOLS.N]: LETTER_PAYS,
@@ -94,31 +130,32 @@ const PAYTABLE = Object.freeze({
 /**
  * Per-cell draw weights. Independent weighted draws per cell (not physical
  * strips) — RTP is enforced by simulation in test/poseidon.test.js.
+ * Letters are flattened so 7-of-a-kind stays exciting but not constant.
  */
 const BASE_WEIGHTS = Object.freeze([
-  [SYMBOLS.S, 15],
-  [SYMBOLS.N, 14],
-  [SYMBOLS.E, 13],
-  [SYMBOLS.A, 12],
-  [SYMBOLS.STARFISH, 9],
-  [SYMBOLS.CORAL, 8],
-  [SYMBOLS.FISH, 7],
-  [SYMBOLS.CROWN, 5.5],
-  [SYMBOLS.PEARL, 4],
+  [SYMBOLS.S, 9],
+  [SYMBOLS.N, 9],
+  [SYMBOLS.E, 9],
+  [SYMBOLS.A, 9],
+  [SYMBOLS.STARFISH, 9.5],
+  [SYMBOLS.CORAL, 9],
+  [SYMBOLS.FISH, 8],
+  [SYMBOLS.CROWN, 6],
+  [SYMBOLS.PEARL, 5],
   ["mult", 1.0],
 ]);
 
 /** Free spins: plaques rain noticeably more often. */
 const BONUS_WEIGHTS = Object.freeze([
-  [SYMBOLS.S, 15],
-  [SYMBOLS.N, 14],
-  [SYMBOLS.E, 13],
-  [SYMBOLS.A, 12],
-  [SYMBOLS.STARFISH, 9],
-  [SYMBOLS.CORAL, 8],
-  [SYMBOLS.FISH, 7],
-  [SYMBOLS.CROWN, 5.5],
-  [SYMBOLS.PEARL, 4],
+  [SYMBOLS.S, 9],
+  [SYMBOLS.N, 9],
+  [SYMBOLS.E, 9],
+  [SYMBOLS.A, 9],
+  [SYMBOLS.STARFISH, 9.5],
+  [SYMBOLS.CORAL, 9],
+  [SYMBOLS.FISH, 8],
+  [SYMBOLS.CROWN, 6],
+  [SYMBOLS.PEARL, 5],
   ["mult", 2.95],
 ]);
 
@@ -130,7 +167,7 @@ const WIN_TIERS = Object.freeze([
   ["super", 25],
 ]);
 
-const MIN_MATCH = 8;
+const MIN_MATCH = 7;
 
 function isMultiplier(cell) {
   return typeof cell === "string" && cell.charCodeAt(0) === 120 /* 'x' */;
@@ -176,6 +213,13 @@ module.exports = {
   SYMBOLS,
   MULTIPLIER_VALUES,
   MULTIPLIER_GATES,
+  BASE_MULTIPLIER_WEIGHTS,
+  BONUS_MULTIPLIER_WEIGHTS,
+  SUPPRESSED_MULTIPLIER_WEIGHTS,
+  BIG_MULTIPLIER_THRESHOLD,
+  APPLIED_MULTIPLIER_CAP_BASE,
+  APPLIED_MULTIPLIER_CAP_BONUS,
+  appliedMultiplierFor,
   PAYING_SYMBOLS,
   PAYTABLE,
   BASE_WEIGHTS,

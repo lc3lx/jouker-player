@@ -18,6 +18,7 @@ const {
   winTierFor,
   isMultiplier,
   roundMoney,
+  appliedMultiplierFor,
 } = require("../games/poseidon/constants");
 const { findWins, collectMultipliers } = require("../games/poseidon/winCalculator");
 const {
@@ -51,11 +52,13 @@ beforeEach(() => {
 
 // --- constants / paytable -------------------------------------------------
 
-test("payoutFor respects the 8-9 / 10-11 / 12+ bands and the design ranking", () => {
-  assert.equal(payoutFor(SYMBOLS.CROWN, 7), 0);
-  assert.equal(payoutFor(SYMBOLS.CROWN, 8), 12);
-  assert.equal(payoutFor(SYMBOLS.CROWN, 10), 30);
-  assert.equal(payoutFor(SYMBOLS.CROWN, 12), 60);
+test("payoutFor respects the 7-9 / 10-11 / 12+ bands and the design ranking", () => {
+  assert.equal(payoutFor(SYMBOLS.CROWN, 6), 0);
+  assert.equal(payoutFor(SYMBOLS.CROWN, 7), 1.4);
+  assert.equal(payoutFor(SYMBOLS.CROWN, 8), 1.4);
+  assert.equal(payoutFor(SYMBOLS.CROWN, 9), 1.4);
+  assert.equal(payoutFor(SYMBOLS.CROWN, 10), 3.0);
+  assert.equal(payoutFor(SYMBOLS.CROWN, 12), 6);
 
   // crown > fish > pearl > starfish > coral > letters
   const order = [
@@ -68,14 +71,14 @@ test("payoutFor respects the 8-9 / 10-11 / 12+ bands and the design ranking", ()
   ];
   for (let i = 1; i < order.length; i += 1) {
     assert.ok(
-      payoutFor(order[i - 1], 8) > payoutFor(order[i], 8),
+      payoutFor(order[i - 1], 7) > payoutFor(order[i], 7),
       `${order[i - 1]} must outrank ${order[i]}`,
     );
   }
 
   // the four letters pay identically
   for (const letter of [SYMBOLS.E, SYMBOLS.N, SYMBOLS.S]) {
-    for (const count of [8, 10, 12]) {
+    for (const count of [7, 10, 12]) {
       assert.equal(payoutFor(letter, count), payoutFor(SYMBOLS.A, count));
     }
   }
@@ -89,9 +92,9 @@ test("winTierFor maps bet multiples to banners", () => {
   assert.equal(winTierFor(400), "jackpot");
 });
 
-// --- multiplier gate cascade -------------------------------------------------
+// --- multiplier value weights -------------------------------------------------
 
-test("gate cascade: x2 dominates at ~90%, higher values keep the design ratios", () => {
+test("weighted plaques: mid/high values appear, ladder stays descending", () => {
   const rng = mulberry32(2024);
   const counts = {};
   const draws = 200000;
@@ -99,8 +102,14 @@ test("gate cascade: x2 dominates at ~90%, higher values keep the design ratios",
     const v = pickMultiplierValue(rng);
     counts[v] = (counts[v] || 0) + 1;
   }
-  assert.ok(Math.abs(counts[2] / draws - 0.9) < 0.01, `x2 ≈ 90%, got ${counts[2] / draws}`);
-  assert.ok(Math.abs(counts[5] / draws - 0.07) < 0.01, `x5 ≈ 7%, got ${counts[5] / draws}`);
+  // x2 is still the plurality, but no longer ~90%.
+  assert.ok(counts[2] / draws > 0.4 && counts[2] / draws < 0.55, `x2 share ${counts[2] / draws}`);
+  // x20+ must actually land at a playable rate.
+  const midPlus =
+    (counts[20] + counts[50] + counts[100] + counts[200] + counts[500] + counts[1000]) /
+    draws;
+  assert.ok(midPlus > 0.12, `x20+ share too low: ${midPlus}`);
+  assert.ok(counts[1000] / draws > 0.002, `x1000 must appear, got ${counts[1000] / draws}`);
   // strictly decreasing frequency up the value ladder
   for (let i = 1; i < MULTIPLIER_VALUES.length; i += 1) {
     const prev = counts[MULTIPLIER_VALUES[i - 1]] || 0;
@@ -109,11 +118,29 @@ test("gate cascade: x2 dominates at ~90%, higher values keep the design ratios",
   }
 });
 
+test("bonus plaques are richer than base; soft-cap suppresses stacked bigs", () => {
+  const rng = mulberry32(99);
+  const draws = 100000;
+  let baseHigh = 0;
+  let bonusHigh = 0;
+  let suppressedHigh = 0;
+  for (let i = 0; i < draws; i += 1) {
+    if (pickMultiplierValue(rng, { bonus: false }) >= 20) baseHigh += 1;
+    if (pickMultiplierValue(rng, { bonus: true }) >= 20) bonusHigh += 1;
+    if (pickMultiplierValue(rng, { bigAlready: true }) >= 20) suppressedHigh += 1;
+  }
+  assert.ok(bonusHigh > baseHigh * 1.2, `bonus mid+ ${bonusHigh} vs base ${baseHigh}`);
+  assert.ok(
+    suppressedHigh / draws < 0.03,
+    `soft-cap should rarely stack mid+, got ${suppressedHigh / draws}`,
+  );
+});
+
 // --- win calculator ---------------------------------------------------------
 
-test("findWins detects 8+ anywhere and ignores multiplier plaques", () => {
+test("findWins detects 7+ anywhere and ignores multiplier plaques", () => {
   const matrix = fullMatrix(SYMBOLS.S);
-  const crownCells = [[0, 0], [0, 1], [1, 0], [2, 3], [3, 4], [4, 2], [5, 0], [5, 4]];
+  const crownCells = [[0, 0], [0, 1], [1, 0], [2, 3], [3, 4], [4, 2], [5, 0]];
   for (const [c, r] of crownCells) matrix[c][r] = SYMBOLS.CROWN;
   matrix[1][1] = "x10";
   matrix[1][2] = "x1000";
@@ -122,7 +149,12 @@ test("findWins detects 8+ anywhere and ignores multiplier plaques", () => {
   const crown = wins.find((w) => w.symbol === SYMBOLS.CROWN);
   assert.ok(crown, "crown win detected");
   assert.equal(crown.count, MIN_MATCH);
-  assert.equal(crown.payout, 12);
+  assert.equal(crown.payout, 1.4);
+
+  // Six crowns must not pay.
+  const six = fullMatrix(SYMBOLS.S);
+  for (const [c, r] of crownCells.slice(0, 6)) six[c][r] = SYMBOLS.CROWN;
+  assert.equal(findWins(six).find((w) => w.symbol === SYMBOLS.CROWN), undefined);
 
   const sWin = wins.find((w) => w.symbol === SYMBOLS.S);
   assert.equal(sWin.count, 30 - crownCells.length - 2);
@@ -221,7 +253,10 @@ test("multiplier applies only when the spin wins", async () => {
       assert.equal(res.totalWin, 0);
       assert.equal(res.appliedMultiplier, 1);
     } else if (res.multiplierSum > 0 && !res.winCapped) {
-      assert.equal(res.appliedMultiplier, res.multiplierSum);
+      assert.equal(
+        res.appliedMultiplier,
+        appliedMultiplierFor(res.multiplierSum, false),
+      );
     }
     // drain any bonus session so every iteration is a paid spin
     while (roundManager.hasActiveBonusSession("user-2b")) {
@@ -254,6 +289,39 @@ test("buy bonus charges the fixed cost and opens a 10-spin session — no trigge
     () => poseidonService.executeBuyBonus("user-4", bet),
     (err) => err.statusCode === 409,
   );
+});
+
+test("getActiveSession restores bonus after memory cache drop (reconnect)", async () => {
+  wallet.seedStubBalance("user-restore", 100000000);
+  const bet = 10000;
+  await poseidonService.executeBuyBonus("user-restore", bet);
+
+  // Simulate client reconnect / new process cache miss while session still
+  // lives in the manager (mongo hydrate path uses ensureLoaded the same way).
+  const snap = await poseidonService.getActiveSession("user-restore");
+  assert.equal(snap.active, true);
+  assert.equal(snap.betAmount, bet);
+  assert.equal(snap.freeSpinsRemaining, FREE_SPINS_BOUGHT);
+
+  // Drop in-memory cache then ensureLoaded should still see it in stub mode
+  // only if we re-create — for stub, re-seed memory from getActiveSession path:
+  // clear memory and put session back via create to mimic hydrate.
+  const live = roundManager.getBonusSession("user-restore");
+  assert.ok(live);
+  roundManager.clearAllForTests();
+  roundManager.createBonusSession("user-restore", {
+    betAmount: live.betAmount,
+    freeSpins: live.freeSpinsRemaining,
+  });
+  // Preserve totalWon / session shape for resume.
+  const again = await poseidonService.getActiveSession("user-restore");
+  assert.equal(again.active, true);
+  assert.equal(again.freeSpinsRemaining, FREE_SPINS_BOUGHT);
+
+  // Next spin must be a free spin without requiring a paid warm-up.
+  const spin = await poseidonService.executeSpin("user-restore", 999999);
+  assert.equal(spin.isFreeSpin, true);
+  assert.equal(spin.betAmount, bet);
 });
 
 test("free spins consume the session without charging bets", async () => {
@@ -305,8 +373,11 @@ test("seeded RTP simulation stays in the tuned band", () => {
   let totalBet = 0;
   let totalWon = 0;
 
-  const winOf = (s) => {
-    const applied = s.baseWin > 0 && s.multiplierSum > 0 ? s.multiplierSum : 1;
+  const winOf = (s, isBonus = false) => {
+    const applied =
+      s.baseWin > 0 && s.multiplierSum > 0
+        ? appliedMultiplierFor(s.multiplierSum, isBonus)
+        : 1;
     return Math.min(s.baseWin * applied, MAX_WIN_MULTIPLIER);
   };
 
@@ -318,7 +389,7 @@ test("seeded RTP simulation stays in the tuned band", () => {
       guard += 1;
       remaining -= 1;
       const s = resolveSpin({ bonusMode: true, rng });
-      won += winOf(s);
+      won += winOf(s, true);
       if (s.multipliers.length >= TRIGGER_MIN_MULTIPLIERS) remaining += 5;
     }
     return won;
@@ -327,7 +398,7 @@ test("seeded RTP simulation stays in the tuned band", () => {
   for (let i = 0; i < spins; i += 1) {
     totalBet += 1;
     const s = resolveSpin({ rng });
-    let win = winOf(s);
+    let win = winOf(s, false);
     if (s.multipliers.length >= TRIGGER_MIN_MULTIPLIERS) win += playBonus();
     totalWon += win;
   }

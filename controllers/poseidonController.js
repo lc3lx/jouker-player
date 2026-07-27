@@ -2,7 +2,8 @@ const asyncHandler = require("express-async-handler");
 const poseidonService = require("../games/poseidon/poseidonService");
 
 function requireUserId(req, res, next) {
-  const userId = req.body?.userId || req.user?._id || req.user?.id;
+  const userId =
+    req.body?.userId || req.query?.userId || req.user?._id || req.user?.id;
   if (!userId) {
     return res.status(400).json({
       status: "fail",
@@ -26,6 +27,11 @@ exports.buyBonus = asyncHandler(async (req, res) => {
     currentBet,
     { superBonus: superBonus === true || superBonus === "true" },
   );
+  res.status(200).json({ status: "success", data });
+});
+
+exports.session = asyncHandler(async (req, res) => {
+  const data = await poseidonService.getActiveSession(req.poseidonUserId);
   res.status(200).json({ status: "success", data });
 });
 

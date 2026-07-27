@@ -927,8 +927,18 @@ class PokerTable {
     if (!this.isOwner) return;
     this.stateRevision = toSafeInt(this.stateRevision, 0) + 1;
     if (!this.stateStore || !this.stateStore.isEnabled()) return;
-    const snapshot = this.serializeSnapshot();
-    await this.stateStore.save(this.tableId, snapshot, { finished });
+    try {
+      const snapshot = this.serializeSnapshot();
+      await this.stateStore.save(this.tableId, snapshot, { finished });
+    } catch (err) {
+      // A Redis blip must NEVER reject into the hot path (broadcastState →
+      // advance) and freeze the live table. The next broadcast re-persists;
+      // crash recovery reconciles from Mongo if this snapshot was skipped.
+      logger.warn("poker_snapshot_save_failed", {
+        tableId: this.tableId,
+        reason: err?.message || "unknown",
+      });
+    }
   }
 
   clearTurnTimer() {
@@ -1775,6 +1785,11 @@ class PokerTable {
           });
         } else {
           s.playerState = PLAYER_STATE.SITTING_OUT;
+          // The reconnect window is over — clear the disconnect markers so this
+          // seat is no longer skipped forever by bot-fill promotion (which
+          // ignores seats with disconnectedAt). Closes the SITTING_OUT dead-end.
+          s.disconnectedAt = null;
+          s.reconnectDeadline = null;
           if (s.inHand && this.running) {
             s.folded = true;
             await this.broadcastState();
@@ -2095,6 +2110,24 @@ class PokerTable {
       this.running = true;
       await this.syncMongoTableStatus();
       await this.startHand();
+    } catch (err) {
+      // A throw during the deal must NOT strand running=true with no armed timer
+      // (watchdog-blind, F3). Reset to a clean idle so the next start / heal /
+      // failover can run normally.
+      logger.error("poker_start_hand_failed", {
+        tableId: this.tableId,
+        round: this.round,
+        reason: err?.message || "unknown",
+      });
+      this.running = false;
+      this.clearActionScheduling();
+      this.healStaleRoundIfNotRunning();
+      try {
+        await this.syncMongoTableStatus();
+        await this.broadcastState();
+      } catch (_) {
+        /* best-effort recovery broadcast */
+      }
     } finally {
       this.starting = false;
     }
@@ -2370,7 +2403,6 @@ class PokerTable {
     }
 
     if (seat.isBot) {
-      this.actionDeadline = null;
       // Human-like, personality-scaled delay (falls back to the original range
       // when the seat carries no personality).
       let thinkMs = 900 + secureRandomInt(1500);
@@ -2384,8 +2416,23 @@ class PokerTable {
           });
         }
       } catch (_) { /* keep default */ }
+      // Give bot turns a real (generous) deadline so a stuck/errored bot is
+      // VISIBLE to checkDeadGameLoops (which needs a non-null EXPIRED
+      // actionDeadline + no live timer). A normal bot acts well within thinkMs
+      // and re-schedules, so this only trips on a genuinely wedged bot.
+      this.actionDeadline = Date.now() + thinkMs + 15000;
       this.botThinkTimer = setTimeout(() => {
-        this.playBotTurn(this.currentIndex);
+        // Null the handle up-front so a wedged bot leaves no stale timer ref
+        // (else the watchdog's "no live timer" gate never passes), and .catch
+        // the promise so a throw is logged instead of a swallowed rejection.
+        this.botThinkTimer = null;
+        void this.playBotTurn(this.currentIndex).catch((err) => {
+          logger.error("poker_bot_turn_failed", {
+            tableId: this.tableId,
+            seatIndex: this.currentIndex,
+            reason: err?.message || "unknown",
+          });
+        });
       }, thinkMs);
       return;
     }
@@ -4544,6 +4591,12 @@ function initTableGame(io, options = {}) {
         );
         if (!isSeated && !isVacating) return;
 
+        // This socket is now a SEATED player (may have been a spectator socket
+        // that took a seat). Clear the spectator flag so its disconnect routes
+        // through the seat-vacate path, not the spectator short-circuit — else
+        // the seat + locked buy-in become a permanent zombie.
+        socket.isSpectator = false;
+
         // Socket-only reconnect (no fresh REST POST /join): restore the seat
         // from the vacate grace window here too, mirroring the REST join
         // "reconnect anchor" (tableService.joinTable) so a client that only
@@ -4824,7 +4877,11 @@ function initTableGame(io, options = {}) {
             }
           }
         }
-        return;
+        // NOTE: do NOT return here. A socket that watched then took a seat may
+        // still carry a stale isSpectator flag; fall through so a seated user's
+        // disconnect always runs releaseSocket + onPlayerSocketDisconnected
+        // (no zombie seat). For a pure spectator the loop below is a no-op
+        // (findSeatIndexByUser < 0 everywhere).
       }
       // H-3: the owner applies the disconnect (reconnect grace + fold-on-timeout).
       // A follower forwards it to the owner instead of touching its passive copy.

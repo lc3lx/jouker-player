@@ -39,6 +39,7 @@ const {
   tryRestoreVacatedTarneeb41Seat,
   listReplaceableBotSeats,
 } = require("./tarneeb41BotSeatService");
+const { withUserJoinLock } = require("../utils/userJoinLock");
 
 const FIXED_TIER_TABLES = {
   beginner: [10000, 40000, 100000, 150000],
@@ -467,6 +468,9 @@ exports.createTable = asyncHandler(async (req, res) => {
 
 // Join a table (protected)
 exports.joinTable = asyncHandler(async (req, res, next) => {
+  // Serialize a user's concurrent joins so the one-table gate below and the
+  // later seat-write can't both fire for the same user at two tables (TOCTOU).
+  return withUserJoinLock(req.user._id, async () => {
   let { id } = req.params;
   const buyIn = Number(req.body.buyIn || 0);
   const password = req.body.password;
@@ -928,6 +932,7 @@ exports.joinTable = asyncHandler(async (req, res, next) => {
       seatIndex: joinMeta.seatIndex ?? null,
       rtcRoom: { roomId: joinedTableId, type: "table" },
     },
+  });
   });
 });
 

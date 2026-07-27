@@ -9,6 +9,7 @@ const {
   FREE_SPINS_BOUGHT,
   RETRIGGER_AWARD,
   TRIGGER_MIN_MULTIPLIERS,
+  appliedMultiplierFor,
   winTierFor,
   roundMoney,
 } = require("./constants");
@@ -35,6 +36,7 @@ function validateBet(betAmount) {
 }
 
 /** Attach coin amounts to engine steps (engine works in bet multiples). */
+/** Attach coin amounts to engine steps (engine works in bet multiples). */
 function stepsWithAmounts(steps, betAmount) {
   return steps.map((step) => ({
     ...step,
@@ -50,6 +52,7 @@ function stepsWithAmounts(steps, betAmount) {
 async function executeSpin(userId, betAmountInput) {
   const userKey = String(userId);
 
+  await roundManager.ensureLoaded(userKey);
   const bonusSession = roundManager.getBonusSession(userKey);
   const isFreeSpin =
     bonusSession != null && bonusSession.freeSpinsRemaining > 0;
@@ -69,10 +72,13 @@ async function executeSpin(userId, betAmountInput) {
 
   // --- win math (bet multiples) ---
   // Plaques multiply the sequence win when it exists — per spin, in both
-  // modes. Plaques on a losing spin do nothing (they still count for the
-  // free-spins trigger below).
+  // modes. Face values still show uncapped on the board; the applied product
+  // is soft-capped so a lone x1000 does not break RTP. Losing spins ignore
+  // plaques for payout (they still count for the free-spins trigger below).
   const appliedMultiplier =
-    spin.baseWin > 0 && spin.multiplierSum > 0 ? spin.multiplierSum : 1;
+    spin.baseWin > 0 && spin.multiplierSum > 0
+      ? appliedMultiplierFor(spin.multiplierSum, isFreeSpin)
+      : 1;
 
   let totalWinX = spin.baseWin * appliedMultiplier;
   const winCapped = totalWinX > MAX_WIN_MULTIPLIER;
@@ -97,6 +103,7 @@ async function executeSpin(userId, betAmountInput) {
       betAmount,
       freeSpins: FREE_SPINS_NATURAL,
     });
+    await roundManager.touchSession(userKey);
     freeSpinsTriggered = true;
     freeSpinsAwarded = FREE_SPINS_NATURAL;
   }
@@ -113,8 +120,10 @@ async function executeSpin(userId, betAmountInput) {
     mapWalletError(err);
   }
 
+  let bonusTotalWon = 0;
   if (isFreeSpin) {
-    bonusSession.totalWon = roundMoney(bonusSession.totalWon + totalWin);
+    roundManager.addBonusWin(userKey, totalWin);
+    bonusTotalWon = roundManager.getBonusSession(userKey)?.totalWon ?? 0;
     roundManager.consumeBonusSpin(userKey);
   }
 
@@ -130,6 +139,8 @@ async function executeSpin(userId, betAmountInput) {
 
   const { publishSpinCompleted } = require("../../domain/publishers/playerActivityPublishers");
   publishSpinCompleted(userKey, { sourceId: round.roundId, game: "poseidon" });
+
+  const liveSession = roundManager.getBonusSession(userKey);
 
   return {
     roundId: round.roundId,
@@ -150,9 +161,8 @@ async function executeSpin(userId, betAmountInput) {
     isFreeSpin,
     freeSpinsTriggered,
     freeSpinsAwarded,
-    freeSpinsRemaining:
-      roundManager.getBonusSession(userKey)?.freeSpinsRemaining ?? 0,
-    bonusTotalWon: isFreeSpin ? bonusSession.totalWon : 0,
+    freeSpinsRemaining: liveSession?.freeSpinsRemaining ?? 0,
+    bonusTotalWon: isFreeSpin ? bonusTotalWon : 0,
     balance: roundMoney(balanceAfter),
   };
 }
@@ -163,6 +173,7 @@ async function executeSpin(userId, betAmountInput) {
  */
 async function executeBuyBonus(userId, currentBetInput, { superBonus = false } = {}) {
   const userKey = String(userId);
+  await roundManager.ensureLoaded(userKey);
   if (roundManager.hasActiveBonusSession(userKey)) {
     throw new ApiError("Bonus session already active", 409);
   }
@@ -186,6 +197,7 @@ async function executeBuyBonus(userId, currentBetInput, { superBonus = false } =
     betAmount,
     freeSpins: FREE_SPINS_BOUGHT,
   });
+  await roundManager.touchSession(userKey);
 
   const balanceAfter = await wallet.getBalance(userKey);
 
@@ -201,8 +213,26 @@ async function executeBuyBonus(userId, currentBetInput, { superBonus = false } =
   };
 }
 
+/** Active free-spins / buy-bonus session for reconnect restore. */
+async function getActiveSession(userId) {
+  const userKey = String(userId);
+  await roundManager.ensureLoaded(userKey);
+  const session = roundManager.getBonusSession(userKey);
+  if (!session || session.freeSpinsRemaining <= 0) {
+    return { active: false };
+  }
+  return {
+    active: true,
+    sessionId: session.sessionId,
+    betAmount: session.betAmount,
+    freeSpinsRemaining: session.freeSpinsRemaining,
+    bonusTotalWon: session.totalWon,
+  };
+}
+
 module.exports = {
   executeSpin,
   executeBuyBonus,
+  getActiveSession,
   validateBet,
 };

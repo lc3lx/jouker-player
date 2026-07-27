@@ -302,6 +302,55 @@ test("Step6: heartbeat resync uses the userId-resolved seat (own hand only, no l
 // Step 7 — structured lifecycle audit log
 // ---------------------------------------------------------------------------
 
+// ---------------------------------------------------------------------------
+// P0.2 — per-user join mutex (closes the two-table TOCTOU race)
+// ---------------------------------------------------------------------------
+
+test("P0: withUserJoinLock serializes same-user joins (second waits for the first)", async () => {
+  const { withUserJoinLock } = require("../utils/userJoinLock");
+  const order = [];
+  const job = (id, ms) =>
+    withUserJoinLock("u-race", async () => {
+      order.push(`start-${id}`);
+      await new Promise((r) => setTimeout(r, ms));
+      order.push(`end-${id}`);
+      return id;
+    });
+  const [a, b] = await Promise.all([job("A", 30), job("B", 5)]);
+  // B is faster but must not start until A fully settles → no interleave.
+  assert.deepEqual(order, ["start-A", "end-A", "start-B", "end-B"]);
+  assert.equal(a, "A");
+  assert.equal(b, "B");
+});
+
+test("P0: withUserJoinLock lets DIFFERENT users run concurrently", async () => {
+  const { withUserJoinLock } = require("../utils/userJoinLock");
+  const order = [];
+  const p1 = withUserJoinLock("x", async () => {
+    order.push("x-start");
+    await new Promise((r) => setTimeout(r, 25));
+    order.push("x-end");
+  });
+  const p2 = withUserJoinLock("y", async () => {
+    order.push("y-start");
+    await new Promise((r) => setTimeout(r, 5));
+    order.push("y-end");
+  });
+  await Promise.all([p1, p2]);
+  assert.ok(order.indexOf("y-end") < order.indexOf("x-end"), "ran concurrently");
+});
+
+test("P0: an error in one join never blocks the next same-user join", async () => {
+  const { withUserJoinLock } = require("../utils/userJoinLock");
+  await assert.rejects(
+    withUserJoinLock("z", async () => {
+      throw new Error("boom");
+    })
+  );
+  const r = await withUserJoinLock("z", async () => "ok");
+  assert.equal(r, "ok");
+});
+
 test("Step7: lifecycleAudit emits a structured event and never throws", () => {
   const { lifecycleAudit } = require("../utils/lifecycleAudit");
   assert.equal(typeof lifecycleAudit, "function");

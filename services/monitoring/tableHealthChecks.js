@@ -229,14 +229,113 @@ async function checkAllocatorConsistency() {
   return findings;
 }
 
-async function run(settings) {
-  const [duplicateSeats, deadLoops, orphanTimers, allocator] = await Promise.all([
-    checkDuplicateSeats(),
-    checkDeadGameLoops(settings),
-    checkOrphanTimerNamespaces(settings),
-    checkAllocatorConsistency(),
-  ]);
-  return { findings: [...duplicateSeats, ...deadLoops, ...orphanTimers, ...allocator] };
+/**
+ * Poker table stuck FROZEN (running=false, set on a settlement or chip-audit
+ * failure). checkDeadGameLoops skips !running tables, so a frozen table had no
+ * watchdog at all. Attempt the EXISTING chip-conservation unfreeze probe (via
+ * bootstrapLobbyStart — owner-gated + idempotent); if it can't clear (a real
+ * chip imbalance), surface it critical for admin DB reconcile — there is no
+ * SAFE automatic recovery for an unbalanced table (auto-unfreezing one would
+ * risk resuming with wrong chips).
+ */
+async function checkFrozenTables({ autoRepairEnabled }) {
+  const findings = [];
+  for (const tableId of listActivePokerTableIds()) {
+    const game = await getLiveTableGameForAdmin(tableId);
+    if (!game || game.frozen !== true) continue;
+    const finding = makeFinding({
+      check: "frozen_table",
+      severity: "critical",
+      tableId,
+      message: `Poker table ${tableId} is frozen (reason: ${game.frozenReason || "unknown"})`,
+      meta: { frozenReason: game.frozenReason || null, round: game.round },
+    });
+    if (autoRepairEnabled) {
+      try {
+        if (typeof game.bootstrapLobbyStart === "function") {
+          await game.bootstrapLobbyStart();
+        }
+        finding.repaired = game.frozen !== true;
+        finding.repairAction = "unfreeze_probe";
+        finding.repairResult =
+          game.frozen === true ? "failed_needs_admin_reconcile" : "success";
+      } catch (e) {
+        finding.repaired = false;
+        finding.repairAction = "unfreeze_probe";
+        finding.repairResult = "failed";
+        finding.meta.repairError = e?.message || "unknown";
+      }
+    }
+    findings.push(finding);
+  }
+  return findings;
 }
 
-module.exports = { run, checkDuplicateSeats, checkDeadGameLoops, checkOrphanTimerNamespaces, checkAllocatorConsistency };
+/**
+ * Card-game (trix/tarneeb41) dead-end: a game left in terminal `game_end` that
+ * neither settled nor got abandoned+evicted past the stuck grace. The TTL sweep
+ * normally evicts game_end tables, so one lingering here is a real anomaly.
+ * Detection-only (repairing a stuck settlement touches money — surface it for
+ * the admin + the existing abandon/GC paths rather than auto-mutate).
+ */
+async function checkStuckCardGames({ stuckHandGraceMs }) {
+  const findings = [];
+  const now = Date.now();
+  const scan = (map, gameType) => {
+    if (!map) return;
+    for (const [tableId, game] of map.entries()) {
+      if (!game) continue;
+      const finishedAt = Number(game._finishedAt) || 0;
+      const stuck =
+        game.state === "game_end" &&
+        finishedAt > 0 &&
+        now - finishedAt > stuckHandGraceMs &&
+        game._settlementCompleted !== true;
+      if (!stuck) continue;
+      findings.push(
+        makeFinding({
+          check: "stuck_card_game_end",
+          severity: "warning",
+          tableId,
+          message: `${gameType} table ${tableId} stuck in game_end ${Math.round((now - finishedAt) / 1000)}s without settlement/abandon`,
+          meta: { gameType, finishedAt, state: game.state },
+        })
+      );
+    }
+  };
+  scan(roomManager.trixGamesByTableId, "trix");
+  scan(roomManager.tarneeb41GamesByTableId, "tarneeb41");
+  return findings;
+}
+
+async function run(settings) {
+  const [duplicateSeats, deadLoops, orphanTimers, allocator, frozen, stuckCard] =
+    await Promise.all([
+      checkDuplicateSeats(),
+      checkDeadGameLoops(settings),
+      checkOrphanTimerNamespaces(settings),
+      checkAllocatorConsistency(),
+      checkFrozenTables(settings),
+      checkStuckCardGames(settings),
+    ]);
+  return {
+    findings: [
+      ...duplicateSeats,
+      ...deadLoops,
+      ...orphanTimers,
+      ...allocator,
+      ...frozen,
+      ...stuckCard,
+    ],
+  };
+}
+
+module.exports = {
+  run,
+  checkDuplicateSeats,
+  checkDeadGameLoops,
+  checkOrphanTimerNamespaces,
+  checkAllocatorConsistency,
+  checkFrozenTables,
+  checkStuckCardGames,
+};

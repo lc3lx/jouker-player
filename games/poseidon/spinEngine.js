@@ -13,7 +13,11 @@ const {
   BASE_WEIGHTS,
   BONUS_WEIGHTS,
   MULTIPLIER_VALUES,
-  MULTIPLIER_GATES,
+  BASE_MULTIPLIER_WEIGHTS,
+  BONUS_MULTIPLIER_WEIGHTS,
+  SUPPRESSED_MULTIPLIER_WEIGHTS,
+  BIG_MULTIPLIER_THRESHOLD,
+  multiplierValue,
 } = require("./constants");
 const { findWins, collectMultipliers } = require("./winCalculator");
 
@@ -42,29 +46,67 @@ function buildPicker(weightTable, rng) {
   };
 }
 
-/**
- * Gate cascade: try x2 at 90%, on miss x5 at 70%, … x1000 at 0.5%.
- * Falls back to x2 if every gate misses (~0.2% of draws).
- */
-function pickMultiplierValue(rng) {
-  for (let i = 0; i < MULTIPLIER_VALUES.length; i += 1) {
-    if (rng() < MULTIPLIER_GATES[i]) return MULTIPLIER_VALUES[i];
+function pickFromWeights(weights, rng) {
+  const total = weights.reduce((sum, w) => sum + w, 0);
+  let roll = rng() * total;
+  for (let i = 0; i < weights.length; i += 1) {
+    roll -= weights[i];
+    if (roll < 0) return MULTIPLIER_VALUES[i];
   }
   return MULTIPLIER_VALUES[0];
 }
 
-/** Draw one cell; "mult" placeholder resolves to a concrete `x<value>`. */
-function drawCell(pick, rng) {
-  const symbol = pick();
-  return symbol === "mult" ? `x${pickMultiplierValue(rng)}` : symbol;
+/**
+ * Weighted plaque value. Bonus mode uses a richer table.
+ * When [bigAlready] is true (x20+ already on the grid), further draws
+ * collapse toward small plaques so huge stacks stay rare.
+ */
+function pickMultiplierValue(rng, { bonus = false, bigAlready = false } = {}) {
+  if (bigAlready) return pickFromWeights(SUPPRESSED_MULTIPLIER_WEIGHTS, rng);
+  return pickFromWeights(
+    bonus ? BONUS_MULTIPLIER_WEIGHTS : BASE_MULTIPLIER_WEIGHTS,
+    rng,
+  );
 }
 
-function generateGrid(pick, rng) {
+function countBigMultipliers(matrix) {
+  let n = 0;
+  for (const col of matrix) {
+    for (const cell of col) {
+      if (multiplierValue(cell) >= BIG_MULTIPLIER_THRESHOLD) n += 1;
+    }
+  }
+  return n;
+}
+
+function countBigInCells(cells) {
+  let n = 0;
+  for (const cell of cells) {
+    if (multiplierValue(cell) >= BIG_MULTIPLIER_THRESHOLD) n += 1;
+  }
+  return n;
+}
+
+/** Draw one cell; "mult" placeholder resolves to a concrete `x<value>`. */
+function drawCell(pick, rng, { bonus = false, bigAlready = false } = {}) {
+  const symbol = pick();
+  return symbol === "mult"
+    ? `x${pickMultiplierValue(rng, { bonus, bigAlready })}`
+    : symbol;
+}
+
+function generateGrid(pick, rng, { bonus = false } = {}) {
   const matrix = [];
+  let bigAlready = 0;
   for (let col = 0; col < REEL_COUNT; col += 1) {
     const column = [];
     for (let row = 0; row < ROW_COUNT; row += 1) {
-      column.push(drawCell(pick, rng));
+      const cell = drawCell(pick, rng, {
+        bonus,
+        bigAlready: bigAlready > 0,
+      });
+      if (multiplierValue(cell) >= BIG_MULTIPLIER_THRESHOLD) bigAlready += 1;
+      column.push(cell);
     }
     matrix.push(column);
   }
@@ -75,10 +117,22 @@ function generateGrid(pick, rng) {
  * Remove the given positions, slide survivors down, refill from the top.
  * Returns { matrix, refills } where refills[col] lists new symbols top-down.
  */
-function tumble(matrix, removedPositions, pick, rng) {
+function tumble(matrix, removedPositions, pick, rng, { bonus = false } = {}) {
   const removed = new Set(removedPositions.map(([c, r]) => `${c}:${r}`));
   const next = [];
   const refills = [];
+  // Count big plaques that survive the tumble before any refill.
+  let bigSurvivors = 0;
+  for (let col = 0; col < REEL_COUNT; col += 1) {
+    for (let row = 0; row < ROW_COUNT; row += 1) {
+      if (removed.has(`${col}:${row}`)) continue;
+      if (multiplierValue(matrix[col][row]) >= BIG_MULTIPLIER_THRESHOLD) {
+        bigSurvivors += 1;
+      }
+    }
+  }
+
+  let bigSoFar = bigSurvivors;
   for (let col = 0; col < REEL_COUNT; col += 1) {
     const survivors = [];
     for (let row = 0; row < ROW_COUNT; row += 1) {
@@ -86,7 +140,12 @@ function tumble(matrix, removedPositions, pick, rng) {
     }
     const incoming = [];
     while (survivors.length + incoming.length < ROW_COUNT) {
-      incoming.push(drawCell(pick, rng));
+      const cell = drawCell(pick, rng, {
+        bonus,
+        bigAlready: bigSoFar > 0,
+      });
+      if (multiplierValue(cell) >= BIG_MULTIPLIER_THRESHOLD) bigSoFar += 1;
+      incoming.push(cell);
     }
     refills.push(incoming);
     next.push([...incoming, ...survivors]);
@@ -109,8 +168,9 @@ function tumble(matrix, removedPositions, pick, rng) {
 function resolveSpin({ bonusMode = false, rng = secureRandom } = {}) {
   const weights = bonusMode ? BONUS_WEIGHTS : BASE_WEIGHTS;
   const pick = buildPicker(weights, rng);
+  const drawOpts = { bonus: bonusMode };
 
-  let matrix = generateGrid(pick, rng);
+  let matrix = generateGrid(pick, rng, drawOpts);
   const initialMatrix = matrix.map((col) => [...col]);
 
   const steps = [];
@@ -122,7 +182,7 @@ function resolveSpin({ bonusMode = false, rng = secureRandom } = {}) {
     const stepWin = wins.reduce((sum, w) => sum + w.payout, 0);
     baseWin += stepWin;
     const removedPositions = wins.flatMap((w) => w.positions);
-    const result = tumble(matrix, removedPositions, pick, rng);
+    const result = tumble(matrix, removedPositions, pick, rng, drawOpts);
     matrix = result.matrix;
 
     steps.push({
@@ -152,4 +212,6 @@ module.exports = {
   pickMultiplierValue,
   secureRandom,
   secureRandomInt,
+  countBigMultipliers,
+  countBigInCells,
 };

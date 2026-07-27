@@ -2,11 +2,30 @@ const crypto = require("crypto");
 const { v4: uuidv4 } = require("uuid");
 const { FREE_SPINS_NATURAL, roundMoney } = require("./constants");
 
-/** In-memory round + bonus session store (swap for Redis/Mongo in production). */
+/**
+ * Round metadata stays in-memory (short TTL).
+ * Bonus sessions are cached in memory and persisted to Mongo in production
+ * so buy-bonus / free-spins survive reconnects and process restarts.
+ */
+
 const rounds = new Map();
+/** @type {Map<string, object>} */
 const bonusSessions = new Map();
 
 const ROUND_TTL_MS = 30 * 60 * 1000;
+
+const PERSIST_MODE =
+  process.env.POSEIDON_WALLET_MODE ||
+  (process.env.NODE_ENV === "test" ? "stub" : "mongo");
+
+function useMongo() {
+  return PERSIST_MODE === "mongo";
+}
+
+function getSessionModel() {
+  // Lazy require so stub/unit tests never need mongoose connected.
+  return require("../../models/poseidonBonusSessionModel");
+}
 
 function purgeExpired() {
   const now = Date.now();
@@ -56,6 +75,84 @@ function getRound(roundId) {
   return rounds.get(roundId) || null;
 }
 
+function sessionSnapshot(session) {
+  return {
+    sessionId: session.sessionId,
+    userId: session.userId,
+    betAmount: session.betAmount,
+    freeSpinsRemaining: session.freeSpinsRemaining,
+    totalWon: session.totalWon,
+    createdAt: session.createdAt,
+  };
+}
+
+async function persistSession(session) {
+  if (!useMongo() || !session) return;
+  try {
+    const Model = getSessionModel();
+    const now = Date.now();
+    await Model.findOneAndUpdate(
+      { userId: session.userId },
+      {
+        userId: session.userId,
+        sessionId: session.sessionId,
+        betAmount: session.betAmount,
+        freeSpinsRemaining: session.freeSpinsRemaining,
+        totalWon: session.totalWon,
+        createdAt: session.createdAt,
+        updatedAt: now,
+      },
+      { upsert: true, new: true, setDefaultsOnInsert: true },
+    );
+  } catch (err) {
+    // Don't break gameplay if persistence blips — memory remains source for
+    // this process; next ensureLoaded can heal from a prior write.
+    console.error("[poseidon] bonus session persist failed:", err?.message || err);
+  }
+}
+
+async function deletePersistedSession(userId) {
+  if (!useMongo()) return;
+  try {
+    const Model = getSessionModel();
+    await Model.deleteOne({ userId: String(userId) });
+  } catch (err) {
+    console.error("[poseidon] bonus session delete failed:", err?.message || err);
+  }
+}
+
+/**
+ * Hydrate memory cache from Mongo if needed. Call at the start of any
+ * request that depends on bonus entitlement.
+ */
+async function ensureLoaded(userId) {
+  const key = String(userId);
+  if (bonusSessions.has(key)) return bonusSessions.get(key);
+  if (!useMongo()) return null;
+  try {
+    const Model = getSessionModel();
+    const doc = await Model.findOne({
+      userId: key,
+      freeSpinsRemaining: { $gt: 0 },
+    }).lean();
+    if (!doc) return null;
+    const session = {
+      sessionId: doc.sessionId,
+      userId: key,
+      betAmount: roundMoney(doc.betAmount),
+      freeSpinsRemaining: Number(doc.freeSpinsRemaining) || 0,
+      totalWon: roundMoney(doc.totalWon || 0),
+      createdAt: doc.createdAt || Date.now(),
+    };
+    if (session.freeSpinsRemaining <= 0) return null;
+    bonusSessions.set(key, session);
+    return session;
+  } catch (err) {
+    console.error("[poseidon] bonus session load failed:", err?.message || err);
+    return null;
+  }
+}
+
 function createBonusSession(userId, { betAmount, freeSpins = FREE_SPINS_NATURAL }) {
   const session = {
     sessionId: uuidv4(),
@@ -66,6 +163,8 @@ function createBonusSession(userId, { betAmount, freeSpins = FREE_SPINS_NATURAL 
     createdAt: Date.now(),
   };
   bonusSessions.set(String(userId), session);
+  // Fire-and-forget persist; callers that need durability can await touchSession.
+  void persistSession(session);
   return session;
 }
 
@@ -82,6 +181,15 @@ function addRetriggerSpins(userId, extraSpins) {
   const session = getBonusSession(userId);
   if (!session) return null;
   session.freeSpinsRemaining += extraSpins;
+  void persistSession(session);
+  return session;
+}
+
+function addBonusWin(userId, amount) {
+  const session = getBonusSession(userId);
+  if (!session) return null;
+  session.totalWon = roundMoney(session.totalWon + amount);
+  void persistSession(session);
   return session;
 }
 
@@ -92,11 +200,38 @@ function consumeBonusSpin(userId) {
   session.freeSpinsRemaining -= 1;
   if (session.freeSpinsRemaining <= 0) {
     bonusSessions.delete(String(userId));
+    void deletePersistedSession(userId);
+  } else {
+    void persistSession(session);
   }
   return session;
 }
 
-function clearAllForTests() {
+/** Awaitable flush — use after buy-bonus so the charge + session land together. */
+async function touchSession(userId) {
+  const session = getBonusSession(userId);
+  if (!session) {
+    await deletePersistedSession(userId);
+    return null;
+  }
+  await persistSession(session);
+  return session;
+}
+
+async function clearAllForTests() {
+  rounds.clear();
+  bonusSessions.clear();
+  if (useMongo()) {
+    try {
+      await getSessionModel().deleteMany({});
+    } catch (_) {
+      // ignore when mongoose isn't connected in unit tests
+    }
+  }
+}
+
+/** Sync clear for unit tests (memory only — stub mode). */
+function clearAllForTestsSync() {
   rounds.clear();
   bonusSessions.clear();
 }
@@ -108,7 +243,12 @@ module.exports = {
   getBonusSession,
   hasActiveBonusSession,
   addRetriggerSpins,
+  addBonusWin,
   consumeBonusSpin,
-  clearAllForTests,
+  ensureLoaded,
+  touchSession,
+  clearAllForTests: clearAllForTestsSync,
+  clearAllForTestsAsync: clearAllForTests,
   createRoundHash,
+  sessionSnapshot,
 };
