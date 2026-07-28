@@ -84,8 +84,8 @@ const BIG_MULTIPLIER_THRESHOLD = 20;
  * Plaques still display their full face value (x1000 can show), but the
  * applied product is capped so RTP stays sane. Bonus allows a higher ceiling.
  */
-const APPLIED_MULTIPLIER_CAP_BASE = 6;
-const APPLIED_MULTIPLIER_CAP_BONUS = 18;
+const APPLIED_MULTIPLIER_CAP_BASE = 2;
+const APPLIED_MULTIPLIER_CAP_BONUS = 10;
 
 /** Face-value plaque sum, clamped for payout (display stays uncapped). */
 function appliedMultiplierFor(sum, isBonus = false) {
@@ -115,11 +115,11 @@ const PAYING_SYMBOLS = Object.freeze([
  */
 const LETTER_PAYS = Object.freeze([1.0, 1.15, 1.5]);
 const PAYTABLE = Object.freeze({
-  [SYMBOLS.CROWN]: [2.5, 3.75, 5.0],
-  [SYMBOLS.FISH]: [2.0, 3.0, 4.2],
-  [SYMBOLS.PEARL]: [1.75, 2.5, 3.5],
-  [SYMBOLS.STARFISH]: [1.5, 2.0, 2.8],
-  [SYMBOLS.CORAL]: [1.25, 1.6, 2.2],
+  [SYMBOLS.CROWN]: [2.0, 3.5, 5.0],
+  [SYMBOLS.FISH]: [1.7, 2.8, 4.2],
+  [SYMBOLS.PEARL]: [1.5, 2.3, 3.5],
+  [SYMBOLS.STARFISH]: [1.3, 1.85, 2.8],
+  [SYMBOLS.CORAL]: [1.15, 1.5, 2.2],
   [SYMBOLS.A]: LETTER_PAYS,
   [SYMBOLS.E]: LETTER_PAYS,
   [SYMBOLS.N]: LETTER_PAYS,
@@ -141,10 +141,10 @@ const BASE_WEIGHTS = Object.freeze([
   [SYMBOLS.FISH, 7.5],
   [SYMBOLS.CROWN, 5.5],
   [SYMBOLS.PEARL, 5],
-  ["mult", 0.55],
+  ["mult", 0.35],
 ]);
 
-/** Free spins: plaques rain more often but less than before (higher base pays). */
+/** Free spins: plaques rain more often but capped for the higher base pays. */
 const BONUS_WEIGHTS = Object.freeze([
   [SYMBOLS.S, 10],
   [SYMBOLS.N, 10],
@@ -155,7 +155,7 @@ const BONUS_WEIGHTS = Object.freeze([
   [SYMBOLS.FISH, 7.5],
   [SYMBOLS.CROWN, 5.5],
   [SYMBOLS.PEARL, 5],
-  ["mult", 1.65],
+  ["mult", 1.2],
 ]);
 
 /** Win presentation tiers in bet multiples (client shows matching banner). */
