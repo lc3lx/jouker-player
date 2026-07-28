@@ -84,8 +84,8 @@ const BIG_MULTIPLIER_THRESHOLD = 20;
  * Plaques still display their full face value (x1000 can show), but the
  * applied product is capped so RTP stays sane. Bonus allows a higher ceiling.
  */
-const APPLIED_MULTIPLIER_CAP_BASE = 12;
-const APPLIED_MULTIPLIER_CAP_BONUS = 40;
+const APPLIED_MULTIPLIER_CAP_BASE = 6;
+const APPLIED_MULTIPLIER_CAP_BONUS = 18;
 
 /** Face-value plaque sum, clamped for payout (display stays uncapped). */
 function appliedMultiplierFor(sum, isBonus = false) {
@@ -111,16 +111,15 @@ const PAYING_SYMBOLS = Object.freeze([
 /**
  * Anywhere-pays paytable in bet multiples.
  * Bands: 7–9 matches / 10–11 matches / 12+ matches.
- * Ranking per design: crown > fish > pearl > starfish > coral > letters
- * (letters all pay the same).
+ * Ranking: crown (max 5×) > fish > pearl > starfish > coral > letters (min 1×).
  */
-const LETTER_PAYS = Object.freeze([0.08, 0.16, 0.7]);
+const LETTER_PAYS = Object.freeze([1.0, 1.15, 1.5]);
 const PAYTABLE = Object.freeze({
-  [SYMBOLS.CROWN]: [1.4, 3.0, 6],
-  [SYMBOLS.FISH]: [0.35, 1.4, 3.0],
-  [SYMBOLS.PEARL]: [0.28, 0.7, 2.0],
-  [SYMBOLS.STARFISH]: [0.2, 0.3, 1.5],
-  [SYMBOLS.CORAL]: [0.15, 0.2, 1.2],
+  [SYMBOLS.CROWN]: [2.5, 3.75, 5.0],
+  [SYMBOLS.FISH]: [2.0, 3.0, 4.2],
+  [SYMBOLS.PEARL]: [1.75, 2.5, 3.5],
+  [SYMBOLS.STARFISH]: [1.5, 2.0, 2.8],
+  [SYMBOLS.CORAL]: [1.25, 1.6, 2.2],
   [SYMBOLS.A]: LETTER_PAYS,
   [SYMBOLS.E]: LETTER_PAYS,
   [SYMBOLS.N]: LETTER_PAYS,
@@ -133,30 +132,30 @@ const PAYTABLE = Object.freeze({
  * Letters are flattened so 7-of-a-kind stays exciting but not constant.
  */
 const BASE_WEIGHTS = Object.freeze([
-  [SYMBOLS.S, 9],
-  [SYMBOLS.N, 9],
-  [SYMBOLS.E, 9],
-  [SYMBOLS.A, 9],
-  [SYMBOLS.STARFISH, 9.5],
+  [SYMBOLS.S, 10],
+  [SYMBOLS.N, 10],
+  [SYMBOLS.E, 10],
+  [SYMBOLS.A, 10],
+  [SYMBOLS.STARFISH, 9],
   [SYMBOLS.CORAL, 9],
-  [SYMBOLS.FISH, 8],
-  [SYMBOLS.CROWN, 6],
+  [SYMBOLS.FISH, 7.5],
+  [SYMBOLS.CROWN, 5.5],
   [SYMBOLS.PEARL, 5],
-  ["mult", 1.0],
+  ["mult", 0.55],
 ]);
 
-/** Free spins: plaques rain noticeably more often. */
+/** Free spins: plaques rain more often but less than before (higher base pays). */
 const BONUS_WEIGHTS = Object.freeze([
-  [SYMBOLS.S, 9],
-  [SYMBOLS.N, 9],
-  [SYMBOLS.E, 9],
-  [SYMBOLS.A, 9],
-  [SYMBOLS.STARFISH, 9.5],
+  [SYMBOLS.S, 10],
+  [SYMBOLS.N, 10],
+  [SYMBOLS.E, 10],
+  [SYMBOLS.A, 10],
+  [SYMBOLS.STARFISH, 9],
   [SYMBOLS.CORAL, 9],
-  [SYMBOLS.FISH, 8],
-  [SYMBOLS.CROWN, 6],
+  [SYMBOLS.FISH, 7.5],
+  [SYMBOLS.CROWN, 5.5],
   [SYMBOLS.PEARL, 5],
-  ["mult", 2.95],
+  ["mult", 1.65],
 ]);
 
 /** Win presentation tiers in bet multiples (client shows matching banner). */

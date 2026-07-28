@@ -54,11 +54,14 @@ beforeEach(() => {
 
 test("payoutFor respects the 7-9 / 10-11 / 12+ bands and the design ranking", () => {
   assert.equal(payoutFor(SYMBOLS.CROWN, 6), 0);
-  assert.equal(payoutFor(SYMBOLS.CROWN, 7), 1.4);
-  assert.equal(payoutFor(SYMBOLS.CROWN, 8), 1.4);
-  assert.equal(payoutFor(SYMBOLS.CROWN, 9), 1.4);
-  assert.equal(payoutFor(SYMBOLS.CROWN, 10), 3.0);
-  assert.equal(payoutFor(SYMBOLS.CROWN, 12), 6);
+  assert.equal(payoutFor(SYMBOLS.CROWN, 7), 2.5);
+  assert.equal(payoutFor(SYMBOLS.CROWN, 8), 2.5);
+  assert.equal(payoutFor(SYMBOLS.CROWN, 9), 2.5);
+  assert.equal(payoutFor(SYMBOLS.CROWN, 10), 3.75);
+  assert.equal(payoutFor(SYMBOLS.CROWN, 12), 5);
+
+  assert.equal(payoutFor(SYMBOLS.A, 7), 1.0);
+  assert.equal(payoutFor(SYMBOLS.A, 12), 1.5);
 
   // crown > fish > pearl > starfish > coral > letters
   const order = [
@@ -149,7 +152,7 @@ test("findWins detects 7+ anywhere and ignores multiplier plaques", () => {
   const crown = wins.find((w) => w.symbol === SYMBOLS.CROWN);
   assert.ok(crown, "crown win detected");
   assert.equal(crown.count, MIN_MATCH);
-  assert.equal(crown.payout, 1.4);
+  assert.equal(crown.payout, 2.5);
 
   // Six crowns must not pay.
   const six = fullMatrix(SYMBOLS.S);
