@@ -27,6 +27,13 @@
 const JACKPOT_SYMBOL = "jackpot";
 
 /**
+ * TEMP QA FLAG — set false (or remove usage) before production.
+ * When true: every spin opens a Jackpot Round and always awards a real prize
+ * (no `no_win`), so Super / Mega / Grand celebrations can be evaluated quickly.
+ */
+const JACKPOT_FORCE_EVERY_SPIN = true;
+
+/**
  * Minimum jackpot scatter symbols on the FINAL matrix (post-cascade) that
  * trigger a Jackpot Round. Must NOT conflict with TRIGGER_NATURAL_MIN (which
  * counts multiplier plaques, not jackpot symbols).
@@ -43,6 +50,13 @@ const JACKPOT_PRIZES = Object.freeze([
   { type: "super10m", amount: 10_000_000,  weight: 60  },
   { type: "mega50m",  amount: 50_000_000,  weight: 30  },
   { type: "grand100m",amount: 100_000_000, weight: 10  },
+]);
+
+/** QA prize pool used while JACKPOT_FORCE_EVERY_SPIN is on — always a real win. */
+const JACKPOT_PRIZES_QA = Object.freeze([
+  { type: "super10m", amount: 10_000_000,  weight: 50 },
+  { type: "mega50m",  amount: 50_000_000,  weight: 30 },
+  { type: "grand100m",amount: 100_000_000, weight: 20 },
 ]);
 
 /** Number of cards displayed on the scratch grid. */
@@ -75,8 +89,10 @@ const JACKPOT_BONUS_WEIGHT = 0.25;
 
 module.exports = {
   JACKPOT_SYMBOL,
+  JACKPOT_FORCE_EVERY_SPIN,
   JACKPOT_MIN_SYMBOLS,
   JACKPOT_PRIZES,
+  JACKPOT_PRIZES_QA,
   JACKPOT_CARD_COUNT,
   JACKPOT_STATUS,
   JACKPOT_ROUND_TTL_MS,

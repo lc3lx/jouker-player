@@ -14,6 +14,9 @@
 const crypto = require("crypto");
 const {
   JACKPOT_MIN_SYMBOLS,
+  JACKPOT_FORCE_EVERY_SPIN,
+  JACKPOT_PRIZES,
+  JACKPOT_PRIZES_QA,
   JACKPOT_STATUS,
   JACKPOT_ROUND_TTL_MS,
   JACKPOT_SYMBOL,
@@ -85,6 +88,9 @@ function countJackpotSymbols(finalMatrix) {
  * @returns {boolean}
  */
 function isJackpotTriggered(finalMatrix) {
+  // TEMP QA: open a Jackpot Round on every spin while evaluating UX / settlement.
+  // Disabled under NODE_ENV=test so unit tests keep natural probabilities.
+  if (JACKPOT_FORCE_EVERY_SPIN && process.env.NODE_ENV !== "test") return true;
   return countJackpotSymbols(finalMatrix) >= JACKPOT_MIN_SYMBOLS;
 }
 
@@ -97,7 +103,10 @@ function isJackpotTriggered(finalMatrix) {
  */
 async function createJackpotRound({ spinId, userId }, rng) {
   const roundId = crypto.randomUUID();
-  const prize = pickWeightedPrize(undefined, rng);
+  const forceQa =
+    JACKPOT_FORCE_EVERY_SPIN && process.env.NODE_ENV !== "test";
+  const prizeTable = forceQa ? JACKPOT_PRIZES_QA : JACKPOT_PRIZES;
+  const prize = pickWeightedPrize(prizeTable, rng);
   const cards = buildCardLayout(prize, rng);
 
   const now = Date.now();
