@@ -8,14 +8,17 @@ const {
   FREE_SPINS_NATURAL,
   FREE_SPINS_BOUGHT,
   RETRIGGER_AWARD,
-  TRIGGER_MIN_MULTIPLIERS,
+  TRIGGER_NATURAL_MIN,
+  TRIGGER_RETRIGGER_MIN,
   appliedMultiplierFor,
   winTierFor,
   roundMoney,
 } = require("./constants");
-const { resolveSpin } = require("./spinEngine");
+const spinEngine = require("./spinEngine");
 const roundManager = require("./roundManager");
 const wallet = require("./poseidonWalletAdapter");
+const jackpotService = require("./jackpot/jackpotService");
+const { settleJackpotRound } = require("./jackpot/jackpotSettlement");
 
 function mapWalletError(err) {
   if (
@@ -68,7 +71,7 @@ async function executeSpin(userId, betAmountInput) {
     }
   }
 
-  const spin = resolveSpin({ bonusMode: isFreeSpin });
+  const spin = spinEngine.resolveSpin({ bonusMode: isFreeSpin });
 
   // --- win math (bet multiples) ---
   // Plaques multiply the sequence win when it exists — per spin, in both
@@ -86,17 +89,17 @@ async function executeSpin(userId, betAmountInput) {
 
   const totalWin = roundMoney(totalWinX * betAmount);
 
-  // --- free spins trigger / retrigger (3+ plaques on the final screen) ---
+  // --- free spins: 4+ base / 3+ during bonus (bought or natural) ---
   const multiplierCount = spin.multipliers.length;
   let freeSpinsTriggered = false;
   let freeSpinsAwarded = 0;
   if (isFreeSpin) {
-    if (multiplierCount >= TRIGGER_MIN_MULTIPLIERS) {
+    if (multiplierCount >= TRIGGER_RETRIGGER_MIN) {
       roundManager.addRetriggerSpins(userKey, RETRIGGER_AWARD);
       freeSpinsAwarded = RETRIGGER_AWARD;
     }
   } else if (
-    multiplierCount >= TRIGGER_MIN_MULTIPLIERS &&
+    multiplierCount >= TRIGGER_NATURAL_MIN &&
     !roundManager.hasActiveBonusSession(userKey)
   ) {
     roundManager.createBonusSession(userKey, {
@@ -142,6 +145,22 @@ async function executeSpin(userId, betAmountInput) {
 
   const liveSession = roundManager.getBonusSession(userKey);
 
+  // --- jackpot round (server-authoritative) ---
+  let jackpotGame = null;
+  if (jackpotService.isJackpotTriggered(spin.finalMatrix)) {
+    try {
+      jackpotGame = await jackpotService.createJackpotRound({
+        spinId: round.roundId,
+        userId: userKey,
+      });
+    } catch (err) {
+      // Non-fatal — log and continue without jackpot data rather than
+      // failing the whole spin. The round still settles normally.
+      const logger = (() => { try { return require("../../utils/logger"); } catch { return console; } })();
+      logger.error?.("jackpot round creation failed", { err: err?.message, userId: userKey });
+    }
+  }
+
   return {
     roundId: round.roundId,
     roundHash: round.roundHash,
@@ -164,6 +183,7 @@ async function executeSpin(userId, betAmountInput) {
     freeSpinsRemaining: liveSession?.freeSpinsRemaining ?? 0,
     bonusTotalWon: isFreeSpin ? bonusTotalWon : 0,
     balance: roundMoney(balanceAfter),
+    jackpotGame,        // null when no jackpot triggered; JackpotGameData otherwise
   };
 }
 
@@ -230,9 +250,45 @@ async function getActiveSession(userId) {
   };
 }
 
+/**
+ * Settle a Jackpot Round after the scratch-card sequence is complete.
+ * Idempotent — safe to call on retry / reconnect.
+ */
+async function executeJackpotSettle(userId, roundId) {
+  if (!roundId || typeof roundId !== "string") {
+    throw new ApiError("roundId is required", 400);
+  }
+  return settleJackpotRound(roundId, String(userId));
+}
+
+/**
+ * Recover an in-progress Jackpot Round (reconnect / crash).
+ * Returns null when no active round exists for this player+roundId.
+ */
+async function recoverJackpot(userId, roundId) {
+  if (!roundId || typeof roundId !== "string") {
+    throw new ApiError("roundId is required", 400);
+  }
+  const data = await jackpotService.recoverJackpotRound(roundId, String(userId));
+  return data;
+}
+
+/**
+ * Mark all cards revealed (called after client finishes animation).
+ */
+async function markJackpotRevealed(userId, roundId) {
+  if (!roundId || typeof roundId !== "string") {
+    throw new ApiError("roundId is required", 400);
+  }
+  return jackpotService.markJackpotRevealed(roundId, String(userId));
+}
+
 module.exports = {
   executeSpin,
   executeBuyBonus,
   getActiveSession,
   validateBet,
+  executeJackpotSettle,
+  recoverJackpot,
+  markJackpotRevealed,
 };

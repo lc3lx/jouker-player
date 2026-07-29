@@ -38,7 +38,7 @@ const MAX_TUMBLES = 12;
 
 // Bet limits (total bet, in app coins — same economy as the other mini-games)
 const BET_MIN = 10000;
-const BET_MAX = 40000000;
+const BET_MAX = 1000000000;
 
 // Ante ("double chance"): +25% stake for a higher free-spins trigger rate.
 // RTP is stake-invariant (the 1.25× cost cancels in the win/bet ratio), so a

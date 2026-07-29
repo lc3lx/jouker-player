@@ -38,7 +38,7 @@ const { recordSpinAnalytics } = require("../../games/dice/kingArthAnalytics");
 // King Arth (Zeus) uses the shared app-coin economy, same as the other
 // mini-games (Poseidon/Golden Tree): min bet 10,000 coins.
 const DICE_MIN_BET = 10000;
-const DICE_MAX_BET = 40000000;
+const DICE_MAX_BET = 1000000000;
 const BET_EPS = 1e-4;
 
 function sanitizeVolatility(raw) {

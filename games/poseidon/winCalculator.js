@@ -22,7 +22,8 @@ function findWins(matrix) {
   for (let col = 0; col < REEL_COUNT; col += 1) {
     for (let row = 0; row < ROW_COUNT; row += 1) {
       const cell = matrix[col][row];
-      if (isMultiplier(cell)) continue;
+      // Multiplier plaques and jackpot scatters don't form winning pay lines.
+      if (isMultiplier(cell) || cell === "jackpot") continue;
       let list = positionsBySymbol.get(cell);
       if (!list) positionsBySymbol.set(cell, (list = []));
       list.push([col, row]);
@@ -44,6 +45,17 @@ function findWins(matrix) {
   return wins;
 }
 
+/** Jackpot scatter symbols visible on the final matrix: [{ col, row }]. */
+function collectJackpotSymbols(matrix) {
+  const found = [];
+  for (let col = 0; col < REEL_COUNT; col += 1) {
+    for (let row = 0; row < ROW_COUNT; row += 1) {
+      if (matrix[col][row] === "jackpot") found.push({ col, row });
+    }
+  }
+  return found;
+}
+
 /** Multiplier plaques visible on screen: [{ col, row, value }]. */
 function collectMultipliers(matrix) {
   const found = [];
@@ -59,4 +71,5 @@ function collectMultipliers(matrix) {
 module.exports = {
   findWins,
   collectMultipliers,
+  collectJackpotSymbols,
 };

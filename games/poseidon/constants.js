@@ -7,7 +7,8 @@
  * plaques (x2 → x1000) stay on screen for the whole tumbling sequence; when
  * the sequence ends with a win, their sum multiplies it — in the base game
  * AND in free spins (per-spin, no accumulation). Plaques are also the
- * free-spins trigger: 3+ on screen award free spins.
+ * free-spins trigger: 4+ plaques in base game award free spins; during free
+ * spins (natural or bought) 3+ plaques add more spins.
  *
  * RTP was originally tuned for MIN_MATCH=8; lowering to 7 raises hit rate.
  * Re-tune with the seeded sim in test/poseidon.test.js if needed.
@@ -17,11 +18,15 @@ const REEL_COUNT = 6;
 const ROW_COUNT = 5;
 
 const BET_MIN = 10000;
-const BET_MAX = 40000000;
+const BET_MAX = 1000000000;
 const MAX_WIN_MULTIPLIER = 5000;
 
-/** 3+ multiplier plaques on the final screen trigger free spins. */
-const TRIGGER_MIN_MULTIPLIERS = 3;
+/** 4+ multiplier plaques in the base game trigger free spins. */
+const TRIGGER_NATURAL_MIN = 4;
+/** 3+ plaques during free spins (incl. bought bonus) award +5 spins. */
+const TRIGGER_RETRIGGER_MIN = 3;
+/** @deprecated use TRIGGER_NATURAL_MIN / TRIGGER_RETRIGGER_MIN */
+const TRIGGER_MIN_MULTIPLIERS = TRIGGER_RETRIGGER_MIN;
 const FREE_SPINS_NATURAL = 5;
 const FREE_SPINS_BOUGHT = 10;
 const RETRIGGER_AWARD = 5;
@@ -131,6 +136,12 @@ const PAYTABLE = Object.freeze({
  * strips) — RTP is enforced by simulation in test/poseidon.test.js.
  * Letters are flattened so 7-of-a-kind stays exciting but not constant.
  */
+/**
+ * "jackpot" is a scatter symbol — 3+ on the final matrix trigger a jackpot
+ * round. Weight sourced from jackpotConstants.JACKPOT_BASE_WEIGHT (0.25).
+ * Kept here inline to avoid a circular dependency between constants.js and
+ * the jackpot sub-module.
+ */
 const BASE_WEIGHTS = Object.freeze([
   [SYMBOLS.S, 10],
   [SYMBOLS.N, 10],
@@ -142,6 +153,7 @@ const BASE_WEIGHTS = Object.freeze([
   [SYMBOLS.CROWN, 5.5],
   [SYMBOLS.PEARL, 5],
   ["mult", 0.35],
+  ["jackpot", 0.25],
 ]);
 
 /** Free spins: plaques rain more often but capped for the higher base pays. */
@@ -156,6 +168,7 @@ const BONUS_WEIGHTS = Object.freeze([
   [SYMBOLS.CROWN, 5.5],
   [SYMBOLS.PEARL, 5],
   ["mult", 1.2],
+  ["jackpot", 0.25],
 ]);
 
 /** Win presentation tiers in bet multiples (client shows matching banner). */
@@ -203,6 +216,8 @@ module.exports = {
   BET_MIN,
   BET_MAX,
   MAX_WIN_MULTIPLIER,
+  TRIGGER_NATURAL_MIN,
+  TRIGGER_RETRIGGER_MIN,
   TRIGGER_MIN_MULTIPLIERS,
   FREE_SPINS_NATURAL,
   FREE_SPINS_BOUGHT,
