@@ -1,10 +1,5 @@
 const asyncHandler = require("express-async-handler");
 const poseidonService = require("../games/poseidon/poseidonService");
-const {
-  executeJackpotSettle,
-  recoverJackpot,
-  executeJackpotReveal,
-} = poseidonService;
 
 function requireUserId(req, res, next) {
   const userId =
@@ -42,19 +37,28 @@ exports.session = asyncHandler(async (req, res) => {
 
 exports.jackpotSettle = asyncHandler(async (req, res) => {
   const { roundId } = req.body;
-  const data = await poseidonService.executeJackpotSettle(req.poseidonUserId, roundId);
+  const data = await poseidonService.executeJackpotSettle(
+    req.poseidonUserId,
+    roundId,
+  );
   res.status(200).json({ status: "success", data });
 });
 
 exports.jackpotRecover = asyncHandler(async (req, res) => {
   const { roundId } = req.query;
-  const data = await poseidonService.recoverJackpot(req.poseidonUserId, roundId);
+  const data = await poseidonService.recoverJackpot(
+    req.poseidonUserId,
+    roundId,
+  );
   if (!data) {
-    return res.status(404).json({ status: "fail", message: "Jackpot round not found" });
+    return res
+      .status(404)
+      .json({ status: "fail", message: "Jackpot round not found" });
   }
   res.status(200).json({ status: "success", data });
 });
 
+/** Reveal one card: { roundId, cardIndex } → { card, matched, gameOver, ... } */
 exports.jackpotReveal = asyncHandler(async (req, res) => {
   const { roundId, cardIndex } = req.body;
   const data = await poseidonService.executeJackpotReveal(
@@ -65,7 +69,7 @@ exports.jackpotReveal = asyncHandler(async (req, res) => {
   res.status(200).json({ status: "success", data });
 });
 
-// Older route files required `jackpotRevealed` — same handler.
+// Alias used by older requires
 exports.jackpotRevealed = exports.jackpotReveal;
 
 exports.requireUserId = requireUserId;

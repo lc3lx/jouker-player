@@ -11,15 +11,14 @@ const {
 
 const router = express.Router();
 
-router.get("/session",            requireUserId, session);
-router.post("/spin",              requireUserId, spin);
-router.post("/buy-bonus",         requireUserId, buyBonus);
+router.get("/session", requireUserId, session);
+router.post("/spin", requireUserId, spin);
+router.post("/buy-bonus", requireUserId, buyBonus);
 
-// Jackpot round endpoints
-router.get("/jackpot",            requireUserId, jackpotRecover);   // ?roundId=...
-router.post("/jackpot/reveal",    requireUserId, jackpotReveal);    // { roundId, cardIndex }
-// Alias: older deploys used /revealed — keep both so clients don't break mid-rollout
-router.post("/jackpot/revealed",  requireUserId, jackpotReveal);
-router.post("/jackpot/settle",    requireUserId, jackpotSettle);    // { roundId }
+// Jackpot — match-3: POST body { roundId, cardIndex } → one card face
+router.get("/jackpot", requireUserId, jackpotRecover);
+router.post("/jackpot/revealed", requireUserId, jackpotReveal);
+router.post("/jackpot/reveal", requireUserId, jackpotReveal);
+router.post("/jackpot/settle", requireUserId, jackpotSettle);
 
 module.exports = router;
