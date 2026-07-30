@@ -5,7 +5,7 @@ const {
   session,
   jackpotSettle,
   jackpotRecover,
-  jackpotRevealed,
+  jackpotReveal,
   requireUserId,
 } = require("../controllers/poseidonController");
 
@@ -17,7 +17,7 @@ router.post("/buy-bonus",         requireUserId, buyBonus);
 
 // Jackpot round endpoints
 router.get("/jackpot",            requireUserId, jackpotRecover);   // ?roundId=...
-router.post("/jackpot/revealed",  requireUserId, jackpotRevealed);  // { roundId }
+router.post("/jackpot/reveal",    requireUserId, jackpotReveal);    // { roundId, cardIndex }
 router.post("/jackpot/settle",    requireUserId, jackpotSettle);    // { roundId }
 
 module.exports = router;

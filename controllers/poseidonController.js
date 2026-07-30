@@ -3,7 +3,7 @@ const poseidonService = require("../games/poseidon/poseidonService");
 const {
   executeJackpotSettle,
   recoverJackpot,
-  markJackpotRevealed,
+  executeJackpotReveal,
 } = poseidonService;
 
 function requireUserId(req, res, next) {
@@ -55,9 +55,13 @@ exports.jackpotRecover = asyncHandler(async (req, res) => {
   res.status(200).json({ status: "success", data });
 });
 
-exports.jackpotRevealed = asyncHandler(async (req, res) => {
-  const { roundId } = req.body;
-  const data = await poseidonService.markJackpotRevealed(req.poseidonUserId, roundId);
+exports.jackpotReveal = asyncHandler(async (req, res) => {
+  const { roundId, cardIndex } = req.body;
+  const data = await poseidonService.executeJackpotReveal(
+    req.poseidonUserId,
+    roundId,
+    cardIndex,
+  );
   res.status(200).json({ status: "success", data });
 });
 

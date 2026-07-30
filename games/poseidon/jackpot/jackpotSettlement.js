@@ -97,6 +97,11 @@ async function settleJackpotRound(roundId, userId) {
     };
   }
 
+  if (round.status !== JACKPOT_STATUS.REVEALED || round.prizeType === "pending") {
+    const ApiError = require("../../../utils/apiError");
+    throw new ApiError("Jackpot round is not ready to settle — reveal cards first", 409);
+  }
+
   // ── credit wallet (prize=0 is a no-op in creditBalance) ───────────────────
   const wallet = require("../poseidonWalletAdapter");
   const prizeAmount = round.prizeAmount; // loaded from DB — never from client

@@ -274,13 +274,27 @@ async function recoverJackpot(userId, roundId) {
 }
 
 /**
- * Mark all cards revealed (called after client finishes animation).
+ * Reveal one scratch card (server validates + returns the face).
  */
-async function markJackpotRevealed(userId, roundId) {
+async function executeJackpotReveal(userId, roundId, cardIndex) {
   if (!roundId || typeof roundId !== "string") {
     throw new ApiError("roundId is required", 400);
   }
-  return jackpotService.markJackpotRevealed(roundId, String(userId));
+  const idx = Number(cardIndex);
+  if (!Number.isInteger(idx) || idx < 0 || idx > 8) {
+    throw new ApiError("cardIndex must be 0..8", 400);
+  }
+  try {
+    return await jackpotService.revealJackpotCard(roundId, String(userId), idx);
+  } catch (err) {
+    if (err.message?.includes("not found")) {
+      throw new ApiError(err.message, 404);
+    }
+    if (err.message?.includes("mismatch")) {
+      throw new ApiError(err.message, 403);
+    }
+    throw err;
+  }
 }
 
 module.exports = {
@@ -290,5 +304,5 @@ module.exports = {
   validateBet,
   executeJackpotSettle,
   recoverJackpot,
-  markJackpotRevealed,
+  executeJackpotReveal,
 };

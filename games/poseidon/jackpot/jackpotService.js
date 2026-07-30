@@ -1,76 +1,93 @@
 /**
  * jackpotService — creates and persists Jackpot Rounds.
  *
- * Responsibilities:
- *   - Detect if a spin result triggers a jackpot (≥ JACKPOT_MIN_SYMBOLS)
- *   - Pick prize server-side
- *   - Generate card layout server-side
- *   - Persist the round to MongoDB (or in-memory stub for tests)
- *   - Return JackpotGameData for inclusion in the spin response
- *
- * This module does NOT touch the wallet. Settlement is in jackpotSettlement.js.
+ * Match-3 flow:
+ *   1. createJackpotRound → 9 cards (3× each tier), prizes hidden from client
+ *   2. revealJackpotCard  → flip one card; first triple wins
+ *   3. settle (jackpotSettlement) → wallet credit
  */
 
 const crypto = require("crypto");
 const {
   JACKPOT_MIN_SYMBOLS,
   JACKPOT_FORCE_EVERY_SPIN,
-  JACKPOT_PRIZES,
-  JACKPOT_PRIZES_QA,
   JACKPOT_STATUS,
   JACKPOT_ROUND_TTL_MS,
   JACKPOT_SYMBOL,
 } = require("./jackpotConstants");
-const { pickWeightedPrize, buildCardLayout } = require("./jackpotSelector");
+const {
+  buildMatchThreeLayout,
+  resolveFirstTriple,
+} = require("./jackpotSelector");
 
 const MODE =
   process.env.POSEIDON_WALLET_MODE ||
   (process.env.NODE_ENV === "test" ? "stub" : "mongo");
 
-/** In-memory store for test/stub mode. */
 const _stubRounds = new Map();
 
-// ─── persistence helpers ────────────────────────────────────────────────────
+function _cloneRound(round) {
+  return JSON.parse(JSON.stringify(round));
+}
 
 async function _persistRound(round) {
-  if (MODE !== "mongo") {
-    _stubRounds.set(round.roundId, { ...round });
-    return;
+  // Always keep an in-process copy so reveal works even if Mongo is slow/down.
+  _stubRounds.set(round.roundId, _cloneRound(round));
+
+  if (MODE !== "mongo") return;
+
+  try {
+    const PoseidonJackpotRound = require("../../../models/poseidonJackpotRoundModel");
+    await PoseidonJackpotRound.create(round);
+  } catch (err) {
+    // Non-fatal: in-memory round remains available for reveal/settle in this process.
+    const logger = (() => {
+      try {
+        return require("../../../utils/logger");
+      } catch {
+        return console;
+      }
+    })();
+    logger.error?.("jackpot mongo persist failed", { err: err?.message, roundId: round.roundId });
   }
-  const PoseidonJackpotRound = require("../../../models/poseidonJackpotRoundModel");
-  await PoseidonJackpotRound.create(round);
 }
 
 async function _loadRound(roundId) {
-  if (MODE !== "mongo") {
-    return _stubRounds.get(roundId) ?? null;
+  if (MODE === "mongo") {
+    try {
+      const PoseidonJackpotRound = require("../../../models/poseidonJackpotRoundModel");
+      const doc = await PoseidonJackpotRound.findOne({ roundId });
+      if (doc) {
+        const obj = doc.toObject();
+        _stubRounds.set(roundId, obj);
+        return obj;
+      }
+    } catch (_) {
+      // Fall through to in-memory copy.
+    }
   }
-  const PoseidonJackpotRound = require("../../../models/poseidonJackpotRoundModel");
-  const doc = await PoseidonJackpotRound.findOne({ roundId });
-  return doc ? doc.toObject() : null;
+  const mem = _stubRounds.get(roundId);
+  return mem ? { ...mem, cards: [...(mem.cards ?? [])], revealedCards: [...(mem.revealedCards ?? [])] } : null;
 }
 
 async function _updateRound(roundId, patch) {
-  if (MODE !== "mongo") {
-    const existing = _stubRounds.get(roundId);
-    if (existing) {
-      const updated = { ...existing, ...patch };
-      _stubRounds.set(roundId, updated);
-    }
-    return;
+  const existing = _stubRounds.get(roundId);
+  if (existing) {
+    const next = {
+      ...existing,
+      ...patch,
+      cards: patch.cards ?? existing.cards,
+      revealedCards: patch.revealedCards ?? existing.revealedCards,
+    };
+    _stubRounds.set(roundId, next);
   }
+
+  if (MODE !== "mongo") return;
+
   const PoseidonJackpotRound = require("../../../models/poseidonJackpotRoundModel");
   await PoseidonJackpotRound.findOneAndUpdate({ roundId }, { $set: patch });
 }
 
-// ─── public API ─────────────────────────────────────────────────────────────
-
-/**
- * Count jackpot scatter symbols on the final matrix.
- *
- * @param {string[][]} finalMatrix  — columns × rows
- * @returns {number}
- */
 function countJackpotSymbols(finalMatrix) {
   let count = 0;
   for (const col of finalMatrix) {
@@ -81,41 +98,22 @@ function countJackpotSymbols(finalMatrix) {
   return count;
 }
 
-/**
- * Should this spin result trigger a jackpot round?
- *
- * @param {string[][]} finalMatrix
- * @returns {boolean}
- */
 function isJackpotTriggered(finalMatrix) {
-  // TEMP QA: open a Jackpot Round on every spin while evaluating UX / settlement.
-  // Disabled under NODE_ENV=test so unit tests keep natural probabilities.
   if (JACKPOT_FORCE_EVERY_SPIN && process.env.NODE_ENV !== "test") return true;
   return countJackpotSymbols(finalMatrix) >= JACKPOT_MIN_SYMBOLS;
 }
 
-/**
- * Create a Jackpot Round for a triggered spin.
- *
- * @param {{spinId:string, userId:string}} opts
- * @param {()=>number} [rng]  — injectable for testing
- * @returns {Promise<object>}  JackpotGameData shape
- */
-async function createJackpotRound({ spinId, userId }, rng) {
+async function createJackpotRound({ spinId, userId }) {
   const roundId = crypto.randomUUID();
-  const forceQa =
-    JACKPOT_FORCE_EVERY_SPIN && process.env.NODE_ENV !== "test";
-  const prizeTable = forceQa ? JACKPOT_PRIZES_QA : JACKPOT_PRIZES;
-  const prize = pickWeightedPrize(prizeTable, rng);
-  const cards = buildCardLayout(prize, rng);
+  const cards = buildMatchThreeLayout();
 
   const now = Date.now();
   const round = {
     roundId,
     spinId,
     userId: String(userId),
-    prizeType: prize.type,
-    prizeAmount: prize.amount,
+    prizeType: "pending",
+    prizeAmount: 0,
     cards,
     revealedCards: [],
     status: JACKPOT_STATUS.PENDING,
@@ -127,17 +125,9 @@ async function createJackpotRound({ spinId, userId }, rng) {
   };
 
   await _persistRound(round);
-
   return _toGameData(round);
 }
 
-/**
- * Recover an existing Jackpot Round by roundId (reconnect / crash recovery).
- *
- * @param {string} roundId
- * @param {string} userId   — must match the stored userId
- * @returns {Promise<object|null>}  JackpotGameData or null if not found/expired
- */
 async function recoverJackpotRound(roundId, userId) {
   const round = await _loadRound(roundId);
   if (!round) return null;
@@ -147,52 +137,106 @@ async function recoverJackpotRound(roundId, userId) {
 }
 
 /**
- * Mark all cards as revealed (client has completed the scratch sequence).
- * Transitions status from pending/scratching → revealed.
- *
- * @param {string} roundId
- * @param {string} userId
- * @returns {Promise<object>}  updated JackpotGameData
+ * Reveal a single card. Returns the card face + whether a triple was matched.
  */
-async function markJackpotRevealed(roundId, userId) {
+async function revealJackpotCard(roundId, userId, cardIndex) {
   const round = await _loadRound(roundId);
   if (!round) throw new Error(`Jackpot round not found: ${roundId}`);
   if (round.userId !== String(userId)) throw new Error("Round user mismatch");
-  if (round.status === JACKPOT_STATUS.SETTLED) return _toGameData(round);
-  if (round.status === JACKPOT_STATUS.EXPIRED) throw new Error("Jackpot round expired");
+  if (round.status === JACKPOT_STATUS.SETTLED) {
+    return _buildRevealResponse(round, cardIndex, true);
+  }
+  if (round.status === JACKPOT_STATUS.EXPIRED) {
+    throw new Error("Jackpot round expired");
+  }
 
-  const allIndices = round.cards.map((c) => c.index);
+  const idx = Number(cardIndex);
+  if (!Number.isInteger(idx) || idx < 0 || idx >= round.cards.length) {
+    throw new Error("Invalid card index");
+  }
+
+  const revealed = [...(round.revealedCards ?? [])];
+  if (revealed.includes(idx)) {
+    const card = round.cards.find((c) => c.index === idx);
+    return {
+      card: { index: idx, prize: card.prize, amount: card.amount },
+      matched: round.prizeType !== "pending",
+      prizeType: round.prizeType === "pending" ? null : round.prizeType,
+      prizeAmount: round.prizeAmount,
+      gameOver: round.status === JACKPOT_STATUS.REVEALED,
+    };
+  }
+
+  revealed.push(idx);
+  const card = round.cards.find((c) => c.index === idx);
+  const triple = resolveFirstTriple(round.cards, revealed);
+
   const patch = {
-    status: JACKPOT_STATUS.REVEALED,
-    revealedCards: allIndices,
-    revealedAt: new Date(),
+    revealedCards: revealed,
+    status: triple ? JACKPOT_STATUS.REVEALED : JACKPOT_STATUS.SCRATCHING,
   };
+
+  if (triple) {
+    patch.prizeType = triple.type;
+    patch.prizeAmount = triple.amount;
+    patch.revealedAt = new Date();
+  }
+
   await _updateRound(roundId, patch);
-  return _toGameData({ ...round, ...patch });
+  const updated = { ...round, ...patch };
+
+  return {
+    card: { index: idx, prize: card.prize, amount: card.amount },
+    matched: !!triple,
+    prizeType: triple?.type ?? null,
+    prizeAmount: triple?.amount ?? 0,
+    gameOver: !!triple,
+    counts: _countRevealed(updated.cards, revealed),
+  };
 }
 
-/**
- * Convert a stored round document into the client-facing JackpotGameData.
- * The card layout is always sent in full — the client cannot determine the
- * prize from this alone (prize is embedded, cards reveal it after animation).
- */
+function _countRevealed(cards, revealedCards) {
+  const counts = { super10m: 0, mega50m: 0, grand100m: 0 };
+  for (const idx of revealedCards) {
+    const card = cards.find((c) => c.index === idx);
+    if (card && counts[card.prize] !== undefined) {
+      counts[card.prize] += 1;
+    }
+  }
+  return counts;
+}
+
+function _buildRevealResponse(round, cardIndex, alreadySettled) {
+  const card = round.cards.find((c) => c.index === cardIndex);
+  return {
+    card: card
+      ? { index: card.index, prize: card.prize, amount: card.amount }
+      : null,
+    matched: round.prizeType !== "pending",
+    prizeType: round.prizeType === "pending" ? null : round.prizeType,
+    prizeAmount: round.prizeAmount,
+    gameOver: round.status === JACKPOT_STATUS.REVEALED || alreadySettled,
+  };
+}
+
+/** Client-facing payload — unrevealed card prizes are never sent. */
 function _toGameData(round) {
+  const revealedSet = new Set(round.revealedCards ?? []);
   return {
     roundId: round.roundId,
     spinId: round.spinId,
-    prizeType: round.prizeType,
-    prizeAmount: round.prizeAmount,
-    cards: round.cards.map((c) => ({
-      index: c.index,
-      prize: c.prize,
-      amount: c.amount,
-    })),
+    prizeType: round.prizeType === "pending" ? null : round.prizeType,
+    prizeAmount: round.prizeAmount ?? 0,
+    cards: round.cards.map((c) => {
+      if (revealedSet.has(c.index)) {
+        return { index: c.index, prize: c.prize, amount: c.amount };
+      }
+      return { index: c.index };
+    }),
     revealedCards: round.revealedCards ?? [],
     status: round.status,
   };
 }
-
-// ─── test helpers ────────────────────────────────────────────────────────────
 
 function _clearStubForTests() {
   _stubRounds.clear();
@@ -207,7 +251,7 @@ module.exports = {
   isJackpotTriggered,
   createJackpotRound,
   recoverJackpotRound,
-  markJackpotRevealed,
+  revealJackpotCard,
   _clearStubForTests,
   _getStubRounds,
 };
