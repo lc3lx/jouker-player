@@ -305,4 +305,6 @@ module.exports = {
   executeJackpotSettle,
   recoverJackpot,
   executeJackpotReveal,
+  // Back-compat for older controllers that still call markJackpotRevealed
+  markJackpotRevealed: executeJackpotReveal,
 };

@@ -65,4 +65,7 @@ exports.jackpotReveal = asyncHandler(async (req, res) => {
   res.status(200).json({ status: "success", data });
 });
 
+// Older route files required `jackpotRevealed` — same handler.
+exports.jackpotRevealed = exports.jackpotReveal;
+
 exports.requireUserId = requireUserId;

@@ -1,26 +1,11 @@
 /**
  * Poseidon Jackpot — constants.
  *
- * Two distinct probability layers:
- *   A) JACKPOT_SYMBOL_TRIGGER — controlled by adding the symbol to the reel
- *      weight tables (spinEngine). Three or more jackpot symbols on the final
- *      screen trigger a Jackpot Round.
+ * Trigger: 3+ "jackpot" symbols on the final matrix open a Jackpot Round.
  *
- *   B) JACKPOT_PRIZE_DISTRIBUTION — weighted selection AFTER a trigger has
- *      fired. Most rounds award "no_win" so the expected value stays bounded.
- *
- * Conditional EV contribution (approximation, base-game only):
- *   P(trigger) ≈ 0.0010  (tune via JACKPOT_WEIGHT in reel tables)
- *   E[prize | trigger]:
- *     no_win    300/400 = 0.750 → 0
- *     super     60/400  = 0.150 → 1,500,000
- *     mega      30/400  = 0.075 → 3,750,000
- *     grand     10/400  = 0.025 → 2,500,000
- *   E[prize | trigger] ≈ 7,750,000 coins
- *   Jackpot RTP contribution ≈ P(trigger) × E[prize] / avg_bet
- *     = 0.001 × 7,750,000 / 10,000  ≈ +0.775 pp
- *   (Total game RTP already runs >100% in the current paytable; jackpot adds
- *    ~0.77 pp. Review with the full RTP sim before enabling on production.)
+ * Prize (match-3): the board is always 3× super10m + 3× mega50m + 3× grand100m.
+ * The player reveals cards one-by-one; the first type to reach 3 matches wins
+ * that tier's amount. There is no predetermined prize and no "no_win" filler.
  */
 
 /** Cell id emitted by the spin engine for the jackpot scatter symbol. */
