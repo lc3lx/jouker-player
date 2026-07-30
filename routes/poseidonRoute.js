@@ -18,6 +18,8 @@ router.post("/buy-bonus",         requireUserId, buyBonus);
 // Jackpot round endpoints
 router.get("/jackpot",            requireUserId, jackpotRecover);   // ?roundId=...
 router.post("/jackpot/reveal",    requireUserId, jackpotReveal);    // { roundId, cardIndex }
+// Alias: older deploys used /revealed — keep both so clients don't break mid-rollout
+router.post("/jackpot/revealed",  requireUserId, jackpotReveal);
 router.post("/jackpot/settle",    requireUserId, jackpotSettle);    // { roundId }
 
 module.exports = router;
