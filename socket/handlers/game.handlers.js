@@ -1099,7 +1099,7 @@ function registerGameHandlers(nsp, jwtVerify) {
         await kingArthRoundState.startFreeSpinSession(userId, tableId, {
           lockedBaseBet: bet,
           lockedDoubleChance: false,
-          spins: DiceEngine.FREE_SPINS_AWARD,
+          spins: DiceEngine.FREE_SPINS_BOUGHT,
           roundCap: DiceEngine.MAX_WIN_MULTIPLIER * stake,
           initialWin: 0,
         });
@@ -1139,7 +1139,7 @@ function registerGameHandlers(nsp, jwtVerify) {
           cost,
           betPerSpin: bet,
           freeSpinsRemaining,
-          freeSpinsAwarded: DiceEngine.FREE_SPINS_AWARD,
+          freeSpinsAwarded: DiceEngine.FREE_SPINS_BOUGHT,
           balance: wallet.balance,
           playId: String(play._id),
         });
