@@ -110,8 +110,10 @@ async function settleJackpotRound(roundId, userId) {
   const settlementId = crypto.randomUUID();
 
   if (prizeAmount > 0) {
+    const source =
+      round.game === "king-arth" ? "king_arth_jackpot" : "poseidon_jackpot";
     const result = await wallet.creditBalance(userId, prizeAmount, {
-      source: "poseidon_jackpot",
+      source,
       roundId,
       settlementId,
       prizeType: round.prizeType,

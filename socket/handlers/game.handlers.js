@@ -34,6 +34,7 @@ const kingArthRoundState = require("../../games/dice/kingArthRoundState");
 const kingArthSeedRotation = require("../../games/dice/kingArthSeedRotation");
 const { recordSpin, recordBigWin } = require("../../games/dice/kingArthRtp");
 const { recordSpinAnalytics } = require("../../games/dice/kingArthAnalytics");
+const kingArthJackpot = require("../../games/dice/kingArthJackpot");
 
 // King Arth (Zeus) uses the shared app-coin economy, same as the other
 // mini-games (Poseidon/Golden Tree): min bet 10,000 coins.
@@ -1007,6 +1008,26 @@ function registerGameHandlers(nsp, jwtVerify) {
           fairness.disclosedServerSeedHash = seedPack.revealed.serverSeedHash;
         }
 
+        let jackpotGame = null;
+        if (outcome.jackpotTriggered) {
+          try {
+            jackpotGame = await kingArthJackpot.createRoundForSpin({
+              spinId: String(play._id),
+              userId,
+            });
+          } catch (err) {
+            // Non-fatal — spin result still returns without jackpot.
+            try {
+              require("../../utils/logger").error?.("king-arth jackpot create failed", {
+                err: err?.message,
+                userId,
+              });
+            } catch (_) {
+              /* ignore */
+            }
+          }
+        }
+
         socket.emit("dice_result", {
           ok: true,
           tableId,
@@ -1026,6 +1047,8 @@ function registerGameHandlers(nsp, jwtVerify) {
           winningCells: outcome.winningCells,
           lineWins: outcome.lineWins,
           scatterCount: outcome.scatterCount,
+          jackpotSymbolCount: outcome.jackpotSymbolCount ?? 0,
+          jackpotGame,
           winType: outcome.winType,
           cascadeSteps: outcome.cascadeSteps,
           multipliers: outcome.multipliers,

@@ -103,7 +103,7 @@ function isJackpotTriggered(finalMatrix) {
   return countJackpotSymbols(finalMatrix) >= JACKPOT_MIN_SYMBOLS;
 }
 
-async function createJackpotRound({ spinId, userId }) {
+async function createJackpotRound({ spinId, userId, game = "poseidon" }) {
   const roundId = crypto.randomUUID();
   const cards = buildMatchThreeLayout();
 
@@ -112,6 +112,7 @@ async function createJackpotRound({ spinId, userId }) {
     roundId,
     spinId,
     userId: String(userId),
+    game: game === "king-arth" ? "king-arth" : "poseidon",
     prizeType: "pending",
     prizeAmount: 0,
     cards,

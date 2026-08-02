@@ -5,6 +5,11 @@ const {
   listRevealedSeeds,
   getSessionAnalytics,
 } = require("../services/kingArthFairnessService");
+const {
+  jackpotRecover,
+  jackpotReveal,
+  jackpotSettle,
+} = require("../controllers/kingArthJackpotController");
 
 const router = express.Router();
 
@@ -22,5 +27,11 @@ router.get(
   authService.protect,
   getSessionAnalytics
 );
+
+// Jackpot match-3 (same flow as Poseidon)
+router.get("/jackpot", authService.protect, jackpotRecover);
+router.post("/jackpot/reveal", authService.protect, jackpotReveal);
+router.post("/jackpot/revealed", authService.protect, jackpotReveal);
+router.post("/jackpot/settle", authService.protect, jackpotSettle);
 
 module.exports = router;

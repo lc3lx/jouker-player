@@ -27,6 +27,14 @@ const poseidonJackpotRoundSchema = new mongoose.Schema(
     /** Player who triggered the round. */
     userId: { type: String, required: true, index: true },
 
+    /** Owning game: poseidon | king-arth (shared match-3 scratch rounds). */
+    game: {
+      type: String,
+      enum: ["poseidon", "king-arth"],
+      default: "poseidon",
+      index: true,
+    },
+
     /** Server-determined prize type: "no_win" | "super10m" | "mega50m" | "grand100m". */
     prizeType: { type: String, required: true },
 

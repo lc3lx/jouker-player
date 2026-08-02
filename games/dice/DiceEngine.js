@@ -13,7 +13,11 @@ const REGULAR_SYMBOLS = 8;
 const MULTIPLIER = 8;
 // Exact Poseidon plaque ladder and weighted face distribution.
 const MULTIPLIER_VALUES = [2, 5, 10, 20, 50, 100, 200, 500, 1000];
-const SYMBOL_COUNT = REGULAR_SYMBOLS + MULTIPLIER_VALUES.length;
+/** Scatter jackpot — 3+ on finalGrid opens the match-3 scratch round. */
+const JACKPOT = REGULAR_SYMBOLS + MULTIPLIER_VALUES.length; // 17
+const JACKPOT_WEIGHT = 0.25;
+const JACKPOT_MIN_SYMBOLS = 3;
+const SYMBOL_COUNT = JACKPOT + 1;
 const FREE_SPINS_AWARD = 5;
 const FREE_SPINS_BOUGHT = 10;
 const RETRIGGER_AWARD = 5;
@@ -55,20 +59,39 @@ const MAX_TUMBLES = 40;
 function roundMoney(n) { return Math.round(Number(n) * 100) / 100; }
 function normalizeVolatility(v) { return ["low", "medium", "high"].includes(String(v).toLowerCase()) ? String(v).toLowerCase() : "medium"; }
 function cloneGrid(grid) { return grid.map((col) => [...col]); }
-function isMultiplier(symbol) { return symbol >= MULTIPLIER && symbol < SYMBOL_COUNT; }
+function isMultiplier(symbol) {
+  return symbol >= MULTIPLIER && symbol < JACKPOT;
+}
 function multiplierValue(symbol) { return isMultiplier(symbol) ? MULTIPLIER_VALUES[symbol - MULTIPLIER] : 0; }
 function weightedIndex(rng, weights) { let r = rng() * weights.reduce((a, b) => a + b, 0); for (let i = 0; i < weights.length; i++) { r -= weights[i]; if (r < 0) return i; } return 0; }
 function pickMultiplierValue(rng, volatility, { bonus = false, bigAlready = false } = {}) {
   const weights = bigAlready ? SUPPRESSED_MULTIPLIER_WEIGHTS : bonus ? BONUS_MULTIPLIER_WEIGHTS : BASE_MULTIPLIER_WEIGHTS;
   return MULTIPLIER_VALUES[weightedIndex(rng, weights)];
 }
+function isJackpot(symbol) {
+  return symbol === JACKPOT;
+}
+
 function pickSymbol(rng, isFreeSpin, bigAlready) {
   const plaqueWeight = isFreeSpin ? 1.2 : .35;
   const regular = isFreeSpin ? FREESPIN_WEIGHTS : BASE_WEIGHTS;
-  const choice = weightedIndex(rng, [...regular, plaqueWeight]);
+  const choice = weightedIndex(rng, [...regular, plaqueWeight, JACKPOT_WEIGHT]);
   if (choice < REGULAR_SYMBOLS) return choice;
-  const value = pickMultiplierValue(rng, "medium", { bonus: isFreeSpin, bigAlready });
-  return MULTIPLIER + MULTIPLIER_VALUES.indexOf(value);
+  if (choice === REGULAR_SYMBOLS) {
+    const value = pickMultiplierValue(rng, "medium", { bonus: isFreeSpin, bigAlready });
+    return MULTIPLIER + MULTIPLIER_VALUES.indexOf(value);
+  }
+  return JACKPOT;
+}
+
+function countJackpotSymbols(grid) {
+  let count = 0;
+  for (let c = 0; c < COLS; c++) {
+    for (let r = 0; r < ROWS; r++) {
+      if (isJackpot(grid[c][r])) count++;
+    }
+  }
+  return count;
 }
 function generateGrid(rng, volatility, doubleChance = false, isFreeSpin = false) {
   const grid = []; let hasBig = false;
@@ -116,6 +139,7 @@ function spin(baseBet, options = {}) {
   const tumble = runTumbles(initialGrid, rng, { stake, volatility: normalizeVolatility(options.volatility), doubleChance: false, isFreeSpin });
   const scatterCount = multiplierCells(tumble.finalGrid).length, winCap = roundMoney(MAX_WIN_MULTIPLIER * stake);
   const totalWin = Math.min(tumble.multipliedWin, winCap);
-  return { grid: initialGrid, initialGrid, finalGrid: tumble.finalGrid, stake, baseBet: stake, doubleChance: false, isFreeSpin, freeSpinPayoutMult: 1, volatility: normalizeVolatility(options.volatility), nearMiss: false, almostBonus: !isFreeSpin && scatterCount === 3, capped: tumble.multipliedWin > winCap, maxWin: winCap, totalWin, baseWin: tumble.baseWin, winningCells: [...tumble.winningCells].map((key) => { const [col, row] = key.split(",").map(Number); return { col, row }; }), lineWins: tumble.lineWins, scatterCount, winType: classifyWinType(totalWin, stake), cascadeSteps: tumble.cascadeSteps, multipliers: { collected: tumble.collectedMultiplier, applied: tumble.appliedMultiplier, freeSpinTotal: tumble.nextFreeSpinMultiplier }, freeSpinsAwarded: !isFreeSpin && scatterCount >= 4 ? FREE_SPINS_AWARD : 0 };
+  const jackpotSymbolCount = countJackpotSymbols(tumble.finalGrid);
+  return { grid: initialGrid, initialGrid, finalGrid: tumble.finalGrid, stake, baseBet: stake, doubleChance: false, isFreeSpin, freeSpinPayoutMult: 1, volatility: normalizeVolatility(options.volatility), nearMiss: false, almostBonus: !isFreeSpin && scatterCount === 3, capped: tumble.multipliedWin > winCap, maxWin: winCap, totalWin, baseWin: tumble.baseWin, winningCells: [...tumble.winningCells].map((key) => { const [col, row] = key.split(",").map(Number); return { col, row }; }), lineWins: tumble.lineWins, scatterCount, jackpotSymbolCount, jackpotTriggered: jackpotSymbolCount >= JACKPOT_MIN_SYMBOLS, winType: classifyWinType(totalWin, stake), cascadeSteps: tumble.cascadeSteps, multipliers: { collected: tumble.collectedMultiplier, applied: tumble.appliedMultiplier, freeSpinTotal: tumble.nextFreeSpinMultiplier }, freeSpinsAwarded: !isFreeSpin && scatterCount >= 4 ? FREE_SPINS_AWARD : 0 };
 }
-module.exports = { COLS, ROWS, REGULAR_SYMBOLS, SYMBOL_COUNT, SCATTER, MULTIPLIER, GEM_SYMBOLS, FREE_SPINS_AWARD, FREE_SPINS_BOUGHT, RETRIGGER_AWARD, RETRIGGER_MIN_SCATTER, BUY_COST_MULT, MAX_WIN_MULTIPLIER, BET_MIN, BET_MAX, PAYTABLE, MULTIPLIER_VALUES, BASE_WEIGHTS, FREESPIN_WEIGHTS, MULTIPLIER_GATES, BASE_MULTIPLIER_WEIGHTS, BONUS_MULTIPLIER_WEIGHTS, SUPPRESSED_MULTIPLIER_WEIGHTS, BIG_MULTIPLIER_THRESHOLD, APPLIED_MULTIPLIER_CAP_BASE, APPLIED_MULTIPLIER_CAP_BONUS, appliedMultiplierFor, normalizeVolatility, pickMultiplierValue, symbolMultiplier, generateGrid, calculateWins, spin, classifyWinType };
+module.exports = { COLS, ROWS, REGULAR_SYMBOLS, SYMBOL_COUNT, SCATTER, MULTIPLIER, JACKPOT, JACKPOT_WEIGHT, JACKPOT_MIN_SYMBOLS, GEM_SYMBOLS, FREE_SPINS_AWARD, FREE_SPINS_BOUGHT, RETRIGGER_AWARD, RETRIGGER_MIN_SCATTER, BUY_COST_MULT, MAX_WIN_MULTIPLIER, BET_MIN, BET_MAX, PAYTABLE, MULTIPLIER_VALUES, BASE_WEIGHTS, FREESPIN_WEIGHTS, MULTIPLIER_GATES, BASE_MULTIPLIER_WEIGHTS, BONUS_MULTIPLIER_WEIGHTS, SUPPRESSED_MULTIPLIER_WEIGHTS, BIG_MULTIPLIER_THRESHOLD, APPLIED_MULTIPLIER_CAP_BASE, APPLIED_MULTIPLIER_CAP_BONUS, appliedMultiplierFor, normalizeVolatility, pickMultiplierValue, symbolMultiplier, isJackpot, countJackpotSymbols, generateGrid, calculateWins, spin, classifyWinType };

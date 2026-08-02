@@ -12,11 +12,10 @@
 const JACKPOT_SYMBOL = "jackpot";
 
 /**
- * TEMP QA FLAG — set false (or remove usage) before production.
- * When true: every spin opens a Jackpot Round and always awards a real prize
- * (no `no_win`), so Super / Mega / Grand celebrations can be evaluated quickly.
+ * QA FLAG — keep false in production.
+ * When true: every spin opens a Jackpot Round (ignores scatter count).
  */
-const JACKPOT_FORCE_EVERY_SPIN = true;
+const JACKPOT_FORCE_EVERY_SPIN = false;
 
 /**
  * Minimum jackpot scatter symbols on the FINAL matrix (post-cascade) that
