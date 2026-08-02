@@ -11,8 +11,8 @@ const COLS = 6;
 const ROWS = 5;
 const REGULAR_SYMBOLS = 8;
 const MULTIPLIER = 8;
-// These are the supplied plaque files: x2 through x1000.
-const MULTIPLIER_VALUES = [2, 10, 20, 50, 100, 200, 500, 1000];
+// Exact Poseidon plaque ladder and weighted face distribution.
+const MULTIPLIER_VALUES = [2, 5, 10, 20, 50, 100, 200, 500, 1000];
 const SYMBOL_COUNT = REGULAR_SYMBOLS + MULTIPLIER_VALUES.length;
 const FREE_SPINS_AWARD = 5;
 const FREE_SPINS_BOUGHT = 10;
@@ -35,12 +35,18 @@ const PAYTABLE = {
   0: [1, 1.15, 1.5], 1: [1, 1.15, 1.5], 2: [1, 1.15, 1.5], 3: [1, 1.15, 1.5],
   4: [1.15, 1.5, 2.2], 5: [1.3, 1.85, 2.8], 6: [1.5, 2.3, 3.5], 7: [2, 3.5, 5],
 };
-const BASE_WEIGHTS = [10, 10, 10, 10, 9, 9, 7.5, 5.5];
+// Scaled from Poseidon's non-plaque mass.  King Earth has four supplied
+// premium symbols rather than Poseidon's five, so scaling preserves the exact
+// Poseidon probability of a plaque on every base/bonus draw.
+const BASE_WEIGHTS = [
+  10.73943662, 10.73943662, 10.73943662, 10.73943662,
+  9.66549296, 9.66549296, 8.05457746, 5.90669014,
+];
 const FREESPIN_WEIGHTS = [...BASE_WEIGHTS];
-const BASE_MULTIPLIER_WEIGHTS = [55, 12, 6.5, 3.8, 2.4, 1.2, .7, .4];
-const BONUS_MULTIPLIER_WEIGHTS = [36, 14, 11, 8, 6, 4, 3, 2];
-const SUPPRESSED_MULTIPLIER_WEIGHTS = [75, 7, 1.4, .4, .15, .04, .01, .005];
-const MULTIPLIER_GATES = BASE_MULTIPLIER_WEIGHTS;
+const BASE_MULTIPLIER_WEIGHTS = [55, 18, 12, 6.5, 3.8, 2.4, 1.2, .7, .4];
+const BONUS_MULTIPLIER_WEIGHTS = [36, 16, 14, 11, 8, 6, 4, 3, 2];
+const SUPPRESSED_MULTIPLIER_WEIGHTS = [75, 16, 7, 1.4, .4, .15, .04, .01, .005];
+const MULTIPLIER_GATES = [.48, .35, .33, .32, .35, .4, .4, .35, .4];
 const BIG_MULTIPLIER_THRESHOLD = 20;
 const APPLIED_MULTIPLIER_CAP_BASE = 2;
 const APPLIED_MULTIPLIER_CAP_BONUS = 10;
