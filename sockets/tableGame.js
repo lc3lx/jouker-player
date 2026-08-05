@@ -1699,6 +1699,23 @@ class PokerTable {
     const idx = this.findSeatIndexByUser(uid);
     if (idx >= 0) {
       const seat = this.seats[idx];
+      // A permanent removal must never re-index a live multi-human hand.
+      // The safe path marks an in-hand leave pending, settles it, then syncs
+      // the idle engine from Mongo.  Keeping this guard here also protects
+      // future callers of this legacy bridge method.
+      if (
+        this.running &&
+        this.round &&
+        String(this.round) !== "idle" &&
+        this.humanSeatCount() > 1
+      ) {
+        logger.warn("poker_live_seat_remove_blocked_hand_active", {
+          tableId: this.tableId,
+          userId: uid,
+          round: this.round,
+        });
+        return false;
+      }
       if (seat.inHand && this.running && !seat.folded && !seat.allIn) {
         seat.folded = true;
         await this.broadcastState();
@@ -3201,8 +3218,6 @@ class PokerTable {
     const pauseMs = POKER_TIMINGS.SHOWDOWN_MS;
     const gapMs = Math.max(400, Math.floor(POKER_TIMINGS.SHOWDOWN_MS / 8));
     const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
-    const room = `tg:${this.tableId}`;
-
     const lastAggSeat = this.findLastAggressiveSeatIndexBeforeShowdown();
     const revealOrder = this.buildShowdownRevealOrder(
       contenders.map((c) => c.i),
@@ -3217,7 +3232,9 @@ class PokerTable {
       .filter(([idx, amount]) => amount > Math.max(0, toSafeInt(uncalledReturns.get(idx), 0)))
       .map(([idx]) => idx);
     const winnerUserIds = payoutWinnerIdxs.map((i) => String(this.seats[i]?.userId || ""));
-    this.nsp.to(room).emit("showdown_start", {
+    await this.emitToSeatedSockets("showdown_start", {
+      tableId: this.tableId,
+      handId: this.currentHandId,
       players: contenders.map(({ i, s }) => ({ userId: String(s.userId), seatIndex: i })),
       winnerUserIds,
       winnerSeatIndices: payoutWinnerIdxs,
@@ -3248,7 +3265,9 @@ class PokerTable {
       this.showdownRevealedSeats.add(seatIndex);
       const dramatic = step === total - 1;
       const cat = showdownRanks.get(seatIndex)?.name || null;
-      this.nsp.to(room).emit("reveal_card", {
+      await this.emitToSeatedSockets("reveal_card", {
+        tableId: this.tableId,
+        handId: this.currentHandId,
         userId: String(s.userId),
         seatIndex,
         cards: [String(s.hole[0] || ""), String(s.hole[1] || "")],
@@ -3322,8 +3341,23 @@ class PokerTable {
       }))
       : potsPayload;
 
+    // This is the exact post-rake contested payout used by the persisted hand
+    // record. Clients must never derive a winner amount from totalPot / winners
+    // because side pots, odd chips and rake make that value wrong.
+    const playerPayouts = new Map();
+    for (const pot of settledPotsPayload) {
+      for (const winner of pot.winners || []) {
+        const userId = String(winner.playerId || winner.userId || "");
+        const amount = toSafeInt(winner.amountWon ?? winner.amount, 0);
+        if (userId && amount > 0) {
+          playerPayouts.set(userId, (playerPayouts.get(userId) || 0) + amount);
+        }
+      }
+    }
+
     this.showdownRevealedSeats = new Set();
-    this.nsp.to(room).emit("showdown_end", {
+    await this.emitToSeatedSockets("showdown_end", {
+      tableId: this.tableId,
       handId: closingHandId,
       showdownSeq: this.showdownEndSeq,
       winnerUserIds,
@@ -3333,6 +3367,7 @@ class PokerTable {
       contestedPot: toSafeInt(this.lastHand?.contestedPot, potBeforeSettlement),
       contributions,
       pots: settledPotsPayload,
+      playerPayouts: [...playerPayouts.entries()].map(([userId, amount]) => ({ userId, amount })),
       winnerBadge,
       stateRevision: toSafeInt(this.stateRevision, 0),
     });
@@ -4110,6 +4145,22 @@ class PokerTable {
     };
   }
 
+  /**
+   * Emit a live-only table event. Spectators share the table room for delayed
+   * snapshots, so broadcasting to the room would otherwise bypass the delay
+   * and leak live showdown information.
+   */
+  async emitToSeatedSockets(event, payload) {
+    const seatedUserIds = new Set(this.seats.map((s) => String(s.userId)));
+    const sockets = await this.nsp.in(`tg:${this.tableId}`).fetchSockets();
+    for (const socket of sockets) {
+      const uid = socket.data?.userId ?? socket.userId;
+      if (uid != null && seatedUserIds.has(String(uid))) {
+        socket.emit(event, payload);
+      }
+    }
+  }
+
   async broadcastState(showdown = false) {
     // H-3: only the owner broadcasts + persists. Followers never emit table state
     // (the owner reaches every socket cluster-wide through the redis-adapter).
@@ -4877,6 +4928,14 @@ function initTableGame(io, options = {}) {
         await game.requestPlayerLeave(cmd.userId);
         break;
       }
+      case "reset-empty": {
+        const table = await Table.findById(cmd.tableId).select(
+          "seats smallBlind bigBlind minBuyIn maxBuyIn capacity status gameType"
+        );
+        await game.resetToEmptyIdle(table || { seats: [] });
+        evictTableFromRegistry(String(cmd.tableId));
+        break;
+      }
       case "resync": {
         await game.resyncTurnAfterReconnect(cmd.userId);
         if (sid) {
@@ -4911,6 +4970,10 @@ function initTableGame(io, options = {}) {
           if (delayed) {
             nsp.to(sid).emit("table_state", delayed);
             nsp.to(sid).emit("state", delayed);
+          } else {
+            const waiting = game.buildSpectatorWaitingState();
+            nsp.to(sid).emit("table_state", waiting);
+            nsp.to(sid).emit("state", waiting);
           }
         }
         break;
@@ -4994,19 +5057,29 @@ function initTableGame(io, options = {}) {
 
     async function handleJoinTable({ tableId, clientSeed }) {
       try {
-        if (!tableId) return;
+        if (!tableId) {
+          socket.emit("table_event", { type: "table_not_found" });
+          return;
+        }
         if (!await security.onEvent(socket.userId, socket.userIp, "join", 12, 60)) {
           socket.emit("invalid_move", { reason: "RATE_LIMITED" });
+          socket.emit("table_event", { type: "rate_limited", tableId: String(tableId) });
           return;
         }
         const table = await Table.findById(tableId).select("seats vacatingPlayers");
-        if (!table) return;
+        if (!table) {
+          socket.emit("table_event", { type: "table_not_found", tableId: String(tableId) });
+          return;
+        }
         const uid = String(socket.userId);
         const isSeated = table.seats.some((s) => String(s.user) === uid);
         const isVacating = (table.vacatingPlayers || []).some(
           (v) => String(v.user) === uid && new Date(v.vacateUntil).getTime() > Date.now()
         );
-        if (!isSeated && !isVacating) return;
+        if (!isSeated && !isVacating) {
+          socket.emit("table_event", { type: "not_seated", tableId: String(tableId) });
+          return;
+        }
 
         // This socket is now a SEATED player (may have been a spectator socket
         // that took a seat). Clear the spectator flag so its disconnect routes
@@ -5074,6 +5147,7 @@ function initTableGame(io, options = {}) {
           tableId,
           reason: e?.message || "unknown",
         });
+        socket.emit("table_event", { type: "join_failed", tableId: tableId ? String(tableId) : null });
       }
     }
 
@@ -5094,13 +5168,19 @@ function initTableGame(io, options = {}) {
 
     async function handleWatchTable({ tableId }) {
       try {
-        if (!tableId) return;
+        if (!tableId) {
+          socket.emit("table_event", { type: "table_not_found" });
+          return;
+        }
         if (!await security.onEvent(socket.userId, socket.userIp, "watch", 20, 60)) {
           socket.emit("table_event", { type: "rate_limited", tableId: String(tableId) });
           return;
         }
         const table = await Table.findById(tableId).select("gameType seats settings");
-        if (!table || table.gameType !== "poker") return;
+        if (!table || table.gameType !== "poker") {
+          socket.emit("table_event", { type: "table_not_found", tableId: String(tableId) });
+          return;
+        }
         const seated = table.seats.some((s) => String(s.user) === String(socket.userId));
         if (seated) {
           return handleJoinTable({ tableId });
@@ -5119,6 +5199,21 @@ function initTableGame(io, options = {}) {
         if (delayed) {
           socket.emit("table_state", delayed);
           socket.emit("state", delayed);
+        } else {
+          // A neutral roster is safe to show while the first delayed frame is
+          // still maturing. It contains no live hand information.
+          await ownerRunOrForward(
+            String(tableId),
+            { type: "watch", tableId: String(tableId), userId: socket.userId, socketId: socket.id },
+            async (game) => {
+              socket.emit("table_state", game.buildSpectatorWaitingState());
+              socket.emit("state", game.buildSpectatorWaitingState());
+              game.spectatorUserIds.add(String(socket.userId));
+              game.startSpectatorDrain();
+            }
+          );
+          socket.emit("table_event", { type: "spectating", tableId: String(tableId) });
+          return;
         }
         // Register the spectator with the OWNER so its drain + broadcasts deliver
         // ongoing delayed frames cluster-wide.
@@ -5137,6 +5232,7 @@ function initTableGame(io, options = {}) {
           tableId,
           reason: e?.message || "unknown",
         });
+        socket.emit("table_event", { type: "watch_failed", tableId: tableId ? String(tableId) : null });
       }
     }
 
@@ -5410,12 +5506,29 @@ async function resetLivePokerTableWhenEmpty(tableId) {
   const tid = String(tableId);
   if (!activeRegistry) return false;
 
-  const entry = activeRegistry.map.get(tid);
-  if (entry?.game) {
+  const resetOnOwner = async (game) => {
     const table = await Table.findById(tid).select(
       "seats smallBlind bigBlind minBuyIn maxBuyIn capacity status gameType"
     );
-    await entry.game.resetToEmptyIdle(table || { seats: [] });
+    await game.resetToEmptyIdle(table || { seats: [] });
+    evictTableFromRegistry(tid);
+  };
+
+  // The REST request may land on a follower.  Resetting that follower's
+  // registry does not stop the authoritative owner, leaving a ghost table
+  // that can continue to broadcast stale seats.  Route the reset to owner.
+  if (typeof activeRegistry.ownerRunOrForward === "function") {
+    await activeRegistry.ownerRunOrForward(
+      tid,
+      { type: "reset-empty", tableId: tid },
+      resetOnOwner
+    );
+    return true;
+  }
+
+  const entry = activeRegistry.map.get(tid);
+  if (entry?.game) {
+    await resetOnOwner(entry.game);
   } else {
     const table = await Table.findById(tid).select(
       "seats smallBlind bigBlind minBuyIn maxBuyIn capacity"

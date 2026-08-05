@@ -345,8 +345,6 @@ async function permanentLeavePokerTable({
     deviceId: deviceId || null,
   });
 
-  await getTableGameBridge().removeLiveHumanSeat(tid, uid);
-
   const afterLeave = await Table.findById(tid).select("seats gameType vacatingPlayers");
   const activeVacating = (afterLeave?.vacatingPlayers || []).filter((v) => isVacateActive(v));
   if (
@@ -356,6 +354,10 @@ async function permanentLeavePokerTable({
   ) {
     await require("./pokerTableGcService").resetPokerTableWhenEmpty(tid);
   } else {
+    // Mongo was committed above and is the only source of truth for a
+    // permanent leave.  Do not splice the live engine here: doing so can
+    // shift current/dealer/blind indexes if a stale engine still considers a
+    // hand active.  The owner performs a fresh, safe sync from Mongo instead.
     await getTableGameBridge().syncLivePokerTableAfterLeave(tid);
     require("./pokerTableGcService").markTableActivity(tid);
   }

@@ -47,6 +47,51 @@ function mkGame(overrides = {}) {
   return g;
 }
 
+test("live-only showdown events are never emitted to spectator sockets", async () => {
+  const received = { player: [], spectator: [] };
+  const sockets = [
+    {
+      data: { userId: "u1" },
+      emit(event, payload) { received.player.push({ event, payload }); },
+    },
+    {
+      data: { userId: "watcher-1" },
+      emit(event, payload) { received.spectator.push({ event, payload }); },
+    },
+  ];
+  const nsp = {
+    to() { return { emit() {} }; },
+    in() { return { async fetchSockets() { return sockets; } }; },
+  };
+  const g = new PokerTable(nsp, mkTableDoc({ seats: mkTableDoc().seats.slice(0, 2) }));
+
+  await g.emitToSeatedSockets("reveal_card", { tableId: g.tableId, cards: ["As", "Kd"] });
+
+  assert.equal(received.player.length, 1);
+  assert.equal(received.player[0].event, "reveal_card");
+  assert.equal(received.spectator.length, 0);
+});
+
+test("a permanent seat removal never reindexes a live multi-human hand", async () => {
+  const g = mkGame();
+  g.running = true;
+  g.round = "flop";
+  g.currentIndex = 2;
+  g.dealerIndex = 1;
+  for (const seat of g.seats) {
+    seat.inHand = true;
+    seat.folded = false;
+  }
+
+  const beforeUsers = g.seats.map((seat) => seat.userId);
+  const removed = await g.removeLiveHumanSeat("u2");
+
+  assert.equal(removed, false);
+  assert.deepEqual(g.seats.map((seat) => seat.userId), beforeUsers);
+  assert.equal(g.currentIndex, 2);
+  assert.equal(g.dealerIndex, 1);
+});
+
 function seatSetup(g, count = 3) {
   for (let i = 0; i < count; i++) {
     const s = g.seats[i];
