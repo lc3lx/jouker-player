@@ -15,6 +15,12 @@ pattern). No public method names, socket event names, or payload shapes were ren
 
 ## Result: PASS
 
+> Current poker policy (supersedes the older bot-takeover wording below): a
+> disconnected player gets the configured reconnect grace. On expiry the
+> engine folds them, records a durable `pendingPermanentLeaves` intent, and
+> cashes their final settled stack back to their wallet. Poker never forfeits
+> a disconnected human's chips or transfers them to a bot.
+
 | Check | Result |
 |-------|--------|
 | New/updated regression tests | **18 / 18 pass** (`table.audit-fixes.test.js` — 10; `poker.gameplay-e2e.test.js` — 3 new + 2 rewritten to match the corrected architecture) |

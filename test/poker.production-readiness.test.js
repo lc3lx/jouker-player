@@ -224,9 +224,9 @@ test("resetHandBettingState clears pot and street bets after settlement", () => 
   assert.equal(g.seats[0].invested, 0);
 });
 
-test("jackpot disabled by default does not deduct chips", async () => {
-  const prev = process.env.JACKPOT_ENABLED;
-  delete process.env.JACKPOT_ENABLED;
+test("legacy poker jackpot is disabled by default and does not deduct chips", async () => {
+  const prev = process.env.POKER_LEGACY_JACKPOT_ENABLED;
+  delete process.env.POKER_LEGACY_JACKPOT_ENABLED;
   const g = mkGame();
   seatSetup(g, 2);
   g.seats[0].inHand = true;
@@ -235,15 +235,15 @@ test("jackpot disabled by default does not deduct chips", async () => {
   const deducted = await g.applyJackpotContribution();
   assert.equal(deducted, 0);
   assert.equal(g.seats[0].chips, before);
-  if (prev != null) process.env.JACKPOT_ENABLED = prev;
+  if (prev != null) process.env.POKER_LEGACY_JACKPOT_ENABLED = prev;
 });
 
-test("jackpot enabled adjusts conservation baseline", async () => {
+test("legacy poker jackpot contribution adjusts conservation baseline", async () => {
   const Jackpot = require("../models/jackpotModel");
-  const prevEn = process.env.JACKPOT_ENABLED;
+  const prevEn = process.env.POKER_LEGACY_JACKPOT_ENABLED;
   const prevFee = process.env.JACKPOT_FEE_PER_HAND;
   const prevSingleton = Jackpot.getSingleton;
-  process.env.JACKPOT_ENABLED = "true";
+  process.env.POKER_LEGACY_JACKPOT_ENABLED = "true";
   process.env.JACKPOT_FEE_PER_HAND = "100";
   Jackpot.getSingleton = async () => ({
     contributionPerHand: 100,
@@ -267,8 +267,8 @@ test("jackpot enabled adjusts conservation baseline", async () => {
   assert.equal(audit.ok, true);
 
   Jackpot.getSingleton = prevSingleton;
-  if (prevEn != null) process.env.JACKPOT_ENABLED = prevEn;
-  else delete process.env.JACKPOT_ENABLED;
+  if (prevEn != null) process.env.POKER_LEGACY_JACKPOT_ENABLED = prevEn;
+  else delete process.env.POKER_LEGACY_JACKPOT_ENABLED;
   if (prevFee != null) process.env.JACKPOT_FEE_PER_HAND = prevFee;
   else delete process.env.JACKPOT_FEE_PER_HAND;
 });

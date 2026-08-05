@@ -1,7 +1,7 @@
 const Table = require("../models/tableModel");
 const logger = require("../utils/logger");
 const { POKER_TIMINGS } = require("../utils/poker/timings");
-const { withMongoTransaction, forfeitTableSeatLock, releaseTableSeatToBalance } = require("./walletLedgerService");
+const { withMongoTransaction, releaseTableSeatToBalance } = require("./walletLedgerService");
 const { statusAfterSeatChange } = require("./pokerTableAllocationService");
 const { seatNextFromQueue } = require("./pokerWaitingQueueService");
 const { removeSeatPresence } = require("./pokerCollusionGuard");
@@ -25,6 +25,36 @@ function findActiveVacatingEntry(table, userId) {
   const uid = String(userId);
   const list = Array.isArray(table?.vacatingPlayers) ? table.vacatingPlayers : [];
   return list.find((v) => String(v.user) === uid && isVacateActive(v)) || null;
+}
+
+function hasPendingPermanentLeave(table, userId) {
+  const uid = String(userId);
+  return (table?.pendingPermanentLeaves || []).some((entry) => String(entry.user) === uid);
+}
+
+/** Persist a voluntary in-hand leave before folding the engine seat. */
+async function markPendingPermanentLeave({ tableId, userId }) {
+  const tid = String(tableId);
+  const uid = String(userId);
+  await withMongoTransaction(async (session) => {
+    const table = await Table.findById(tid).session(session);
+    if (!table || table.gameType !== "poker") throw new Error("NOT_POKER");
+    const seated = table.seats.some((seat) => String(seat.user) === uid);
+    const vacating = (table.vacatingPlayers || []).some((seat) => String(seat.user) === uid);
+    if (!seated && !vacating) throw new Error("NOT_SEATED");
+    if (!hasPendingPermanentLeave(table, uid)) {
+      table.pendingPermanentLeaves.push({ user: userId, requestedAt: new Date() });
+      await table.save({ session });
+    }
+  });
+  return { marked: true };
+}
+
+async function clearPendingPermanentLeave({ tableId, userId }) {
+  await Table.updateOne(
+    { _id: tableId, gameType: "poker", "pendingPermanentLeaves.user": userId },
+    { $pull: { pendingPermanentLeaves: { user: userId } } }
+  );
 }
 
 async function findUserVacatingTable(userId, tier = null) {
@@ -205,12 +235,12 @@ async function finalizeVacateWithBot({ tableId, userId, chips }) {
     if (table.vacatingPlayers.length === before) return;
 
     if (seatChips > 0) {
-      await forfeitTableSeatLock({
+      await releaseTableSeatToBalance({
         session,
         userId: uid,
-        tableId: tid,
         seatChips,
-        meta: { reason: "vacate_bot_takeover" },
+        tableId: tid,
+        meta: { reason: "vacate_expired_cashout", tableNumber: table.tableNumber },
       });
     }
     await table.save({ session });
@@ -219,8 +249,9 @@ async function finalizeVacateWithBot({ tableId, userId, chips }) {
 
   if (!finalized) return { ok: false, reason: "not_vacating" };
 
-  emitTablesUpdated({ gameType: "poker", reason: "vacate_bot", tableId: tid });
-  logger.info("poker_vacate_bot_takeover", { tableId: tid, userId: uid, chips: seatChips });
+  await getTableGameBridge().syncLivePokerTableAfterLeave(tid);
+  emitTablesUpdated({ gameType: "poker", reason: "vacate_cashout", tableId: tid });
+  logger.info("poker_vacate_expired_cashout", { tableId: tid, userId: uid, chips: seatChips });
 
   return { ok: true, chips: seatChips };
 }
@@ -243,6 +274,9 @@ async function permanentLeavePokerTable({
     await withMongoTransaction(async (session) => {
       const table = await Table.findById(tid).session(session);
       if (!table || table.gameType !== "poker") throw new Error("NOT_POKER");
+      // Seat balances are persisted at hand settlement, not on each action.
+      // Returning one while a hand is live would race the pot settlement.
+      if (table.status === "playing") throw new Error("HAND_IN_PROGRESS");
       // N-1: never cash out a seat while the engine is mid-settlement for this
       // table — the two writes to table.seats[].chips must not interleave.
       if (table.activeSettlementId) throw new Error("SETTLEMENT_IN_PROGRESS");
@@ -285,6 +319,9 @@ async function permanentLeavePokerTable({
 
       if (!wasSeated) throw new Error("NOT_SEATED");
 
+      table.pendingPermanentLeaves = (table.pendingPermanentLeaves || []).filter(
+        (entry) => String(entry.user) !== uid
+      );
       table.status = statusAfterSeatChange(table, table.seats.length);
       await table.save({ session });
       await seatNextFromQueue({ session, tableId: tid });
@@ -293,7 +330,8 @@ async function permanentLeavePokerTable({
     if (
       e.message === "NOT_SEATED" ||
       e.message === "NOT_POKER" ||
-      e.message === "SETTLEMENT_IN_PROGRESS"
+      e.message === "SETTLEMENT_IN_PROGRESS" ||
+      e.message === "HAND_IN_PROGRESS"
     ) {
       return { left: false, reason: e.message };
     }
@@ -346,11 +384,16 @@ function toSafeInt(value, fallback = 0) {
  * and then cash out cleanly. If we give up, the existing disconnect/vacate
  * timer still covers the seat.
  */
+const deferredLeaveSchedules = new Map();
+
 function scheduleDeferredPermanentLeave({ tableId, userId, clientIp = null, deviceId = null }) {
   const tid = String(tableId);
   const uid = String(userId);
+  const scheduleKey = `${tid}:${uid}`;
+  if (deferredLeaveSchedules.has(scheduleKey)) return false;
+  deferredLeaveSchedules.set(scheduleKey, true);
   const delayMs = 1000;
-  const maxAttempts = 25; // ~25s; settlement is brief so this resolves fast
+  const maxAttempts = 600; // up to ten minutes for a full active hand
   let attempt = 0;
   const arm = () => {
     const t = setTimeout(() => void tick(), delayMs);
@@ -364,19 +407,43 @@ function scheduleDeferredPermanentLeave({ tableId, userId, clientIp = null, devi
         logger.info("poker_deferred_leave_completed", {
           tableId: tid, userId: uid, attempt, cashedOut: res.cashedOut,
         });
+        deferredLeaveSchedules.delete(scheduleKey);
         return;
       }
-      if (res.reason === "NOT_SEATED") return; // already gone (vacate timer / prior leave)
+      if (res.reason === "NOT_SEATED") {
+        // A concurrent successful leave/vacate won the race. Clear stale intent.
+        await clearPendingPermanentLeave({ tableId: tid, userId: uid });
+        deferredLeaveSchedules.delete(scheduleKey);
+        return;
+      }
       // SETTLEMENT_IN_PROGRESS → keep waiting.
     } catch (e) {
       logger.warn("poker_deferred_leave_error", {
         tableId: tid, userId: uid, attempt, reason: e?.message,
       });
     }
-    if (attempt < maxAttempts) arm();
-    else logger.warn("poker_deferred_leave_gave_up", { tableId: tid, userId: uid });
+    if (attempt < maxAttempts) {
+      arm();
+    } else {
+      deferredLeaveSchedules.delete(scheduleKey);
+      logger.warn("poker_deferred_leave_gave_up", { tableId: tid, userId: uid });
+    }
   };
   arm();
+  return true;
+}
+
+/** Re-arm durable deferred leaves after boot and after a successful settlement. */
+async function resumePendingPermanentLeaves({ tableId = null } = {}) {
+  const filter = { gameType: "poker", "pendingPermanentLeaves.0": { $exists: true } };
+  if (tableId != null) filter._id = tableId;
+  const tables = await Table.find(filter).select("_id pendingPermanentLeaves").lean();
+  for (const table of tables) {
+    for (const entry of table.pendingPermanentLeaves || []) {
+      if (entry?.user) scheduleDeferredPermanentLeave({ tableId: table._id, userId: entry.user });
+    }
+  }
+  return { resumed: tables.length };
 }
 
 module.exports = {
@@ -384,7 +451,10 @@ module.exports = {
   tryRestoreVacatedSeat,
   finalizeVacateWithBot,
   permanentLeavePokerTable,
+  markPendingPermanentLeave,
+  clearPendingPermanentLeave,
   scheduleDeferredPermanentLeave,
+  resumePendingPermanentLeaves,
   findUserVacatingTable,
   findActiveVacatingEntry,
   isVacateActive,

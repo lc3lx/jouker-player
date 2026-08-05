@@ -117,20 +117,13 @@ async function checkDeadGameLoops({ stuckHandGraceMs, autoRepairEnabled }) {
     });
 
     if (autoRepairEnabled) {
-      const start = Date.now();
-      try {
-        const result = await adminForceEndHandTable(tableId);
-        finding.repaired = !!result?.ok !== false;
-        finding.repairAction = "adminForceEndHandTable";
-        finding.repairResult = finding.repaired ? "success" : "failed";
-        finding.meta.repairDurationMs = Date.now() - start;
-        finding.meta.repairDetail = result;
-      } catch (e) {
-        finding.repaired = false;
-        finding.repairAction = "adminForceEndHandTable";
-        finding.repairResult = "failed";
-        finding.meta.repairError = e?.message || "unknown";
-      }
+      // A forced preflop settlement can distribute committed chips to players
+      // who never won the hand. Detection is automatic; money resolution is
+      // deliberately an audited operator decision until a deterministic refund
+      // policy is implemented for every interrupted street.
+      finding.repaired = false;
+      finding.repairAction = "manual_poker_settlement_required";
+      finding.repairResult = "not_auto_resolved";
     }
     findings.push(finding);
   }

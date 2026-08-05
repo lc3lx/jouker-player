@@ -7,6 +7,8 @@ const PLAYER_STATE = {
   ACTIVE_HAND: "ACTIVE_HAND",
   SITTING_OUT: "SITTING_OUT",
   DISCONNECTED: "DISCONNECTED",
+  /** Voluntary leave during a hand; cash-out follows the hand settlement. */
+  LEAVE_PENDING: "LEAVE_PENDING",
 };
 
 function defaultPlayerState(isHandRunning) {
@@ -24,7 +26,7 @@ function canParticipateInNextHand(seat) {
   if (!isHumanSeat(seat)) return false;
   if (toSafeInt(seat.chips, 0) <= 0) return false;
   const st = seat.playerState || PLAYER_STATE.SEATED;
-  if (st === PLAYER_STATE.SITTING_OUT) return false;
+  if (st === PLAYER_STATE.SITTING_OUT || st === PLAYER_STATE.LEAVE_PENDING) return false;
   if (st === PLAYER_STATE.WAITING) return false;
   return true;
 }
@@ -33,7 +35,7 @@ function canBeDealtIntoHand(seat) {
   if (!seat || toSafeInt(seat.chips, 0) <= 0) return false;
   if (seat.isBot) return true;
   const st = seat.playerState || PLAYER_STATE.SEATED;
-  if (st === PLAYER_STATE.SITTING_OUT) return false;
+  if (st === PLAYER_STATE.SITTING_OUT || st === PLAYER_STATE.LEAVE_PENDING) return false;
   if (st === PLAYER_STATE.WAITING) return false;
   return true;
 }

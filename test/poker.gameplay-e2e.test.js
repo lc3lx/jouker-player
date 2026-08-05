@@ -533,7 +533,7 @@ test("VACATE PIPELINE: vacatePokerSeat moves the seat to vacatingPlayers; reconn
   assert.equal(await walletLocked(uid), buyIn, "reconnect never touches the wallet lock");
 });
 
-test("VACATE PIPELINE: an expired vacate window forfeits the wallet lock instead of leaving it stuck forever", async () => {
+test("VACATE PIPELINE: an expired vacate window cashes out the lock instead of forfeiting it", async () => {
   const { tableId, users, buyIn } = await makeSeatedGame(2, 10000);
   const { vacatePokerSeat, finalizeVacateWithBot } = require("../services/pokerVacateService");
 
@@ -544,24 +544,45 @@ test("VACATE PIPELINE: an expired vacate window forfeits the wallet lock instead
   const result = await finalizeVacateWithBot({ tableId, userId: uid, chips: buyIn });
   assert.equal(result.ok, true);
   assert.equal(result.chips, buyIn);
+  const wallet = await Wallet.findOne({ user: uid }).lean();
+  assert.equal(wallet.balance, buyIn, "expired vacate returns the stack to the player, never a bot");
   assert.equal(await walletLocked(uid), 0, "lock forfeited once the grace window expires — never stuck");
 
   const afterFinal = await Table.findById(tableId);
   assert.equal(afterFinal.vacatingPlayers.length, 0, "vacating entry cleared after finalize");
 });
 
-test("WIRING: the reconnect-window timeout hands the seat to vacatePokerSeat instead of parking it at SITTING_OUT forever", async () => {
+test("DURABLE LEAVE: an in-hand leave intent survives until the settled stack is safely cashed out", async () => {
+  const { tableId, users, buyIn } = await makeSeatedGame(2, 10000);
+  const {
+    markPendingPermanentLeave,
+    permanentLeavePokerTable,
+  } = require("../services/pokerVacateService");
+  const uid = String(users[0]);
+
+  await markPendingPermanentLeave({ tableId, userId: uid });
+  let pending = await Table.findById(tableId).lean();
+  assert.equal(pending.pendingPermanentLeaves.length, 1, "leave intent is persisted before settlement");
+  assert.equal(await walletLocked(uid), buyIn, "intent itself never touches locked chips");
+
+  const blocked = await permanentLeavePokerTable({ tableId, userId: uid });
+  assert.deepEqual(blocked, { left: false, reason: "HAND_IN_PROGRESS" });
+
+  await Table.updateOne({ _id: tableId }, { $set: { status: "waiting" } });
+  const left = await permanentLeavePokerTable({ tableId, userId: uid });
+  assert.equal(left.left, true);
+  assert.equal(left.cashedOut, buyIn);
+
+  pending = await Table.findById(tableId).lean();
+  assert.equal(pending.pendingPermanentLeaves.length, 0, "intent clears only after cash-out commits");
+  assert.equal(pending.seats.some((seat) => String(seat.user) === uid), false);
+  assert.equal(await walletLocked(uid), 0, "the final stack is released from the table lock");
+});
+
+test("WIRING: the reconnect-window timeout folds the player and queues a durable safe cash-out", async () => {
   const tableLifecycleSettingsService = require("../services/tableLifecycleSettingsService");
   const prevSettings = tableLifecycleSettingsService.getSettings();
   tableLifecycleSettingsService.applySettings({ ...prevSettings, pokerReconnectWindowMs: 30 });
-
-  const pokerVacateService = require("../services/pokerVacateService");
-  const origVacate = pokerVacateService.vacatePokerSeat;
-  const calls = [];
-  pokerVacateService.vacatePokerSeat = async (args) => {
-    calls.push(args);
-    return { vacated: false, reason: "test_stub" };
-  };
 
   try {
     const { g, users } = await makeSeatedGame(2, 10000);
@@ -572,12 +593,14 @@ test("WIRING: the reconnect-window timeout hands the seat to vacatePokerSeat ins
 
     await new Promise((resolve) => setTimeout(resolve, 150));
 
-    assert.equal(calls.length, 1, "vacatePokerSeat must fire once the reconnect window elapses");
-    assert.equal(String(calls[0].userId), uid);
-    assert.equal(calls[0].reason, "disconnect_timeout");
+    assert.equal(g.seats[0].playerState, "LEAVE_PENDING");
+    assert.equal(g.seats[0].disconnectedAt, null);
+    assert.equal(g.seats[0].reconnectDeadline, null);
+    const table = await Table.findById(g.tableId).lean();
+    assert.equal(table.pendingPermanentLeaves.length, 1);
+    assert.equal(String(table.pendingPermanentLeaves[0].user), uid);
     g.disposeTimers();
   } finally {
-    pokerVacateService.vacatePokerSeat = origVacate;
     tableLifecycleSettingsService.applySettings(prevSettings);
   }
 });

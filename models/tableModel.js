@@ -38,6 +38,15 @@ const vacatingPlayerSchema = new mongoose.Schema(
   { _id: false }
 );
 
+/** Poker: a voluntary leave requested mid-hand; cash-out resumes after settlement. */
+const pendingPermanentLeaveSchema = new mongoose.Schema(
+  {
+    user: { type: mongoose.Schema.ObjectId, ref: "User", required: true, index: true },
+    requestedAt: { type: Date, default: Date.now },
+  },
+  { _id: false }
+);
+
 const tableSchema = new mongoose.Schema(
   {
     gameType: {
@@ -56,12 +65,25 @@ const tableSchema = new mongoose.Schema(
     buyIn: { type: Number, min: 0 },
     /** Poker: minimum opening bet / raise floor (defaults to buyIn / 10). */
     minimumBet: { type: Number, min: 0 },
+    /**
+     * Per-table rake policy. `cap: 0` deliberately means no cap, preserving
+     * legacy behaviour until operations configures caps by stake tier.
+     */
+    rake: {
+      percent: { type: Number, min: 0, max: 0.2 },
+      cap: { type: Number, min: 0, default: 0 },
+      noFlopNoDrop: { type: Boolean, default: true },
+    },
     capacity: { type: Number, default: 9, min: 2, max: 9 },
     seats: [seatSchema],
     /** FIFO waiting list when all seats are taken (poker). */
     waitingQueue: { type: [waitingQueueEntrySchema], default: [] },
+    /** Monotonic Redis-lease fencing token for authoritative poker writes. */
+    pokerOwnerFence: { type: Number, default: 0, min: 0, index: true },
     /** Humans who vacated a seat — 30s window to return before a bot takes chips. */
     vacatingPlayers: { type: [vacatingPlayerSchema], default: [] },
+    /** Durable cash-out intent for a voluntary leave requested mid-hand. */
+    pendingPermanentLeaves: { type: [pendingPermanentLeaveSchema], default: [] },
     isPrivate: { type: Boolean, default: false },
     password: { type: String },
     status: {

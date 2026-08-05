@@ -7,14 +7,11 @@
  * house-standard dispatcher) on every Critical finding, failed repair, and
  * any check that's been unhealthy for several consecutive sweeps in a row.
  *
- * Redis-leader-lock guarded (best-effort — see acquireLeadership) so a
- * multi-instance deployment doesn't run the sweep, and therefore the
- * repair actions, on every node at once. Every individual repair this
- * layer performs (adminForceEndHandTable, timerManager.clearAll,
- * releaseTableSeatToBalance, clanTournamentEngineService.tick) is already
- * safe to run redundantly, so failing open (running anyway) on a Redis
- * error or when Redis isn't configured is an acceptable, deliberate choice
- * — never block detection/alerting on lock acquisition.
+ * Redis-leader-lock guarded so a multi-instance deployment doesn't run the
+ * sweep, and therefore operational actions, on every node at once. If Redis
+ * is unavailable the sweep fails closed in clustered mode; duplicate monitor
+ * action is worse than a delayed alert. A process without Redis is treated as
+ * a deliberate single-instance/dev deployment.
  */
 const crypto = require("crypto");
 const logger = require("../utils/logger");
@@ -54,7 +51,7 @@ async function acquireLeadership(ttlMs) {
     return false;
   } catch (e) {
     logger.warn("monitor_leadership_check_failed", { reason: e?.message || "unknown" });
-    return true; // fail open — every repair action here is independently idempotent
+    return false;
   }
 }
 

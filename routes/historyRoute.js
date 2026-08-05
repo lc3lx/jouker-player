@@ -4,6 +4,11 @@ const authService = require("../services/authService");
 const HandHistory = require("../models/handHistoryModel");
 const CardGameHistory = require("../models/cardGameHistoryModel");
 const handEvidenceService = require("../services/handEvidenceService");
+const {
+  isStaff,
+  participantFilter,
+  redactHistoryForPlayer,
+} = require("../services/handHistoryService");
 
 const router = express.Router();
 
@@ -15,11 +20,15 @@ router.get(
     const q = req.query.q || "";
     const gameType = req.query.gameType;
     const tableId = req.query.tableId;
-    const page = parseInt(req.query.page || "1", 10);
-    const limit = parseInt(req.query.limit || "20", 10);
+    const page = Math.max(1, parseInt(req.query.page || "1", 10) || 1);
+    const limit = Math.min(100, Math.max(1, parseInt(req.query.limit || "20", 10) || 20));
     const skip = (page - 1) * limit;
 
-    const filter = {};
+    const staff = isStaff(req.user);
+    // Normal users may search only hands in which they participated. This
+    // route used to expose every poker hand (including private audit data) to
+    // any authenticated account.
+    const filter = staff ? {} : participantFilter(req.user._id);
     if (gameType) filter.gameType = gameType;
     if (tableId) filter.table = tableId;
     if (q.trim()) filter.$text = { $search: q.trim() };
@@ -33,7 +42,7 @@ router.get(
       results: poker.length + card.length,
       page,
       limit,
-      poker,
+      poker: poker.map((hand) => redactHistoryForPlayer(hand, req.user._id, { staff })),
       cardGames: card,
     });
   })
@@ -42,7 +51,9 @@ router.get(
 router.get(
   "/evidence/:handId",
   authService.protect,
-  authService.allowedTo("user"),
+  // Evidence packages intentionally retain all hole cards for support. They
+  // are therefore not a player-facing API.
+  authService.allowedTo("admin", "manager"),
   asyncHandler(async (req, res) => {
     const data = await handEvidenceService.getEvidenceByHandId(req.params.handId);
     if (!data) return res.status(404).json({ message: "Evidence not found" });

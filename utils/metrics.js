@@ -49,6 +49,11 @@ const metrics = {
     name: "event_loop_lag_ms",
     help: "Sampled Node.js event loop lag in milliseconds",
   }),
+  pokerPostSettlementJobs: new client.Gauge({
+    name: "poker_post_settlement_jobs",
+    help: "Durable poker follow-up jobs by status",
+    labelNames: ["status"],
+  }),
 };
 
 async function renderMetrics() {

@@ -1,16 +1,22 @@
 const Table = require("../models/tableModel");
-const { transferToLocked, releaseTableSeatToBalance } = require("./walletLedgerService");
+const mongoose = require("mongoose");
+const {
+  withMongoTransaction,
+  transferToLocked,
+  releaseTableSeatToBalance,
+} = require("./walletLedgerService");
 const { normalizeCapacity } = require("../utils/pokerTableStatus");
 const { emitTablesUpdated } = require("../utils/lobbyRealtime");
-const pokerQueueRedis = require("../utils/redis/pokerQueueRedis");
 
 function queueEntryUserId(entry) {
   return String(entry?.user?._id || entry?.user || "");
 }
 
 /**
- * FIFO enqueue when table has no open seat.
- * Redis ZSET when available; Mongo array fallback for single-node / dev.
+ * A wait-list entry and its locked buy-in must commit/abort together.  Redis
+ * can still be used for invalidatable read caches, but it is intentionally not
+ * a queue source here: Mongo transaction retries cannot safely replay a
+ * destructive Redis operation.
  */
 async function enqueuePlayer({ session, userId, playerId, buyIn, tableId }) {
   const tableTx = await Table.findById(tableId).session(session);
@@ -19,17 +25,13 @@ async function enqueuePlayer({ session, userId, playerId, buyIn, tableId }) {
 
   const cap = normalizeCapacity(tableTx.capacity);
   if (tableTx.seats.length < cap) throw new Error("SEAT_AVAILABLE");
+  if (tableTx.seats.some((s) => String(s.user) === String(userId))) {
+    throw new Error("ALREADY_SEATED");
+  }
 
-  const seated = tableTx.seats.find((s) => String(s.user) === String(userId));
-  if (seated) throw new Error("ALREADY_SEATED");
-
-  if (pokerQueueRedis.isEnabled()) {
-    const already = await pokerQueueRedis.isUserQueued(tableId, userId);
-    if (already) throw new Error("ALREADY_QUEUED");
-  } else {
-    tableTx.waitingQueue = Array.isArray(tableTx.waitingQueue) ? tableTx.waitingQueue : [];
-    const inQueue = tableTx.waitingQueue.find((q) => queueEntryUserId(q) === String(userId));
-    if (inQueue) throw new Error("ALREADY_QUEUED");
+  tableTx.waitingQueue = Array.isArray(tableTx.waitingQueue) ? tableTx.waitingQueue : [];
+  if (tableTx.waitingQueue.some((q) => queueEntryUserId(q) === String(userId))) {
+    throw new Error("ALREADY_QUEUED");
   }
 
   await transferToLocked({
@@ -39,15 +41,6 @@ async function enqueuePlayer({ session, userId, playerId, buyIn, tableId }) {
     tableId: tableTx._id,
     meta: { reason: "join_queue", tableNumber: tableTx.tableNumber },
   });
-
-  if (pokerQueueRedis.isEnabled()) {
-    const r = await pokerQueueRedis.enqueue({ tableId: tableTx._id, userId, playerId, buyIn });
-    return {
-      tableId: String(tableTx._id),
-      queued: true,
-      queuePosition: r.position,
-    };
-  }
 
   tableTx.waitingQueue.push({
     user: userId,
@@ -63,44 +56,28 @@ async function enqueuePlayer({ session, userId, playerId, buyIn, tableId }) {
   };
 }
 
-/**
- * Seat first queued player after a leave. Returns seated userId or null.
- */
+/** Seat the first durable queued entry as part of the caller's Mongo transaction. */
 async function seatNextFromQueue({ session, tableId }) {
   const tableTx = await Table.findById(tableId).session(session);
   if (!tableTx || tableTx.gameType !== "poker") return null;
 
   const cap = normalizeCapacity(tableTx.capacity);
   if (tableTx.seats.length >= cap) return null;
+  tableTx.waitingQueue = Array.isArray(tableTx.waitingQueue) ? tableTx.waitingQueue : [];
+  const row = tableTx.waitingQueue.shift();
+  if (!row) return null;
 
-  let next = null;
-  if (pokerQueueRedis.isEnabled()) {
-    next = await pokerQueueRedis.dequeueNext(tableId);
-  } else {
-    tableTx.waitingQueue = Array.isArray(tableTx.waitingQueue) ? tableTx.waitingQueue : [];
-    if (tableTx.waitingQueue.length === 0) return null;
-    const row = tableTx.waitingQueue.shift();
-    if (!row) return null;
-    next = {
-      userId: queueEntryUserId(row),
-      playerId: row.player,
-      buyIn: Number(row.buyIn || tableTx.minBuyIn),
-    };
+  const uid = queueEntryUserId(row);
+  const buyIn = Number(row.buyIn || tableTx.minBuyIn);
+  if (!uid) {
+    await tableTx.save({ session });
+    return seatNextFromQueue({ session, tableId });
   }
-
-  if (!next) return null;
-
-  const uid = String(next.userId);
-  const buyIn = Number(next.buyIn || tableTx.minBuyIn);
-  const already = tableTx.seats.find((s) => String(s.user) === uid);
-  if (already) {
-    if (!pokerQueueRedis.isEnabled()) {
-      await tableTx.save({ session });
-    }
+  if (tableTx.seats.some((s) => String(s.user) === uid)) {
+    await tableTx.save({ session });
     return seatNextFromQueue({ session, tableId });
   }
 
-  // Lazy require: pokerTableAllocationService requires this module (cycle-safe).
   const {
     nextFreeSeatPosition,
     POKER_OPPOSITE_DEALER_SEAT,
@@ -109,39 +86,29 @@ async function seatNextFromQueue({ session, tableId }) {
     nextFreeSeatPosition(tableTx.seats, cap) ?? POKER_OPPOSITE_DEALER_SEAT;
 
   tableTx.seats.push({
-    user: next.userId,
-    player: next.playerId,
+    user: uid,
+    player: row.player,
     chips: buyIn,
     seatPosition,
   });
   await tableTx.save({ session });
+  // Informational only. A transaction retry may emit this more than once; the
+  // lobby reloads authoritative data and never treats it as a money event.
   emitTablesUpdated({ gameType: "poker", reason: "queue_seated", tableId: String(tableId), userId: uid });
   return uid;
 }
 
-/**
- * Remove user from queue and refund locked buy-in.
- */
+/** Remove a queue entry and release the same locked amount atomically. */
 async function dequeuePlayer({ session, userId, tableId }) {
   const tableTx = await Table.findById(tableId).session(session);
   if (!tableTx) throw new Error("TABLE_NOT_FOUND");
 
-  let buyIn = 0;
-
-  if (pokerQueueRedis.isEnabled()) {
-    const entry = await pokerQueueRedis.getQueueEntry(tableId, userId);
-    if (!entry) throw new Error("NOT_IN_QUEUE");
-    buyIn = Number(entry.buyIn || tableTx.minBuyIn || 0);
-    const removed = await pokerQueueRedis.removeFromQueue(tableId, userId);
-    if (!removed) throw new Error("NOT_IN_QUEUE");
-  } else {
-    tableTx.waitingQueue = Array.isArray(tableTx.waitingQueue) ? tableTx.waitingQueue : [];
-    const idx = tableTx.waitingQueue.findIndex((q) => queueEntryUserId(q) === String(userId));
-    if (idx === -1) throw new Error("NOT_IN_QUEUE");
-    const row = tableTx.waitingQueue.splice(idx, 1)[0];
-    buyIn = Number(row.buyIn || 0);
-    await tableTx.save({ session });
-  }
+  tableTx.waitingQueue = Array.isArray(tableTx.waitingQueue) ? tableTx.waitingQueue : [];
+  const idx = tableTx.waitingQueue.findIndex((q) => queueEntryUserId(q) === String(userId));
+  if (idx === -1) throw new Error("NOT_IN_QUEUE");
+  const row = tableTx.waitingQueue.splice(idx, 1)[0];
+  const buyIn = Number(row.buyIn || 0);
+  await tableTx.save({ session });
 
   if (buyIn > 0) {
     await releaseTableSeatToBalance({
@@ -156,9 +123,6 @@ async function dequeuePlayer({ session, userId, tableId }) {
 }
 
 async function getQueuePosition(tableId, userId) {
-  if (pokerQueueRedis.isEnabled()) {
-    return pokerQueueRedis.getPosition(tableId, userId);
-  }
   const table = await Table.findById(tableId).select("waitingQueue");
   if (!table) return -1;
   const q = Array.isArray(table.waitingQueue) ? table.waitingQueue : [];
@@ -167,21 +131,79 @@ async function getQueuePosition(tableId, userId) {
 }
 
 async function getWaitingQueueSize(tableId) {
-  if (pokerQueueRedis.isEnabled()) {
-    return pokerQueueRedis.getQueueLength(tableId);
-  }
   const table = await Table.findById(tableId).select("waitingQueue").lean();
   return Array.isArray(table?.waitingQueue) ? table.waitingQueue.length : 0;
 }
 
-/** Which poker table (if any) has this user queued right now — Redis-aware. */
 async function findUserQueuedPokerTable(userId) {
-  if (pokerQueueRedis.isEnabled()) {
-    const tableId = await pokerQueueRedis.getQueuedTableForUser(userId);
-    return tableId ? String(tableId) : null;
-  }
   const table = await Table.findOne({ gameType: "poker", "waitingQueue.user": userId }).select("_id");
   return table ? String(table._id) : null;
+}
+
+/**
+ * One-way deployment migration for the former Redis-only poker wait-list.
+ * Wallet funds were already locked at enqueue, so this moves metadata only;
+ * the Redis row is removed only after the Mongo transaction commits.
+ */
+async function migrateLegacyQueueForTable(tableId) {
+  const legacyQueue = require("../utils/redis/pokerQueueRedis");
+  if (!legacyQueue.isEnabled()) return { migrated: 0, remaining: 0 };
+  const legacyRows = await legacyQueue.listQueueEntries(tableId);
+  if (!legacyRows.length) return { migrated: 0, remaining: 0 };
+
+  let migrated = 0;
+  await withMongoTransaction(async (session) => {
+    const table = await Table.findById(tableId).session(session);
+    if (!table || table.gameType !== "poker") return;
+    table.waitingQueue = Array.isArray(table.waitingQueue) ? table.waitingQueue : [];
+    const known = new Set([
+      ...table.seats.map((seat) => String(seat.user)),
+      ...table.waitingQueue.map(queueEntryUserId),
+    ]);
+    for (const row of legacyRows) {
+      const userId = String(row?.userId || "");
+      if (!userId || known.has(userId)) continue;
+      table.waitingQueue.push({
+        user: userId,
+        player: mongoose.isValidObjectId(row.playerId) ? row.playerId : undefined,
+        buyIn: Math.max(0, Number(row.buyIn) || 0),
+        queuedAt: Number.isFinite(Number(row.queuedAt)) ? new Date(Number(row.queuedAt)) : new Date(),
+      });
+      known.add(userId);
+      migrated += 1;
+    }
+    if (migrated > 0) await table.save({ session });
+  });
+
+  const table = await Table.findById(tableId).select("seats waitingQueue").lean();
+  const persisted = new Set([
+    ...(table?.seats || []).map((seat) => String(seat.user)),
+    ...(table?.waitingQueue || []).map(queueEntryUserId),
+  ]);
+  let removed = 0;
+  for (const row of legacyRows) {
+    if (persisted.has(String(row?.userId || ""))) {
+      await legacyQueue.removeFromQueue(tableId, row.userId);
+      removed += 1;
+    }
+  }
+  return { migrated, remaining: Math.max(0, legacyRows.length - removed) };
+}
+
+async function migrateLegacyPokerQueues() {
+  const legacyQueue = require("../utils/redis/pokerQueueRedis");
+  if (!legacyQueue.isEnabled()) return { tables: 0, migrated: 0, remaining: 0 };
+  let tables = 0;
+  let migrated = 0;
+  let remaining = 0;
+  const cursor = Table.find({ gameType: "poker" }).select("_id").lean().cursor();
+  for await (const table of cursor) {
+    const result = await migrateLegacyQueueForTable(table._id);
+    tables += 1;
+    migrated += result.migrated;
+    remaining += result.remaining;
+  }
+  return { tables, migrated, remaining };
 }
 
 module.exports = {
@@ -191,5 +213,7 @@ module.exports = {
   getQueuePosition,
   getWaitingQueueSize,
   findUserQueuedPokerTable,
+  migrateLegacyQueueForTable,
+  migrateLegacyPokerQueues,
   queueEntryUserId,
 };

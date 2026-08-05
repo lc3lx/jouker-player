@@ -45,9 +45,9 @@ function derivePokerTableStatus({ mongoSeatCount, capacity, running, round, froz
   if (frozen === true) return "frozen";
   const cap = normalizeCapacity(capacity);
   const seated = Math.max(0, toSafeInt(mongoSeatCount, 0));
-  if (seated >= cap) return "full";
   const playing = running === true && round && String(round) !== "idle";
   if (playing) return "playing";
+  if (seated >= cap) return "full";
   if (seated < POKER_MIN_PLAYERS) return "waiting";
   return "ready";
 }

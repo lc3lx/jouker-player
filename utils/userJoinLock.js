@@ -1,38 +1,68 @@
-/**
- * In-process per-user serialization for table joins.
- *
- * Closes the check-then-act (TOCTOU) window in `tableService.joinTable`: the
- * one-table gate (`findUserActiveTableAnywhere`) is a read, and the seat write
- * happens in a later, separate transaction. Two concurrent joins for the SAME
- * user (double-tap, or two devices firing together) can both pass the gate and
- * seat the user at two tables. Serializing a user's joins so join #2 only starts
- * after join #1 has fully settled (its seat committed) makes #2's gate observe
- * #1's seat and correctly reject with "already active at another table".
- *
- * Scope note: this serializes within a single API process. A cross-instance race
- * (two API nodes) is far rarer and is caught by the duplicate-seat health
- * monitor; a distributed lock can be layered on later if needed. Pure in-memory,
- * no Redis dependency, fail-safe (an error in one join never blocks the next).
- */
-const _chains = new Map(); // userId -> tail promise (never rejects)
+const crypto = require("crypto");
 
+const _chains = new Map(); // userId -> tail promise (never rejects)
+let redisClient = null;
+const LOCK_TTL_MS = Math.max(10_000, Number(process.env.USER_JOIN_LOCK_TTL_MS || 60_000));
+
+function setRedisClient(client) {
+  redisClient = client && typeof client.set === "function" ? client : null;
+}
+
+function keyFor(userId) {
+  return `poker:join:user:${String(userId)}`;
+}
+
+async function releaseDistributedLock(key, token) {
+  if (!redisClient) return;
+  try {
+    await redisClient.eval(
+      'if redis.call("GET", KEYS[1]) == ARGV[1] then return redis.call("DEL", KEYS[1]) end return 0',
+      { keys: [key], arguments: [token] }
+    );
+  } catch (_) {
+    // The TTL is a safe fallback; never delete a lock we do not own.
+  }
+}
+
+async function runWithDistributedLock(userId, fn) {
+  if (!redisClient) return fn();
+  const key = keyFor(userId);
+  const token = crypto.randomUUID();
+  const locked = await redisClient.set(key, token, { NX: true, PX: LOCK_TTL_MS });
+  if (locked !== "OK") {
+    const err = new Error("JOIN_IN_PROGRESS");
+    err.code = "JOIN_IN_PROGRESS";
+    throw err;
+  }
+  try {
+    return await fn();
+  } finally {
+    await releaseDistributedLock(key, token);
+  }
+}
+
+/**
+ * Serializes same-user joins within a process and, when Redis is configured,
+ * across API instances. This prevents two simultaneous join transactions from
+ * seating/queueing the same wallet on different tables.
+ */
 async function withUserJoinLock(userId, fn) {
   const key = String(userId || "");
   if (!key) return fn();
-  const prev = _chains.get(key) || Promise.resolve();
-  // Run fn only after the previous same-user join has fully settled (success OR
-  // failure) — either way its seat write is committed before we read the gate.
-  const run = prev.then(fn, fn);
+  const previous = _chains.get(key) || Promise.resolve();
+  const run = previous.then(
+    () => runWithDistributedLock(key, fn),
+    () => runWithDistributedLock(key, fn)
+  );
   const tail = run.then(
-    () => {},
-    () => {}
-  ); // never-rejecting serialization link
+    () => undefined,
+    () => undefined
+  );
   _chains.set(key, tail);
-  // GC the map entry once this user is idle (no newer join queued behind us).
   void tail.then(() => {
     if (_chains.get(key) === tail) _chains.delete(key);
   });
   return run;
 }
 
-module.exports = { withUserJoinLock, _joinChainsForTest: _chains };
+module.exports = { withUserJoinLock, setRedisClient, _joinChainsForTest: _chains };

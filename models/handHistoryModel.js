@@ -67,7 +67,10 @@ const handPotDistributionSchema = new mongoose.Schema(
 
 const handHistorySchema = new mongoose.Schema(
   {
-    handId: { type: String, index: true },
+    // A hand settlement is a financial idempotency boundary. Keeping this as
+    // a database-enforced unique value prevents a retry/failover from paying
+    // the same hand twice.
+    handId: { type: String, required: true, unique: true, index: true },
     table: { type: mongoose.Schema.ObjectId, ref: "Table", required: true },
     gameType: { type: String, enum: ["poker", "trix", "tarneeb41"], default: "poker", index: true },
     tableNumber: Number,
@@ -82,7 +85,17 @@ const handHistorySchema = new mongoose.Schema(
     /** Human-readable chronological ledger for support / fraud analytics. */
     auditLog: [handAuditEntrySchema],
     community: [String],
+    /** Engine seat order that received hole cards; required for fair replay. */
+    dealtSeatIndices: [Number],
     pot: Number,
+    /** Portion actually contested by two or more players; rake is based on this. */
+    contestedPot: Number,
+    /** Unmatched overbets returned to their owner, never treated as winnings. */
+    uncalledReturns: [{
+      seatIndex: Number,
+      user: { type: mongoose.Schema.ObjectId, ref: "User" },
+      amount: Number,
+    }],
     rake: Number,
     winners: [{ user: { type: mongoose.Schema.ObjectId, ref: "User" }, share: Number }],
     handCategory: String,
@@ -93,7 +106,7 @@ const handHistorySchema = new mongoose.Schema(
     /** SHA-256 of canonical hand payload for dispute resolution. */
     auditHash: { type: String, index: true },
     screenshot: { type: mongoose.Schema.ObjectId, ref: "HandScreenshot" },
-    /** Shown on Fair Play screen after hand ends (serverSeed revealed post-hand). */
+    /** Internal seed + public commitment material for later proof generation. */
     provablyFair: { type: mongoose.Schema.Types.Mixed },
   },
   { timestamps: true }

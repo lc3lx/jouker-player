@@ -553,7 +553,7 @@ function registerGameHandlers(nsp, jwtVerify) {
         onCardTableRejoin({ gameType: "trix", tableId: table._id, userId });
         roomManager.setTrixUserSocket(String(userId), socket.id);
         roomManager.setUserTrixTable(String(userId), String(table._id));
-        await socketPresenceService.registerSocket(table._id, userId);
+        await socketPresenceService.registerSocket(table._id, userId, socket.id);
         const game = getOrCreateTrixGameWired(nsp, table._id);
 
         const liveHuman = game.players.find(
@@ -670,7 +670,7 @@ function registerGameHandlers(nsp, jwtVerify) {
         onCardTableRejoin({ gameType: "tarneeb41", tableId: table._id, userId });
         roomManager.setTarneeb41UserSocket(String(userId), socket.id);
         roomManager.setUserTarneeb41Table(String(userId), String(table._id));
-        await socketPresenceService.registerSocket(table._id, userId);
+        await socketPresenceService.registerSocket(table._id, userId, socket.id);
         let game = getOrCreateTarneeb41GameWired(nsp, table._id);
         await game.syncLobbyFromTable(table, (uid) => roomManager.getTarneeb41UserSocket(String(uid)));
         await game.applyCosmeticsToPlayers();
@@ -1592,7 +1592,7 @@ function registerGameHandlers(nsp, jwtVerify) {
         // joined to this table (another tab/device) — its connection already
         // owns the roomManager socketId mapping, so don't clear it or start a
         // vacate timer against a user who is still actually connected.
-        const remaining = await socketPresenceService.releaseSocket(t41, userId);
+        const remaining = await socketPresenceService.releaseSocket(t41, userId, socket.id);
         if (remaining > 0) return;
         roomManager.deleteTarneeb41UserSocket(userId);
         const game = roomManager.getTarneeb41GameForTable(t41);
@@ -1612,7 +1612,7 @@ function registerGameHandlers(nsp, jwtVerify) {
       }
       const trixId = roomManager.getTrixTableIdForUser(userId);
       if (trixId) {
-        const remaining = await socketPresenceService.releaseSocket(trixId, userId);
+        const remaining = await socketPresenceService.releaseSocket(trixId, userId, socket.id);
         if (remaining > 0) return;
         roomManager.deleteTrixUserSocket(userId);
         const game = roomManager.getTrixGameForTable(trixId);

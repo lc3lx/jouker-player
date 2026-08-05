@@ -10,7 +10,7 @@ const {
   findAvailablePokerTable,
   joinPokerWithRetry,
 } = require("./pokerTableAllocationService");
-const { findUserQueuedPokerTable } = require("./pokerWaitingQueueService");
+const pokerQueueRedis = require("../utils/redis/pokerQueueRedis");
 
 const MAX_JOIN_ATTEMPTS = 3;
 
@@ -63,9 +63,11 @@ async function findUserActiveTableAnywhere(userId, excludeTableId = null) {
     return { tableId: String(mongoHit._id), gameType: mongoHit.gameType, tier: mongoHit.tier };
   }
 
-  // Poker's Redis-backed queue (when enabled) isn't reflected in the Mongo
-  // waitingQueue array, so it needs its own reverse-index lookup.
-  const pokerQueueTableId = await findUserQueuedPokerTable(userId);
+  // Temporary deployment fallback for entries created by the retired
+  // Redis-only queue before the boot migration has imported them to Mongo.
+  const pokerQueueTableId = pokerQueueRedis.isEnabled()
+    ? await pokerQueueRedis.getQueuedTableForUser(userId)
+    : null;
   if (pokerQueueTableId && pokerQueueTableId !== String(excludeTableId || "")) {
     return { tableId: pokerQueueTableId, gameType: "poker", tier: null };
   }

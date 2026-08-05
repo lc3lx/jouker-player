@@ -6,7 +6,7 @@
 ISLAND_JACKPOT_ENABLED=true
 ```
 
-Legacy table-seat jackpot (`JACKPOT_ENABLED`) is separate and must remain `false`.
+Legacy table-seat jackpot (`POKER_LEGACY_JACKPOT_ENABLED`) is separate and must remain `false`.
 
 ## Architecture
 

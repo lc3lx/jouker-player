@@ -16,6 +16,7 @@ const Wallet = require("../models/walletModel");
 const WalletTransaction = require("../models/walletTransactionModel");
 const WalletTableLock = require("../models/walletTableLockModel");
 const HandHistory = require("../models/handHistoryModel");
+const PokerPostSettlementJob = require("../models/pokerPostSettlementJobModel");
 const HouseWallet = require("../models/houseWalletModel");
 const Jackpot = require("../models/jackpotModel");
 
@@ -189,31 +190,35 @@ test("C-1 success: commit-then-apply settles wallets, mongo seats and RAM consis
   const payouts = new Map([[0, 4000]]);
   await g.persistAndPrepareNext([], payouts, [0], { reason: "fold" }, { manageLifecycle: false });
 
-  // rake = 5% of 4000 = 200, taken from the winner's payout
+  // No-flop-no-drop: this fold happened preflop, so none of the 4000 pot is raked.
   assert.equal(g.frozen, false);
-  assert.equal(g.seats[0].chips, 11800);
+  assert.equal(g.seats[0].chips, 12000);
   assert.equal(g.seats[1].chips, 8000);
   assert.equal(g.pot, 0);
 
   const wa = await Wallet.findOne({ user: a }).lean();
   const wb = await Wallet.findOne({ user: b }).lean();
-  assert.equal(wa.lockedBalance, 11800);
+  assert.equal(wa.lockedBalance, 12000);
   assert.equal(wb.lockedBalance, 8000);
 
   const tableAfter = await Table.findById(tableDoc._id).lean();
   const seatChips = tableAfter.seats.map((s) => s.chips).sort((x, y) => y - x);
-  assert.deepEqual(seatChips, [11800, 8000]);
+  assert.deepEqual(seatChips, [12000, 8000]);
   assert.equal(tableAfter.activeSettlementId, null);
 
   const hand = await HandHistory.findOne({ handId: "h-c1-success" }).lean();
   assert.ok(hand, "HandHistory row persisted");
-  assert.equal(hand.rake, 200);
+  assert.equal(hand.rake, 0);
+
+  const jackpotJob = await PokerPostSettlementJob.findOne({
+    type: "island_jackpot",
+    handId: "h-c1-success",
+  }).lean();
+  assert.ok(jackpotJob, "jackpot evaluation intent is committed with the hand");
+  assert.equal(jackpotJob.handHistory.toString(), hand._id.toString());
 
   const house = await HouseWallet.findOne({}).lean();
-  assert.ok(house, "house wallet auto-created in test env");
-  // house collected exactly the rake as counterparty income
-  const houseTxDelta = house.balance - 1000000000;
-  assert.equal(houseTxDelta, 200);
+  assert.equal(house, null, "a no-drop hand does not create a house wallet");
 });
 
 test("C-1 failure: settlement rollback leaves RAM untouched and freezes the table", async () => {
@@ -223,6 +228,7 @@ test("C-1 failure: settlement rollback leaves RAM untouched and freezes the tabl
 
   const g = makeGame(tableDoc);
   primeHandForSettlement(g, "h-c1-failure");
+  g.community = ["2s", "3s", "4s"]; // post-flop: a rake/house write is required
 
   // Force the transaction to throw mid-way: production mode + missing house wallet
   // makes applyHouseSettlementDelta throw HOUSE_WALLET_MISSING inside the txn.
@@ -231,7 +237,7 @@ test("C-1 failure: settlement rollback leaves RAM untouched and freezes the tabl
   process.env.NODE_ENV = "production";
   try {
     const payouts = new Map([[0, 4000]]);
-    await g.persistAndPrepareNext([], payouts, [0], { reason: "fold" }, { manageLifecycle: false });
+    await g.persistAndPrepareNext(g.community, payouts, [0], { reason: "fold" }, { manageLifecycle: false });
   } finally {
     process.env.NODE_ENV = envBefore;
   }
@@ -250,6 +256,11 @@ test("C-1 failure: settlement rollback leaves RAM untouched and freezes the tabl
 
   const hand = await HandHistory.findOne({ handId: "h-c1-failure" }).lean();
   assert.equal(hand, null, "no HandHistory row for the failed settlement");
+  assert.equal(
+    await PokerPostSettlementJob.countDocuments({ handId: "h-c1-failure" }),
+    0,
+    "a rolled-back hand cannot leave a jackpot job behind"
+  );
 
   const tableAfter = await Table.findById(tableDoc._id).lean();
   assert.equal(tableAfter.activeSettlementId, null, "settlement lock released on failure");
@@ -350,6 +361,51 @@ test("C-5: jackpot payout is ledgered, decrements the pool atomically, and is id
 });
 
 // ─── N-1 ────────────────────────────────────────────────────────────────────
+
+test("C-5: legacy poker jackpot is part of the hand transaction and rolls back with it", async () => {
+  const previous = process.env.POKER_LEGACY_JACKPOT_ENABLED;
+  process.env.POKER_LEGACY_JACKPOT_ENABLED = "true";
+  try {
+    await Jackpot.deleteMany({});
+    const jackpot = await Jackpot.getSingleton();
+    jackpot.pot = 100000;
+    await jackpot.save();
+
+    const a = await makeUserWallet({ lockedBalance: 10000 });
+    const b = await makeUserWallet({ lockedBalance: 10000 });
+    const tableDoc = await makeTableDoc([a, b]);
+    const g = makeGame(tableDoc);
+    primeHandForSettlement(g, "h-jackpot-core-rollback");
+    g.community = ["Qh", "Jh", "Th", "2s", "3s"];
+    g.seats[0].hole = ["Ah", "Kh"];
+    g.seats[1].hole = ["2d", "3c"];
+
+    // The base settlement fails after jackpot work was attempted; all writes
+    // must roll back together.
+    await HouseWallet.deleteMany({});
+    const nodeEnv = process.env.NODE_ENV;
+    process.env.NODE_ENV = "production";
+    try {
+      await g.persistAndPrepareNext(
+        g.community,
+        new Map([[0, 4000]]),
+        [0],
+        { reason: "showdown" },
+        { manageLifecycle: false }
+      );
+    } finally {
+      process.env.NODE_ENV = nodeEnv;
+    }
+
+    assert.equal(g.frozen, true);
+    assert.equal((await Wallet.findOne({ user: a }).lean()).balance, 0, "no jackpot credit escaped rollback");
+    assert.equal((await Jackpot.getSingleton()).pot, 100000, "pool was not reduced on failed hand");
+    assert.equal(await HandHistory.exists({ handId: "h-jackpot-core-rollback" }), false);
+  } finally {
+    if (previous == null) delete process.env.POKER_LEGACY_JACKPOT_ENABLED;
+    else process.env.POKER_LEGACY_JACKPOT_ENABLED = previous;
+  }
+});
 
 test("N-1: leave-cashout is blocked while settlement is in progress and allowed after", async () => {
   const a = await makeUserWallet({ lockedBalance: 5000 });

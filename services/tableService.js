@@ -5,7 +5,7 @@ const Wallet = require("../models/walletModel");
 const Player = require("../models/playerModel");
 const { withMongoTransaction, transferToLocked, releaseTableSeatToBalance } = require("./walletLedgerService");
 const { isTableSettlementBlocked } = require("./gameSettlementService");
-const { getTableGameDebugSnapshot } = require("../sockets/tableGame");
+const { getTableGameDebugSnapshot, requestLivePokerLeave } = require("../sockets/tableGame");
 const { assertNotTrustRestricted, trackJoinLeaveEvent } = require("./fraudService");
 const { trackEventServerFireAndForget } = require("./analyticsService");
 const { emitTablesUpdated, getMainIo } = require("../utils/lobbyRealtime");
@@ -33,7 +33,13 @@ const { LOBBY_EXCLUDED_STATUSES } = require("./tableLifecycleService");
 const { getQueuePosition, getWaitingQueueSize } = require("./pokerWaitingQueueService");
 const waitingQueueService = require("./waitingQueueService");
 const { syncLivePokerTableAfterJoin } = require("../sockets/tableGame");
-const { vacatePokerSeat, tryRestoreVacatedSeat, permanentLeavePokerTable, scheduleDeferredPermanentLeave } = require("./pokerVacateService");
+const {
+  vacatePokerSeat,
+  tryRestoreVacatedSeat,
+  permanentLeavePokerTable,
+  markPendingPermanentLeave,
+  scheduleDeferredPermanentLeave,
+} = require("./pokerVacateService");
 const {
   tryClaimTarneeb41BotSeat,
   tryRestoreVacatedTarneeb41Seat,
@@ -988,6 +994,7 @@ exports.leaveTable = asyncHandler(async (req, res, next) => {
       // (safely, to balance) once the brief settlement clears. We do NOT touch
       // seat chips mid-settlement (chip race) — the deferred retry uses the
       // existing safe cash-out path.
+      await markPendingPermanentLeave({ tableId: id, userId: req.user._id });
       scheduleDeferredPermanentLeave({
         tableId: id,
         userId: req.user._id,
@@ -1007,6 +1014,38 @@ exports.leaveTable = asyncHandler(async (req, res, next) => {
     );
   }
 
+  // A table seat holds its start-of-hand stack until the pot is settled. A
+  // voluntary exit while playing therefore becomes an in-engine fold plus a
+  // deferred, idempotent cash-out.
+  const livePoker = table.gameType === "poker"
+    ? getTableGameDebugSnapshot(String(id))
+    : null;
+  const pokerHandInProgress = table.gameType === "poker" && (
+    table.status === "playing" ||
+    (livePoker?.running === true && String(livePoker?.round || "idle") !== "idle")
+  );
+  if (pokerHandInProgress) {
+    const handClientIp = String(
+      req.headers["x-forwarded-for"] || req.socket?.remoteAddress || ""
+    );
+    const handDeviceId = String(req.body?.deviceId || req.headers["x-device-id"] || "");
+    await markPendingPermanentLeave({ tableId: id, userId: req.user._id });
+    await requestLivePokerLeave(String(id), req.user._id);
+    scheduleDeferredPermanentLeave({
+      tableId: id,
+      userId: req.user._id,
+      clientIp: handClientIp,
+      deviceId: handDeviceId || null,
+    });
+    void trackJoinLeaveEvent(req.user._id, "leave_table");
+    emitTablesUpdated({ gameType: "poker", reason: "leave_deferred_hand", tableId: String(id) });
+    return res.status(200).json({
+      status: "success",
+      message: "Leaving — your hand is settling and your cash-out will follow automatically",
+      data: { permanentLeave: true, deferred: true, handInProgress: true, rtcRoom: { roomId: table._id, type: "table" } },
+    });
+  }
+
   const clientIp = String(
     req.headers["x-forwarded-for"] || req.socket?.remoteAddress || ""
   );
@@ -1023,15 +1062,19 @@ exports.leaveTable = asyncHandler(async (req, res, next) => {
       if (result.reason === "NOT_SEATED") {
         return next(new ApiError("You are not seated at this table", 400));
       }
-      if (result.reason === "SETTLEMENT_IN_PROGRESS") {
+      if (result.reason === "SETTLEMENT_IN_PROGRESS" || result.reason === "HAND_IN_PROGRESS") {
         // Settlement started between the gate above and here — defer + free the
         // player to the lobby (deferred cash-out, no chip race / forfeiture).
+        await markPendingPermanentLeave({ tableId: id, userId: req.user._id });
         scheduleDeferredPermanentLeave({
           tableId: id,
           userId: req.user._id,
           clientIp,
           deviceId: deviceId || null,
         });
+        if (result.reason === "HAND_IN_PROGRESS") {
+          await requestLivePokerLeave(String(id), req.user._id);
+        }
         void trackJoinLeaveEvent(req.user._id, "leave_table");
         emitTablesUpdated({ gameType: "poker", reason: "leave_deferred", tableId: String(id) });
         return res.status(200).json({

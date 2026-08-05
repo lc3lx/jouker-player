@@ -69,6 +69,18 @@ function makeFakeRedis() {
     },
     async eval(lua, { keys, arguments: args }) {
       const key = keys[0];
+      // RedisTableStateStore uses an atomic fencing compare-and-set script.
+      // Model that contract separately from the ownership-manager scripts.
+      if (lua.includes("cjson.decode")) {
+        const existing = alive(key) ? store.get(key).value : null;
+        if (existing) {
+          const currentFence = Number(JSON.parse(existing).ownerFence || 0);
+          if (currentFence > Number(args[1] || 0)) return 0;
+        }
+        store.set(key, { value: String(args[0]), expireAt: null });
+        if (args[2] === "1") store.get(key).expireAt = now() + Number(args[3]) * 1000;
+        return 1;
+      }
       const cur = alive(key) ? store.get(key).value : null;
       if (cur !== args[0]) return 0;
       if (lua.includes("PEXPIRE")) {

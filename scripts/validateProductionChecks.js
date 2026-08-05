@@ -66,6 +66,27 @@ function assertTransactionFallbackDisabled() {
   }
 }
 
+function assertRuntimeModeConsistency() {
+  if (String(process.env.NODE_ENV || "").toLowerCase() !== "production") {
+    throw new Error("NODE_ENV_MUST_BE_PRODUCTION_WHEN_APP_MODE_PRODUCTION");
+  }
+  if (!process.env.METRICS_TOKEN) {
+    throw new Error("METRICS_TOKEN_MISSING");
+  }
+  if (!process.env.REDIS_URL) {
+    throw new Error("REDIS_URL_MISSING");
+  }
+  if (!process.env.POKER_SNAPSHOT_ENCRYPTION_KEY) {
+    throw new Error("POKER_SNAPSHOT_ENCRYPTION_KEY_MISSING");
+  }
+}
+
+function assertLegacyPokerJackpotDisabled() {
+  if (["1", "true", "yes", "on"].includes(String(process.env.POKER_LEGACY_JACKPOT_ENABLED || "").toLowerCase())) {
+    throw new Error("POKER_LEGACY_JACKPOT_FORBIDDEN_IN_PRODUCTION");
+  }
+}
+
 async function assertHouseWalletExists() {
   const wallet = await getHouseWallet();
   if (!wallet) {
@@ -146,8 +167,10 @@ async function runProductionChecks({ skipSmoke = false } = {}) {
   try {
     if (isProduction()) {
       assertJwtSecret();
+      assertRuntimeModeConsistency();
       assertCorsWhitelist();
       assertTransactionFallbackDisabled();
+      assertLegacyPokerJackpotDisabled();
       await assertReplicaSetEnabled();
       await assertHouseWalletExists();
     }

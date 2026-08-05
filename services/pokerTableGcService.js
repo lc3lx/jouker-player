@@ -22,11 +22,14 @@ function markTableActivity(tableId) {
 }
 
 async function countQueue(tableId) {
-  if (pokerQueueRedis.isEnabled()) {
-    return pokerQueueRedis.getQueueLength(tableId);
-  }
   const t = await Table.findById(tableId).select("waitingQueue").lean();
-  return Array.isArray(t?.waitingQueue) ? t.waitingQueue.length : 0;
+  const durableCount = Array.isArray(t?.waitingQueue) ? t.waitingQueue.length : 0;
+  // Deployment compatibility only: the durable Mongo count remains
+  // authoritative, while an old Redis row blocks destructive GC until the
+  // boot migration imports it.
+  if (!pokerQueueRedis.isEnabled()) return durableCount;
+  const legacyCount = Number(await pokerQueueRedis.getQueueLength(tableId).catch(() => 0)) || 0;
+  return Math.max(durableCount, legacyCount);
 }
 
 /**
@@ -53,14 +56,7 @@ async function resetPokerTableWhenEmpty(tableId) {
 
   await getTableGameBridge().resetLivePokerTableWhenEmpty(tid);
 
-  if (pokerQueueRedis.isEnabled() && qLen === 0) {
-    await pokerQueueRedis.clearQueue(tid);
-  }
-
   table.status = "waiting";
-  if (Array.isArray(table.waitingQueue) && table.waitingQueue.length > 0 && qLen === 0) {
-    table.waitingQueue = [];
-  }
   if (Array.isArray(table.vacatingPlayers) && table.vacatingPlayers.length > 0) {
     // Expired vacate entries reaching this path mean the forfeit timer never fired
     // (e.g. restart). Refund their locked chips instead of silently dropping them.
@@ -143,10 +139,6 @@ async function destroyEmptyTable(tableId) {
   }
 
   await getTableGameBridge().evictTableFromRegistry(tid);
-  if (pokerQueueRedis.isEnabled()) {
-    await pokerQueueRedis.clearQueue(tid);
-  }
-
   await Table.deleteOne({ _id: tid });
   emptySince.delete(tid);
 

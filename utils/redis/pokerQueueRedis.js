@@ -142,7 +142,12 @@ async function getQueueLength(tableId) {
 async function clearQueue(tableId) {
   if (!redisClient) return;
   const tid = String(tableId);
-  await redisClient.del([queueZKey(tid), queueHKey(tid)]);
+  const users = await redisClient.zRange(queueZKey(tid), 0, -1);
+  const multi = redisClient.multi();
+  multi.del(queueZKey(tid));
+  multi.del(queueHKey(tid));
+  for (const userId of users || []) multi.del(queueUserKey(userId));
+  await multi.exec();
 }
 
 async function isUserQueued(tableId, userId) {
@@ -168,7 +173,12 @@ async function listQueueEntries(tableId) {
         // keep defaults
       }
     }
-    out.push({ userId: String(uid), playerId: meta.playerId, buyIn: Number(meta.buyIn) || 0 });
+    out.push({
+      userId: String(uid),
+      playerId: meta.playerId,
+      buyIn: Number(meta.buyIn) || 0,
+      queuedAt: Number(meta.queuedAt) || 0,
+    });
   }
   return out;
 }

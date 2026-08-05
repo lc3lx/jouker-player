@@ -5,7 +5,6 @@ const dotenv = require("dotenv");
 const morgan = require("morgan");
 const cors = require("cors");
 const compression = require("compression");
-// const rateLimit = require("express-rate-limit");
 const hpp = require("hpp");
 const helmet = require("helmet");
 const xss = require("xss-clean");
@@ -18,6 +17,7 @@ const ApiError = require("./utils/apiError");
 const globalError = require("./middlewares/errorMiddleware");
 const dbConnection = require("./config/database");
 const { runProductionChecks } = require("./scripts/validateProductionChecks");
+const { isProduction } = require("./utils/appConfig");
 // Routes
 const mountRoutes = require("./routes");
 
@@ -29,7 +29,7 @@ function parseCorsOrigins(raw) {
 }
 
 function buildCorsConfig() {
-  const isProd = process.env.NODE_ENV === "production";
+  const isProd = isProduction();
   const origins = parseCorsOrigins(process.env.CORS_ORIGINS);
   if (isProd) {
     if (!origins.length) {
@@ -49,6 +49,11 @@ const corsConfig = buildCorsConfig();
 
 // express app
 const app = express();
+
+const trustProxyHops = Number(process.env.TRUST_PROXY_HOPS || 0);
+if (Number.isInteger(trustProxyHops) && trustProxyHops > 0) {
+  app.set("trust proxy", trustProxyHops);
+}
 
 // Enable other domains to access your application
 // cross-origin CORP so Flutter/web clients can load /uploads images.
@@ -123,14 +128,30 @@ if (process.env.NODE_ENV === "development") {
   console.log(`mode: ${process.env.NODE_ENV}`);
 }
 
-// Rate limit disabled (was: 100 req / 15 min per IP on /api).
-// const limiter = rateLimit({
-//   windowMs: 15 * 60 * 1000,
-//   max: 100,
-//   message:
-//     "Too many accounts created from this IP, please try again after an hour",
-// });
-// app.use("/api", limiter);
+const API_RATE_LIMIT_WINDOW_SEC = Math.max(10, Number(process.env.API_RATE_LIMIT_WINDOW_SEC || 900));
+const API_RATE_LIMIT_MAX = Math.max(60, Number(process.env.API_RATE_LIMIT_MAX || 600));
+const apiLimiter = async (req, res, next) => {
+  const redis = realtimeRedis?.commandClient;
+  if (!redis) {
+    if (isProduction()) return res.status(503).json({ status: "error", message: "Rate limiter unavailable" });
+    return next();
+  }
+  try {
+    const bucket = `api:rate:${req.ip || req.socket?.remoteAddress || "unknown"}:${Math.floor(Date.now() / (API_RATE_LIMIT_WINDOW_SEC * 1000))}`;
+    const count = Number(await redis.incr(bucket));
+    if (count === 1) await redis.expire(bucket, API_RATE_LIMIT_WINDOW_SEC + 5);
+    if (count > API_RATE_LIMIT_MAX) {
+      res.set("Retry-After", String(API_RATE_LIMIT_WINDOW_SEC));
+      return res.status(429).json({ status: "error", message: "Too many requests" });
+    }
+    return next();
+  } catch (err) {
+    logger.error("api_rate_limit_failed", { reason: err?.message || "unknown" });
+    if (isProduction()) return res.status(503).json({ status: "error", message: "Rate limiter unavailable" });
+    return next();
+  }
+};
+app.use("/api", apiLimiter);
 
 // Middleware to protect against HTTP Parameter Pollution attacks
 app.use(
@@ -142,11 +163,43 @@ app.use(
 // Mount Routes
 mountRoutes(app);
 
-app.get("/api/health", (req, res) => {
-  res.status(200).json({ status: "ok" });
+app.get("/api/health", async (req, res) => {
+  const mongoose = require("mongoose");
+  const dbReady = mongoose.connection.readyState === 1;
+  const redisReady = !isProduction() || !!(realtimeRedis?.enabled && realtimeRedis.commandClient?.isReady);
+  let failedJobs = 0;
+  let escalatedJobs = 0;
+  if (dbReady) {
+    try {
+      const PokerPostSettlementJob = require("./models/pokerPostSettlementJobModel");
+      [failedJobs, escalatedJobs] = await Promise.all([
+        PokerPostSettlementJob.countDocuments({ status: "failed" }),
+        PokerPostSettlementJob.countDocuments({ status: "pending", attempts: { $gte: 20 } }),
+      ]);
+      metrics.pokerPostSettlementJobs.set({ status: "failed" }, failedJobs);
+      metrics.pokerPostSettlementJobs.set({ status: "escalated" }, escalatedJobs);
+    } catch (_) {
+      failedJobs = -1;
+      escalatedJobs = -1;
+    }
+  }
+  const ready = dbReady && redisReady && failedJobs === 0 && escalatedJobs === 0;
+  res.status(ready ? 200 : 503).json({
+    status: ready ? "ok" : "degraded",
+    checks: {
+      database: dbReady,
+      redis: redisReady,
+      failedPokerPostSettlementJobs: failedJobs,
+      escalatedPokerPostSettlementJobs: escalatedJobs,
+    },
+  });
 });
 
 app.get("/metrics", async (req, res) => {
+  const metricsToken = process.env.METRICS_TOKEN;
+  if (isProduction() && (!metricsToken || req.get("authorization") !== `Bearer ${metricsToken}`)) {
+    return res.status(403).json({ status: "forbidden" });
+  }
   try {
     res.set("Content-Type", contentType());
     res.end(await renderMetrics());
@@ -267,6 +320,12 @@ let realtimeRedis = null;
 
 async function startServer() {
   await dbConnection();
+  const { ensurePokerProductionIndexes } = require("./services/pokerProductionSchemaService");
+  await ensurePokerProductionIndexes();
+  const { resumePendingPermanentLeaves } = require("./services/pokerVacateService");
+  await resumePendingPermanentLeaves();
+  const { resumePokerPostSettlementJobs } = require("./services/pokerPostSettlementJobService");
+  await resumePokerPostSettlementJobs();
   const { registerDomainListeners } = require("./domain/listeners/registerDomainListeners");
   registerDomainListeners();
   const { assertTransactionsAvailableOrThrow } = require("./services/walletLedgerService");
@@ -275,16 +334,26 @@ async function startServer() {
   await runProductionChecks({ skipSmoke: true });
 
   realtimeRedis = await setupSocketIoRedis(io);
+  if (isProduction() && !realtimeRedis.enabled) {
+    throw new Error("PRODUCTION_REQUIRES_REDIS_FOR_POKER");
+  }
   if (realtimeRedis.enabled) {
     logger.info("socketio_redis_enabled");
     const pokerQueueRedis = require("./utils/redis/pokerQueueRedis");
     const pokerCollusionGuard = require("./services/pokerCollusionGuard");
     const socketPresenceService = require("./services/socketPresenceService");
     const systemHealthMonitorService = require("./services/systemHealthMonitorService");
+    const userJoinLock = require("./utils/userJoinLock");
     pokerQueueRedis.setRedisClient(realtimeRedis.commandClient);
     pokerCollusionGuard.setRedisClient(realtimeRedis.commandClient);
     socketPresenceService.setRedisClient(realtimeRedis.commandClient);
     systemHealthMonitorService.setRedisClient(realtimeRedis.commandClient);
+    userJoinLock.setRedisClient(realtimeRedis.commandClient);
+    const { migrateLegacyPokerQueues } = require("./services/pokerWaitingQueueService");
+    const queueMigration = await migrateLegacyPokerQueues();
+    if (queueMigration.migrated || queueMigration.remaining) {
+      logger.info("poker_legacy_queue_migration", queueMigration);
+    }
     const islandJackpotCache = require("./utils/islandJackpotCache");
     islandJackpotCache.attachRedisClient(realtimeRedis.commandClient);
   }

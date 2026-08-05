@@ -1,14 +1,10 @@
 /**
- * Tracks how many live sockets a user currently has open against a given
- * table, across all game types. Used purely to avoid false-positive
- * disconnect handling (starting a reconnect/vacate timer) when a user closes
- * one of several open tabs/devices but is still connected via another.
- *
- * Redis-backed (multi-instance safe) when available, in-memory fallback
- * (correct for a single instance) otherwise — same shape as
- * pokerCollusionGuard's presence tracking.
+ * Idempotent per-socket presence for a seated user/table pair. A numeric INCR
+ * leaks whenever the same socket emits join twice; a Set makes join/reconnect
+ * safe and a short TTL bounds remnants after a process crash.
  */
-const TTL_SEC = 3600;
+const TTL_SEC = Math.max(60, Number(process.env.TABLE_SOCKET_PRESENCE_TTL_SEC || 3600));
+const POKER_TTL_SEC = Math.max(30, Number(process.env.POKER_SOCKET_PRESENCE_TTL_SEC || 90));
 
 let redisClient = null;
 
@@ -16,51 +12,78 @@ function setRedisClient(client) {
   redisClient = client;
 }
 
-function countKey(tableId, userId) {
-  return `table:socketcount:${String(tableId)}:${String(userId)}`;
+function key(tableId, userId) {
+  return `table:sockets:${String(tableId)}:${String(userId)}`;
 }
 
-/** In-memory fallback: Map<"tableId:userId", count> */
-const memCounts = new Map();
+const memSets = new Map();
 
-/**
- * Call when a socket joins/subscribes to a table room. Returns the new count.
- */
-async function registerSocket(tableId, userId) {
-  const key = countKey(tableId, userId);
+function memSet(tableId, userId) {
+  const k = key(tableId, userId);
+  if (!memSets.has(k)) memSets.set(k, new Set());
+  return memSets.get(k);
+}
+
+function socketMember(socketId) {
+  if (!socketId) throw new Error("SOCKET_ID_REQUIRED");
+  return String(socketId);
+}
+
+async function registerSocket(tableId, userId, socketId, options = {}) {
+  const member = socketMember(socketId);
+  const k = key(tableId, userId);
+  const ttlSec = Math.max(30, Number(options.ttlSec || TTL_SEC));
   if (redisClient) {
     const multi = redisClient.multi();
-    multi.incr(key);
-    multi.expire(key, TTL_SEC);
-    const results = await multi.exec();
-    return Array.isArray(results) ? Number(results[0]) || 1 : 1;
+    multi.sAdd(k, member);
+    multi.expire(k, ttlSec);
+    multi.sCard(k);
+    const result = await multi.exec();
+    return Number(result?.[2]) || 1;
   }
-  const next = (memCounts.get(key) || 0) + 1;
-  memCounts.set(key, next);
-  return next;
+  const set = memSet(tableId, userId);
+  set.add(member);
+  return set.size;
 }
 
-/**
- * Call when a socket for that table disconnects. Returns the remaining
- * count (0 or below means this was the user's last live socket for this
- * table — safe to run reconnect/vacate handling).
- */
-async function releaseSocket(tableId, userId) {
-  const key = countKey(tableId, userId);
+async function touchSocket(tableId, userId, socketId, options = {}) {
+  const member = socketMember(socketId);
+  const k = key(tableId, userId);
+  const ttlSec = Math.max(30, Number(options.ttlSec || TTL_SEC));
   if (redisClient) {
-    const next = await redisClient.decr(key);
-    if (next <= 0) await redisClient.del(key);
-    return next;
+    const exists = await redisClient.sIsMember(k, member);
+    if (!exists) return 0;
+    await redisClient.expire(k, ttlSec);
+    return Number(await redisClient.sCard(k)) || 0;
   }
-  const prev = memCounts.get(key) || 0;
-  const next = prev - 1;
-  if (next <= 0) memCounts.delete(key);
-  else memCounts.set(key, next);
-  return next;
+  const set = memSets.get(k);
+  return set?.has(member) ? set.size : 0;
+}
+
+async function releaseSocket(tableId, userId, socketId) {
+  const member = socketMember(socketId);
+  const k = key(tableId, userId);
+  if (redisClient) {
+    const multi = redisClient.multi();
+    multi.sRem(k, member);
+    multi.sCard(k);
+    const result = await multi.exec();
+    const remaining = Number(result?.[1]) || 0;
+    if (remaining <= 0) await redisClient.del(k);
+    return remaining;
+  }
+  const set = memSets.get(k);
+  if (!set) return 0;
+  set.delete(member);
+  if (set.size === 0) memSets.delete(k);
+  return set.size;
 }
 
 module.exports = {
+  TTL_SEC,
+  POKER_TTL_SEC,
   setRedisClient,
   registerSocket,
+  touchSocket,
   releaseSocket,
 };

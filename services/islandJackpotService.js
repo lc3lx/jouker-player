@@ -463,6 +463,182 @@ exports.adminGetStatistics = asyncHandler(async (req, res) => {
 });
 
 /**
+ * Freeze Island eligibility, policy and amount inside the hand settlement
+ * transaction.  The worker later performs only the already-authorized wallet
+ * credits; it must never re-evaluate current members or the current pool.
+ */
+async function reservePayoutForHand({ session = null, handId, tableId, gameType, community = [], seats = [], handCategory = null, reason = null }) {
+  if (!isEnabledEnv()) return { status: "skipped", reason: "disabled" };
+  if (gameType !== "poker" || !handId) return { status: "skipped", reason: "invalid_hand" };
+
+  const poolQuery = IslandPool.findOneAndUpdate(
+    { key: "default" },
+    { $setOnInsert: { key: "default" } },
+    { new: true, upsert: true, setDefaultsOnInsert: true }
+  );
+  const pool = session ? await poolQuery.session(session) : await poolQuery;
+  if (!pool || !pool.enabled) return { status: "skipped", reason: "pool_disabled" };
+  if (!computePoolFlags(pool).armed) return { status: "skipped", reason: "not_armed" };
+  if (pool.payoutPolicy?.requireShowdown !== false && reason && reason !== "showdown") {
+    return { status: "skipped", reason: "not_showdown" };
+  }
+
+  const candidates = (seats || []).filter((seat) =>
+    seat && !seat.isBot && !isBotUserId(String(seat.userId || "")) && !seat.folded &&
+    Array.isArray(seat.hole) && seat.hole.length >= 2
+  );
+  if (!candidates.length) return { status: "skipped", reason: "no_candidates" };
+
+  const memberIds = candidates.map((seat) => seat.userId);
+  const memberQuery = IslandMember.find({ userId: { $in: memberIds }, active: true });
+  const activeMembers = session ? await memberQuery.session(session).lean() : await memberQuery.lean();
+  const members = new Set(activeMembers.map((member) => String(member.userId)));
+  const qualifiers = [];
+  for (const seat of candidates) {
+    if (!members.has(String(seat.userId))) continue;
+    const evaluated = evaluateIslandHand(seat.hole, community);
+    if (!evaluated) continue;
+    qualifiers.push({
+      userId: seat.userId,
+      userName: seat.name || "",
+      handType: evaluated.handType,
+      rank: evaluated.rank,
+      hole: [...seat.hole],
+    });
+  }
+  if (!qualifiers.length) return { status: "skipped", reason: "no_qualifiers" };
+
+  qualifiers.sort((a, b) => compareHandTypes(b.handType, a.handType));
+  const handType = qualifiers[0].handType;
+  const maxWinners = Math.min(2, Math.max(1, toSafeInt(pool.payoutPolicy?.maxWinnersPerEvent, 1)));
+  const winners = qualifiers.filter((q) => q.handType === handType).slice(0, maxWinners);
+  const percentage = Number(pool.payoutPercentages?.[handType] || 0);
+  const payout = calculatePayoutShares(pool.poolBalance, percentage, winners.length);
+  if (!payout) return { status: "skipped", reason: "no_payout_plan" };
+
+  const poolBefore = toSafeInt(pool.poolBalance, 0);
+  if (poolBefore < payout.actualTotal) throw new Error("INSUFFICIENT_POOL");
+  pool.poolBalance = poolBefore - payout.actualTotal;
+  pool.stats = pool.stats || {};
+  pool.stats.totalPaidOut = toSafeInt(pool.stats.totalPaidOut, 0) + payout.actualTotal;
+  pool.stats.totalWinners = toSafeInt(pool.stats.totalWinners, 0) + winners.length;
+  const last = winners[winners.length - 1];
+  pool.lastWinner = {
+    userId: last.userId,
+    userName: last.userName,
+    amount: payout.shareEach,
+    handType,
+    handId: String(handId),
+    at: new Date(),
+  };
+  syncArmedFlags(pool);
+  pool.version = toSafeInt(pool.version, 0) + 1;
+  await pool.save(session ? { session } : undefined);
+
+  return {
+    status: "reserved",
+    handId: String(handId),
+    tableId: tableId ? String(tableId) : null,
+    community: [...community],
+    handCategory,
+    poolVersion: toSafeInt(pool.version, 0),
+    poolBefore,
+    poolAfter: toSafeInt(pool.poolBalance, 0),
+    percentage,
+    handType,
+    shareEach: payout.shareEach,
+    actualTotal: payout.actualTotal,
+    winners,
+    announcementsEnabled: isAnnouncementsEnabled(pool),
+    effectsEnabled: isEffectsEnabled(pool),
+  };
+}
+
+async function executeReservedPayout(plan) {
+  if (!plan || plan.status !== "reserved") return { status: "skipped", reason: plan?.reason || "not_eligible" };
+  const handId = String(plan.handId);
+  const winners = Array.isArray(plan.winners) ? plan.winners : [];
+  if (!winners.length || !plan.shareEach) return { status: "skipped", reason: "invalid_reservation" };
+
+  const alreadyPaid = await IslandWinner.exists({ handId });
+  if (alreadyPaid) return { status: "completed", reason: "already_paid" };
+
+  await walletLedgerService.withMongoTransaction(async (session) => {
+    const duplicate = await IslandWinner.findOne({ handId })
+      .select("_id")
+      .session(session)
+      .lean();
+    if (duplicate) return;
+    for (const winner of winners) {
+      const payoutTxnId = crypto.randomUUID();
+      await walletLedgerService.ledgerDeposit({
+        session,
+        userId: winner.userId,
+        amount: plan.shareEach,
+        ledgerType: "island_jackpot_win",
+        meta: { source: "island_jackpot", handId, handType: plan.handType, tableId: plan.tableId },
+      });
+      const [history] = await IslandHistory.create([{
+        type: "payout",
+        userId: winner.userId,
+        amount: plan.shareEach,
+        poolAfter: plan.poolAfter,
+        handId,
+        handType: plan.handType,
+      }], session ? { session } : undefined);
+      await IslandWinner.create([{
+        userId: winner.userId,
+        userName: winner.userName,
+        handId,
+        handType: plan.handType,
+        payoutAmount: plan.shareEach,
+        poolBefore: plan.poolBefore,
+        poolAfter: plan.poolAfter,
+        percentage: plan.percentage,
+        tableId: plan.tableId || undefined,
+        holeCards: winner.hole,
+        communityCards: plan.community || [],
+        verifiedRank: { cat: winner.rank?.cat, tiebreak: winner.rank?.tiebreak || [] },
+      }], session ? { session } : undefined);
+      await IslandMember.updateOne({ userId: winner.userId }, { $inc: { winCount: 1 } }, session ? { session } : undefined);
+      await JackpotTransaction.create([{
+        txnId: payoutTxnId,
+        userId: winner.userId,
+        direction: "credit_payout",
+        amount: plan.shareEach,
+        islandHistoryId: history._id,
+        status: "completed",
+        meta: { handId, handType: plan.handType },
+      }], session ? { session } : undefined);
+    }
+  });
+
+  const users = await User.find({ _id: { $in: winners.map((winner) => winner.userId) } })
+    .select("name username profileImg").lean();
+  const userMap = new Map(users.map((user) => [String(user._id), user]));
+  if (plan.announcementsEnabled) {
+    for (const winner of winners) {
+      const user = userMap.get(String(winner.userId));
+      broadcastWin({
+        userId: String(winner.userId),
+        userName: user?.name || user?.username || winner.userName || "Player",
+        avatarUrl: user?.profileImg || "",
+        amount: plan.shareEach,
+        handType: plan.handType,
+        handLabel: handTypeLabel(plan.handType),
+        handId,
+        poolAfter: plan.poolAfter,
+        percentage: plan.percentage,
+        globalAnnouncement: true,
+      });
+    }
+  }
+  await invalidateStatusCache();
+  if (plan.effectsEnabled) broadcastStateUpdate(await buildStatusSnapshot());
+  return { status: "completed", winners: winners.length, totalPayout: plan.actualTotal };
+}
+
+/**
  * Post-hand hook — fire-and-forget from phase3HandArchiveService.
  */
 async function onHandSettled({
@@ -473,25 +649,29 @@ async function onHandSettled({
   seats = [],
   handCategory = null,
   reason = null,
+  settlementPlan = null,
 }) {
-  if (!isEnabledEnv()) return;
-  if (gameType !== "poker") return;
-  if (!handId) return;
+  if (settlementPlan) return executeReservedPayout(settlementPlan);
+  if (!isEnabledEnv()) return { status: "skipped", reason: "disabled" };
+  if (gameType !== "poker") return { status: "skipped", reason: "game_type" };
+  if (!handId) return { status: "skipped", reason: "missing_hand_id" };
 
   const pool = await IslandPool.getSingleton();
-  if (!pool.enabled) return;
+  if (!pool.enabled) return { status: "skipped", reason: "pool_disabled" };
 
   const armedFlags = computePoolFlags(pool);
-  if (!armedFlags.armed) return;
+  if (!armedFlags.armed) return { status: "skipped", reason: "not_armed" };
 
   const requireShowdown = pool.payoutPolicy?.requireShowdown !== false;
-  if (requireShowdown && reason && reason !== "showdown") return;
+  if (requireShowdown && reason && reason !== "showdown") {
+    return { status: "skipped", reason: "not_showdown" };
+  }
 
   const existingForHand = await IslandWinner.countDocuments({ handId: String(handId) });
-  if (existingForHand > 0) return;
+  if (existingForHand > 0) return { status: "completed", reason: "already_paid" };
 
   const lock = await acquirePayoutLock(String(handId));
-  if (!lock.acquired) return;
+  if (!lock.acquired) return { status: "deferred", reason: "payout_lock_busy" };
 
   try {
     const candidateSeats = (seats || []).filter(
@@ -503,7 +683,7 @@ async function onHandSettled({
         Array.isArray(seat.hole) &&
         seat.hole.length >= 2
     );
-    if (candidateSeats.length === 0) return;
+    if (candidateSeats.length === 0) return { status: "skipped", reason: "no_candidates" };
 
     const memberIds = candidateSeats.map((s) => s.userId);
     const activeMembers = await IslandMember.find({
@@ -526,7 +706,7 @@ async function onHandSettled({
       });
     }
 
-    if (qualifiers.length === 0) return;
+    if (qualifiers.length === 0) return { status: "skipped", reason: "no_qualifiers" };
 
     qualifiers.sort((a, b) => compareHandTypes(b.handType, a.handType));
     const bestType = qualifiers[0].handType;
@@ -540,7 +720,7 @@ async function onHandSettled({
 
     const pct = pool.payoutPercentages?.[bestType];
     const payoutPlan = calculatePayoutShares(pool.poolBalance, pct, winners.length);
-    if (!payoutPlan) return;
+    if (!payoutPlan) return { status: "skipped", reason: "no_payout_plan" };
 
     const { shareEach, actualTotal } = payoutPlan;
     const poolBefore = toSafeInt(pool.poolBalance, 0);
@@ -693,14 +873,17 @@ async function onHandSettled({
       totalPayout: actualTotal,
       handCategory,
     });
+    return { status: "completed", winners: paidWinners.length, totalPayout: actualTotal };
   } catch (err) {
     if (err?.message === "DUPLICATE_PAYOUT") {
       logger.warn("island_jackpot_duplicate_blocked", { handId: String(handId) });
+      return { status: "completed", reason: "duplicate_payout" };
     } else {
       logger.error("island_jackpot_payout_failed", {
         handId: String(handId),
         reason: err?.message || "unknown",
       });
+      throw err;
     }
   } finally {
     await releasePayoutLock(lock.key);
@@ -708,5 +891,6 @@ async function onHandSettled({
 }
 
 exports.onHandSettled = onHandSettled;
+exports.reservePayoutForHand = reservePayoutForHand;
 exports.buildStatusSnapshot = buildStatusSnapshot;
 exports.resetJoinCooldownForTests = () => _joinCooldown.clear();

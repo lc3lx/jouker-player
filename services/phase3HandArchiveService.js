@@ -166,21 +166,6 @@ async function onHandSettled({
       logger.warn("achievement_hook_failed", { handId, reason: e?.message });
     });
 
-  void require("./islandJackpotService")
-    .onHandSettled({
-      handId,
-      tableId,
-      gameType,
-      community,
-      seats,
-      winners,
-      handCategory,
-      reason,
-    })
-    .catch((e) => {
-      logger.warn("island_jackpot_hook_failed", { handId, reason: e?.message });
-    });
-
   await auditService.logEvent({
     event: "hand_settled",
     table: tableId,

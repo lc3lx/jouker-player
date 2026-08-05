@@ -63,6 +63,8 @@ const { PokerTableCommandBus } = require("../services/pokerTableCommandBus");
 const socketPresenceService = require("../services/socketPresenceService");
 const { deriveMinimumBet } = require("../utils/poker/tableBettingConfig");
 const { buildHandAuditLog } = require("../services/handHistoryAuditService");
+const { resolveRakePolicy, calculateRake } = require("../utils/poker/rakePolicy");
+const { buildDeckCommitment } = require("../utils/poker/fairnessCommitment");
 
 function getTokenFromHandshake(socket) {
   const auth = socket.handshake.auth || {};
@@ -82,6 +84,25 @@ function toSafeInt(value, fallback = 0) {
 
 function clampInt(value, min, max) {
   return Math.max(min, Math.min(max, toSafeInt(value, min)));
+}
+
+function publicFairnessCommit(fairness) {
+  if (!fairness || typeof fairness !== "object") return null;
+  return {
+    handId: fairness.handId || null,
+    serverSeedHash: fairness.serverSeedHash || null,
+    clientSeedDigest: fairness.clientSeedDigest || null,
+    deckCommitmentRoot: fairness.deckCommitmentRoot || null,
+    issuedAt: fairness.issuedAt || null,
+  };
+}
+
+/** Never broadcast a seed capable of reconstructing folded players' cards. */
+function publicLastHand(lastHand) {
+  if (!lastHand || typeof lastHand !== "object") return null;
+  const out = { ...lastHand };
+  if (lastHand.provablyFair) out.provablyFair = publicFairnessCommit(lastHand.provablyFair);
+  return out;
 }
 
 function isBotUserId(userId) {
@@ -274,7 +295,8 @@ class RedisTableLockManager {
 }
 
 class SocketSecurityGuard {
-  constructor() {
+  constructor(redis = null) {
+    this.redis = redis;
     this.actionWindowMs = Math.max(1000, toSafeInt(process.env.POKER_ACTION_WINDOW_MS, 1000));
     this.actionPerWindow = Math.max(2, toSafeInt(process.env.POKER_ACTION_RATE_LIMIT, 6));
     this.connectWindowMs = Math.max(1000, toSafeInt(process.env.POKER_CONNECT_WINDOW_MS, 10000));
@@ -285,14 +307,29 @@ class SocketSecurityGuard {
     this.violations = new Map();
     this.bans = new Map();
     this.socketSeen = new Set();
+    this.trustForwardedIp = Number(process.env.TRUST_PROXY_HOPS || 0) > 0;
   }
 
   getIp(socket) {
     return (
-      socket?.handshake?.headers?.["x-forwarded-for"]?.split(",")[0]?.trim() ||
+      (this.trustForwardedIp
+        ? socket?.handshake?.headers?.["x-forwarded-for"]?.split(",")[0]?.trim()
+        : null) ||
       socket?.handshake?.address ||
       "unknown"
     );
+  }
+
+  _cleanup(now = Date.now()) {
+    for (const [key, row] of this.buckets) {
+      if (row.resetAt <= now) this.buckets.delete(key);
+    }
+    for (const [key, until] of this.bans) {
+      if (until <= now) {
+        this.bans.delete(key);
+        this.violations.delete(key);
+      }
+    }
   }
 
   _bucketKey(type, key) {
@@ -301,6 +338,7 @@ class SocketSecurityGuard {
 
   _take(type, key, limit, windowMs) {
     const now = Date.now();
+    this._cleanup(now);
     const k = this._bucketKey(type, key);
     const row = this.buckets.get(k);
     if (!row || row.resetAt <= now) {
@@ -336,6 +374,7 @@ class SocketSecurityGuard {
   }
 
   onConnection(socket, userId) {
+    this._cleanup();
     const ip = this.getIp(socket);
     if (this._isBanned(userId, ip)) {
       return { blocked: true, reason: "TEMP_BANNED" };
@@ -359,18 +398,12 @@ class SocketSecurityGuard {
   }
 
   onAction(userId, ip, actionId) {
+    this._cleanup();
     if (this._isBanned(userId, ip)) return { blocked: true, reason: "TEMP_BANNED" };
     const userOk = this._take("action_user", userId, this.actionPerWindow, this.actionWindowMs);
     const ipOk = this._take("action_ip", ip, this.actionPerWindow * 2, this.actionWindowMs);
     if (!userOk || !ipOk) {
       return this._registerViolation("action_spam", userId, ip, { actionId });
-    }
-    if (actionId) {
-      const dupKey = `${userId}:${actionId}`;
-      const unique = this._take("dup_action", dupKey, 1, 60000);
-      if (!unique) {
-        return this._registerViolation("duplicate_action_flood", userId, ip, { actionId });
-      }
     }
     return { blocked: false };
   }
@@ -386,6 +419,7 @@ class PokerTable {
     this.maxBuyIn = toSafeInt(table.maxBuyIn, this.minBuyIn);
     this.buyIn = toSafeInt(table.buyIn ?? table.minBuyIn, this.minBuyIn);
     this.minimumBet = deriveMinimumBet(this.buyIn, table.minimumBet);
+    this.rakePolicy = resolveRakePolicy(table);
     this.capacity = normalizeCapacity(toSafeInt(table.capacity, 9));
     this.dealerIndex = 0;
     this.running = false;
@@ -462,6 +496,8 @@ class PokerTable {
     this.serverSeed = null;
     this.serverSeedHash = null;
     this.clientSeedDigest = null;
+    this.fairnessDeckOrder = null;
+    this.deckCommitmentRoot = null;
     this.sbSeatIndex = -1;
     this.bbSeatIndex = -1;
     this.handStartedAt = null;
@@ -474,6 +510,15 @@ class PokerTable {
       lockArg ||
       (this.redis ? new RedisTableLockManager(this.redis) : new InMemoryTableLockManager());
     this.stateStore = options?.stateStore || new RedisTableStateStore(this.redis);
+    // Unit-only engine construction often has no Mongo connection. A live
+    // server must persist the commitment before dealing; no durable commit
+    // means no fair-play claim and therefore no hand.
+    this.requireFairnessCommit = options?.requireFairnessCommit ?? mongoose.connection.readyState === 1;
+    this.fairnessCommit = null;
+    // This is deliberately per-hand. Recovered legacy snapshots and focused
+    // engine tests may predate the durable commitment table; a new hand only
+    // becomes settlement-blocking after its commitment was written.
+    this.fairnessCommitRequiredForHand = false;
   }
 
   static get ROUND_TRANSITIONS() {
@@ -645,8 +690,15 @@ class PokerTable {
       community: [...this.community],
       deck: Array.isArray(this.deck) ? [...this.deck] : [],
       currentHandId: this.currentHandId,
+      // Internal snapshot data. This never appears in a client state; it is
+      // required to reveal the same committed seed after crash recovery.
+      serverSeed: this.serverSeed,
       serverSeedHash: this.serverSeedHash,
       clientSeedDigest: this.clientSeedDigest,
+      fairnessDeckOrder: Array.isArray(this.fairnessDeckOrder) ? [...this.fairnessDeckOrder] : null,
+      deckCommitmentRoot: this.deckCommitmentRoot,
+      fairnessCommit: this.fairnessCommit ? { ...this.fairnessCommit } : null,
+      fairnessCommitRequiredForHand: !!this.fairnessCommitRequiredForHand,
       currentHandActions: [...this.currentHandActions],
       processedActionIds: [...this.processedActionIds],
       lastHand: this.lastHand,
@@ -708,8 +760,22 @@ class PokerTable {
     this.community = Array.isArray(snapshot.community) ? [...snapshot.community] : [];
     this.deck = Array.isArray(snapshot.deck) ? [...snapshot.deck] : [];
     this.currentHandId = snapshot.currentHandId || null;
+    this.serverSeed = snapshot.serverSeed || null;
     this.serverSeedHash = snapshot.serverSeedHash || null;
     this.clientSeedDigest = snapshot.clientSeedDigest || null;
+    this.fairnessDeckOrder = Array.isArray(snapshot.fairnessDeckOrder)
+      ? [...snapshot.fairnessDeckOrder]
+      : null;
+    this.deckCommitmentRoot = snapshot.deckCommitmentRoot || null;
+    this.fairnessCommit = snapshot.fairnessCommit || (this.currentHandId && this.serverSeedHash
+      ? {
+        handId: this.currentHandId,
+        serverSeedHash: this.serverSeedHash,
+        clientSeedDigest: this.clientSeedDigest,
+        issuedAt: null,
+      }
+      : null);
+    this.fairnessCommitRequiredForHand = !!snapshot.fairnessCommitRequiredForHand;
     this.currentHandActions = Array.isArray(snapshot.currentHandActions)
       ? [...snapshot.currentHandActions]
       : [];
@@ -883,7 +949,16 @@ class PokerTable {
       botFillDeadline: snapshot.botFillDeadline || null,
       waitForPlayersDeadline: snapshot.waitForPlayersDeadline || null,
       waitForPlayersSeconds: Math.ceil(POKER_TIMINGS.WAIT_FOR_PLAYERS_MS / 1000),
-      lastHand: snapshot.lastHand || null,
+      fairnessCommit: snapshot.fairnessCommit || (snapshot.currentHandId && snapshot.serverSeedHash
+        ? {
+          handId: snapshot.currentHandId,
+          serverSeedHash: snapshot.serverSeedHash,
+          clientSeedDigest: snapshot.clientSeedDigest || null,
+          deckCommitmentRoot: snapshot.deckCommitmentRoot || null,
+          issuedAt: null,
+        }
+        : null),
+      lastHand: publicLastHand(snapshot.lastHand),
       actionSpec,
       lastAction:
         snapshot.lastAction && typeof snapshot.lastAction === "object"
@@ -924,20 +999,52 @@ class PokerTable {
   async saveSnapshot({ finished = false } = {}) {
     // H-3: only the authoritative owner may persist snapshots — a follower write
     // would clobber the owner's state in Redis.
-    if (!this.isOwner) return;
+    if (!this.isOwner) return false;
     this.stateRevision = toSafeInt(this.stateRevision, 0) + 1;
-    if (!this.stateStore || !this.stateStore.isEnabled()) return;
+    if (!this.stateStore || !this.stateStore.isEnabled()) return true;
     try {
       const snapshot = this.serializeSnapshot();
-      await this.stateStore.save(this.tableId, snapshot, { finished });
+      const saved = await this.stateStore.save(this.tableId, snapshot, {
+        finished,
+        ownerFence: this.ownershipFence,
+      });
+      if (!saved) {
+        this.isOwner = false;
+        this.running = false;
+        this.starting = false;
+        this.disposeTimers();
+        logger.error("poker_snapshot_fenced", { tableId: this.tableId, fence: this.ownershipFence });
+        return false;
+      }
+      return true;
     } catch (err) {
       // A Redis blip must NEVER reject into the hot path (broadcastState →
       // advance) and freeze the live table. The next broadcast re-persists;
       // crash recovery reconciles from Mongo if this snapshot was skipped.
-      logger.warn("poker_snapshot_save_failed", {
+      this.isOwner = false;
+      this.running = false;
+      this.starting = false;
+      this.disposeTimers();
+      logger.error("poker_snapshot_save_failed", {
         tableId: this.tableId,
         reason: err?.message || "unknown",
       });
+      return false;
+    }
+  }
+
+  async onEvent(userId, ip, type, limit, windowSec) {
+    if (!this.redis) return this._take(`event_${type}`, userId, limit, windowSec * 1000);
+    const bucket = Math.floor(Date.now() / (windowSec * 1000));
+    const key = `poker:socket-rate:${type}:${String(userId)}:${bucket}`;
+    try {
+      const count = Number(await this.redis.incr(key));
+      if (count === 1) await this.redis.expire(key, windowSec + 5);
+      return count <= limit;
+    } catch (_) {
+      // Clustered production must not accept unmetered socket traffic when the
+      // shared limiter is unavailable.
+      return false;
     }
   }
 
@@ -1119,77 +1226,94 @@ class PokerTable {
     return 0;
   }
 
-  async applyJackpotPayout(winnerIdxs) {
-    if (!winnerIdxs || winnerIdxs.length === 0) return;
-    try {
-      const j = await Jackpot.getSingleton();
-      if (!j || (j.pot || 0) <= 0) return;
-      // Determine highest qualifying hand type among winners
-      let type = null; // 'royalFlush' | 'straightFlush' | 'fullHouse'
-      const qualified = [];
-      for (const i of winnerIdxs) {
-        if (this.seats[i]?.isBot) continue;
-        const rank = bestOf7([...this.seats[i].hole, ...this.community]);
-        if (rank.cat === 8) {
-          // Straight flush; royal if high is Ace (14)
-          const isRoyal = (rank.tiebreak && rank.tiebreak[0] === 14);
-          const t = isRoyal ? 'royalFlush' : 'straightFlush';
-          // Prefer higher category
-          if (type !== 'royalFlush') {
-            type = t;
-          }
-          qualified.push({ i, type: t });
-        } else if (rank.cat === 6) {
-          if (!type) type = 'fullHouse';
-          qualified.push({ i, type: 'fullHouse' });
+  legacyJackpotPayoutPlan(winnerIdxs) {
+    let type = null;
+    const qualified = [];
+    for (const i of winnerIdxs || []) {
+      if (this.seats[i]?.isBot || isBotUserId(this.seats[i]?.userId)) continue;
+      const rank = bestOf7([...(this.seats[i]?.hole || []), ...this.community]);
+      if (rank.cat === 8) {
+        const handType = rank.tiebreak?.[0] === 14 ? "royalFlush" : "straightFlush";
+        if (type !== "royalFlush") type = handType;
+        qualified.push({ i, type: handType });
+      } else if (rank.cat === 6) {
+        if (!type) type = "fullHouse";
+        qualified.push({ i, type: "fullHouse" });
+      }
+    }
+    if (!type) return null;
+    return { type, winnerSeatIndices: qualified.filter((entry) => entry.type === type).map((entry) => entry.i) };
+  }
+
+  async getLegacyJackpotForSettlement(session) {
+    let query = Jackpot.findOne();
+    if (session) query = query.session(session);
+    let jackpot = await query;
+    if (!jackpot) {
+      const [created] = await Jackpot.create([{}], session ? { session } : {});
+      jackpot = created;
+    }
+    return jackpot;
+  }
+
+  /** Applies legacy poker-jackpot fees and award inside the caller's transaction. */
+  async settleLegacyJackpot({ session, winnerIdxs }) {
+    const contribution = Math.max(0, toSafeInt(this.handJackpotFees, 0));
+    const plan = this.legacyJackpotPayoutPlan(winnerIdxs);
+    if (contribution <= 0 && !plan) return [];
+
+    const jackpot = await this.getLegacyJackpotForSettlement(session);
+    if (contribution > 0) jackpot.pot = toSafeInt(jackpot.pot, 0) + contribution;
+    if (!plan || toSafeInt(jackpot.pot, 0) <= 0) {
+      if (contribution > 0) await jackpot.save(session ? { session } : undefined);
+      return [];
+    }
+
+    const factor = plan.type === "royalFlush" ? (jackpot.payouts?.royalFlush || 1)
+      : plan.type === "straightFlush" ? (jackpot.payouts?.straightFlush || 0.8)
+      : (jackpot.payouts?.fullHouse || 0.3);
+    const share = Math.max(
+      0,
+      Math.floor(Math.floor(toSafeInt(jackpot.pot, 0) * factor) / plan.winnerSeatIndices.length)
+    );
+    let paidOut = 0;
+    const awards = [];
+    if (share > 0) {
+      for (const seatIndex of plan.winnerSeatIndices) {
+        const userId = this.seats[seatIndex]?.userId;
+        if (!userId || isBotUserId(userId)) continue;
+        const credited = await creditJackpotWin({
+          session,
+          userId,
+          amount: share,
+          handId: this.currentHandId,
+          meta: { reason: "legacy_poker_jackpot", jackpotType: plan.type, tableId: this.tableId },
+        });
+        if (credited) {
+          paidOut += share;
+          awards.push({ userId, amount: share, type: plan.type });
         }
       }
+    }
+    if (contribution > 0 || paidOut > 0) {
+      jackpot.pot = Math.max(0, toSafeInt(jackpot.pot, 0) - paidOut);
+      await jackpot.save(session ? { session } : undefined);
+    }
+    return awards;
+  }
 
-      if (!type) return; // no qualifying hand
-
-      const factor = type === 'royalFlush' ? (j.payouts?.royalFlush || 1.0)
-        : type === 'straightFlush' ? (j.payouts?.straightFlush || 0.8)
-        : (j.payouts?.fullHouse || 0.3);
-
-      let amount = Math.floor((j.pot || 0) * factor);
-      if (amount <= 0) return;
-
-      // Winners that match the selected highest type
-      const winners = qualified.filter((q) => q.type === type).map((q) => q.i);
-      const share = Math.max(0, Math.floor(amount / winners.length));
-      if (share <= 0) return;
-
-      const handId = this.currentHandId;
-      // C-5: pay atomically through the ledger (never the legacy embedded
-      // wallet.transactions path), decrementing the jackpot pool in the SAME
-      // transaction, and idempotent per (winner, hand).
-      await withMongoTransaction(async (session) => {
-        const jTx = await Jackpot.getSingleton();
-        let paidOut = 0;
-        for (const wi of winners) {
-          const userId = this.seats[wi]?.userId;
-          if (!userId || isBotUserId(userId)) continue;
-          const credited = await creditJackpotWin({
-            session,
-            userId,
-            amount: share,
-            handId,
-            meta: { reason: "golden_island_jackpot", jackpotType: type, tableId: this.tableId },
-          });
-          if (credited) paidOut += share;
-        }
-        if (paidOut > 0) {
-          jTx.pot = Math.max(0, toSafeInt(jTx.pot, 0) - paidOut);
-          await jTx.save(session ? { session } : undefined);
-        }
-      });
+  /** Retained for reconciliation tooling/tests; live hands settle this inside their core transaction. */
+  async applyJackpotPayout(winnerIdxs) {
+    try {
+      return await withMongoTransaction((session) => this.settleLegacyJackpot({ session, winnerIdxs }));
     } catch (e) {
-      // Never let a jackpot payout error block hand settlement / next hand.
       logger.warn("poker_jackpot_payout_failed", {
         tableId: this.tableId,
         handId: this.currentHandId,
         reason: e?.message || "unknown",
       });
+      return false;
+      return [];
     }
   }
 
@@ -1201,6 +1325,7 @@ class PokerTable {
     this.maxBuyIn = toSafeInt(table.maxBuyIn, this.maxBuyIn || this.minBuyIn);
     this.buyIn = toSafeInt(table.buyIn ?? table.minBuyIn, this.buyIn || this.minBuyIn);
     this.minimumBet = deriveMinimumBet(this.buyIn, table.minimumBet ?? this.minimumBet);
+    this.rakePolicy = resolveRakePolicy(table);
     this.botFillTarget = clampInt(this.botFillTarget || 2, 2, Math.max(2, this.capacity));
 
     const isHandRunning = this.running && this.round && String(this.round) !== "idle";
@@ -1708,6 +1833,7 @@ class PokerTable {
     const idx = this.findSeatIndexByUser(userId);
     if (idx < 0) return;
     const seat = this.seats[idx];
+    if (seat.playerState === PLAYER_STATE.LEAVE_PENDING) return;
     this.clearReconnectTimer(userId);
     seat.disconnectedAt = null;
     seat.reconnectDeadline = null;
@@ -1770,35 +1896,45 @@ class PokerTable {
         if (i < 0) return;
         const s = this.seats[i];
         if (s.playerState !== PLAYER_STATE.DISCONNECTED) return;
-        // Still gone after the reconnect window: hand the seat to the vacate
-        // pipeline (Mongo seat -> vacatingPlayers, 30s bot-takeover grace,
-        // fund forfeiture on expiry) instead of leaving them SITTING_OUT
-        // forever with their buy-in permanently locked. applyEngineVacate
-        // (invoked via vacatePokerSeat -> the bridge) folds/advances the
-        // in-progress hand itself, so no manual fold here.
-        if (mongoose.isValidObjectId(this.tableId)) {
-          const { vacatePokerSeat } = require("../services/pokerVacateService");
-          await vacatePokerSeat({
-            tableId: this.tableId,
-            userId: uid,
-            reason: "disconnect_timeout",
-          });
-        } else {
+        // The reconnect grace expired. Fold safely, then request a durable
+        // post-settlement cash-out; disconnected money is never forfeited or
+        // transferred to a bot.
+        {
           s.playerState = PLAYER_STATE.SITTING_OUT;
           // The reconnect window is over — clear the disconnect markers so this
-          // seat is no longer skipped forever by bot-fill promotion (which
-          // ignores seats with disconnectedAt). Closes the SITTING_OUT dead-end.
+          // seat stays excluded while the safe cash-out is pending.
           s.disconnectedAt = null;
           s.reconnectDeadline = null;
           if (s.inHand && this.running) {
-            s.folded = true;
+            this.applyFold(i);
+            this.recordSeatAction(i, "disconnect_fold");
+            this.appendHandAction({ type: "disconnect_fold", seatIndex: i, playerId: s.userId });
             await this.broadcastState();
-            if (this.currentIndex === i) {
+            if (this.currentIndex === i || this.aliveCount() <= 1) {
               await this.advance();
             }
           } else {
             await this.broadcastState();
           }
+        }
+        try {
+          // No bot inherits a disconnected human's locked stack. Once the
+          // reconnect grace expires, persist an idempotent cash-out intent;
+          // it executes only after any active hand has settled.
+          const { markPendingPermanentLeave, scheduleDeferredPermanentLeave } = require("../services/pokerVacateService");
+          await markPendingPermanentLeave({ tableId: this.tableId, userId: uid });
+          const currentSeat = this.seats[this.findSeatIndexByUser(uid)];
+          if (currentSeat) currentSeat.playerState = PLAYER_STATE.LEAVE_PENDING;
+          scheduleDeferredPermanentLeave({ tableId: this.tableId, userId: uid });
+          await this.broadcastState();
+        } catch (err) {
+          // A database outage never turns an internet fault into a forfeiture.
+          // The seat remains sitting out and can be recovered later.
+          logger.warn("poker_disconnect_cashout_deferred_failed", {
+            tableId: this.tableId,
+            userId: uid,
+            reason: err?.message || "unknown",
+          });
         }
       } finally {
         await this.releaseActionLock();
@@ -1806,6 +1942,40 @@ class PokerTable {
     }, reconnectWindowMs);
     this.reconnectTimers.set(uid, timer);
     void this.broadcastState();
+  }
+
+  /**
+   * Voluntary leave during a hand folds the player but defers their cash-out
+   * until settlement. This prevents a pre-settlement seat balance from being
+   * returned while chips are still committed to the pot.
+   */
+  async requestPlayerLeave(userId) {
+    const uid = String(userId);
+    const lockAcquired = await this.acquireActionLock();
+    if (!lockAcquired) return false;
+    try {
+      const idx = this.findSeatIndexByUser(uid);
+      if (idx < 0) return false;
+      const seat = this.seats[idx];
+      if (seat.isBot) return false;
+      this.clearReconnectTimer(uid);
+      seat.disconnectedAt = null;
+      seat.reconnectDeadline = null;
+      seat.playerState = PLAYER_STATE.LEAVE_PENDING;
+      if (seat.inHand && this.running && !seat.folded && !seat.allIn) {
+        this.applyFold(idx);
+        this.recordSeatAction(idx, "leave_fold");
+        this.appendHandAction({ type: "leave_fold", seatIndex: idx, playerId: seat.userId });
+        if (this.currentIndex === idx || this.aliveCount() <= 1) {
+          await this.advance();
+          return true;
+        }
+      }
+      await this.broadcastState();
+      return true;
+    } finally {
+      await this.releaseActionLock();
+    }
   }
 
   assertChipConservation(context) {
@@ -1929,8 +2099,13 @@ class PokerTable {
 
   async syncMongoTableStatus() {
     try {
-      const table = await Table.findById(this.tableId).select("seats capacity status gameType");
+      const table = await Table.findById(this.tableId).select("seats capacity status gameType pokerOwnerFence");
       if (!table || table.gameType !== "poker") return;
+      if (this.ownershipFence > 0 && toSafeInt(table.pokerOwnerFence, 0) > this.ownershipFence) {
+        this.isOwner = false;
+        this.disposeTimers();
+        return;
+      }
       const cap = normalizeCapacity(table.capacity);
       const next = derivePokerTableStatus({
         mongoSeatCount: table.seats.length,
@@ -2294,10 +2469,16 @@ class PokerTable {
       .sort()
       .join("|");
     this.clientSeedDigest = sha256Hex(clientSeedMaterial);
-
-    // Prepare deck
+    // Prepare + commit to the draw-order before any card is dealt.  The deck
+    // is consumed from its end, hence the reverse establishes draw index 0.
     const shuffleSeed = `${this.serverSeed}:${this.clientSeedDigest}:${this.currentHandId}`;
     const deck = shuffleDeterministic(newDeck(), shuffleSeed);
+    this.fairnessDeckOrder = [...deck].reverse();
+    this.deckCommitmentRoot = buildDeckCommitment(
+      this.currentHandId,
+      this.fairnessDeckOrder
+    ).root;
+    await this.persistFairnessCommit();
 
     for (const s of this.seats) {
       s.handStartChips = s.chips;
@@ -2373,7 +2554,9 @@ class PokerTable {
     this.deck = deck;
 
     // Jackpot contribution per hand (Golden Island) — skipped when fee is 0.
-    const jackpotDeducted = await this.applyJackpotContribution();
+    // Legacy per-hand jackpot mutates RAM before the Mongo settlement and is
+    // therefore intentionally retired. Island Jackpot uses the durable plan.
+    const jackpotDeducted = 0;
     // C-5: remember the human jackpot fees so settlement can exclude them from
     // the house counterparty (the fees went to the jackpot pool, not the house).
     this.handJackpotFees = toSafeInt(jackpotDeducted, 0);
@@ -2704,6 +2887,7 @@ class PokerTable {
 
   resolveSidePotPayoutsWithDistribution(rankByIndex) {
     const payouts = new Map();
+    const uncalledReturns = new Map();
     const seatOrder = this.seatOrderFrom(this.dealerIndex);
     const sidePots = this.buildSidePots();
 
@@ -2711,7 +2895,26 @@ class PokerTable {
     const potDistribution = [];
 
     for (const pot of sidePots) {
-      if (!pot.eligible || pot.eligible.length === 0 || pot.amount <= 0) continue;
+      if (pot.amount <= 0) continue;
+
+      // A level funded by one player is an uncalled bet, not a side pot. It is
+      // returned in full and must never be raked or presented as a win.
+      if (pot.contributors.length === 1) {
+        const seatIndex = pot.contributors[0];
+        payouts.set(seatIndex, (payouts.get(seatIndex) || 0) + pot.amount);
+        uncalledReturns.set(seatIndex, (uncalledReturns.get(seatIndex) || 0) + pot.amount);
+        potId += 1;
+        potDistribution.push({
+          potId,
+          amount: pot.amount,
+          eligibleSeatIndices: [seatIndex],
+          winners: [{ seatIndex, amountWon: pot.amount }],
+          kind: "uncalled_return",
+        });
+        continue;
+      }
+
+      if (!pot.eligible || pot.eligible.length === 0) continue;
 
       potId += 1;
 
@@ -2744,10 +2947,50 @@ class PokerTable {
         amount: pot.amount, // gross (before rake)
         eligibleSeatIndices: pot.eligible,
         winners: winnersDistribution,
+        kind: "contested",
       });
     }
 
-    return { payouts, potDistribution };
+    return { payouts, potDistribution, uncalledReturns };
+  }
+
+  async persistFairnessCommit() {
+    this.fairnessCommitRequiredForHand = false;
+    this.fairnessCommit = {
+      handId: this.currentHandId,
+      serverSeedHash: this.serverSeedHash,
+      clientSeedDigest: this.clientSeedDigest,
+      deckCommitmentRoot: this.deckCommitmentRoot,
+      issuedAt: Date.now(),
+    };
+    if (!this.requireFairnessCommit) return;
+    if (!mongoose.isValidObjectId(this.tableId)) {
+      throw new Error("FAIRNESS_COMMIT_INVALID_TABLE");
+    }
+
+    const PokerHandCommit = require("../models/pokerHandCommitModel");
+    const commit = await PokerHandCommit.findOneAndUpdate(
+      { handId: this.currentHandId },
+      {
+        $setOnInsert: {
+          handId: this.currentHandId,
+          table: this.tableId,
+          serverSeedHash: this.serverSeedHash,
+          clientSeedDigest: this.clientSeedDigest,
+          deckCommitmentRoot: this.deckCommitmentRoot,
+          issuedAt: new Date(this.fairnessCommit.issuedAt),
+        },
+      },
+      { upsert: true, new: true }
+    ).lean();
+    if (
+      commit?.serverSeedHash !== this.serverSeedHash ||
+      commit?.clientSeedDigest !== this.clientSeedDigest ||
+      commit?.deckCommitmentRoot !== this.deckCommitmentRoot
+    ) {
+      throw new Error("FAIRNESS_COMMIT_MISMATCH");
+    }
+    this.fairnessCommitRequiredForHand = true;
   }
 
   applyRakeToPayouts(payouts, rake) {
@@ -2951,11 +3194,7 @@ class PokerTable {
       }
     }
 
-    try {
-      await this.applyJackpotPayout(bestIdxs);
-    } catch (e) {}
-
-    const { payouts, potDistribution } = this.resolveSidePotPayoutsWithDistribution(rankByIndex);
+    const { payouts, potDistribution, uncalledReturns } = this.resolveSidePotPayoutsWithDistribution(rankByIndex);
     const handCategory =
       bestIdxs.length > 0 ? showdownRanks.get(bestIdxs[0])?.name || null : null;
 
@@ -2971,11 +3210,17 @@ class PokerTable {
       { lastAggressorSeat: lastAggSeat, rankByIndex }
     );
 
-    const winnerUserIds = bestIdxs.map((i) => String(this.seats[i]?.userId || ""));
+    // The best overall hand can differ from a side-pot winner. The client must
+    // receive every player who won a contested pot, otherwise a valid side-pot
+    // win is rendered as a loss.
+    const payoutWinnerIdxs = [...payouts.entries()]
+      .filter(([idx, amount]) => amount > Math.max(0, toSafeInt(uncalledReturns.get(idx), 0)))
+      .map(([idx]) => idx);
+    const winnerUserIds = payoutWinnerIdxs.map((i) => String(this.seats[i]?.userId || ""));
     this.nsp.to(room).emit("showdown_start", {
       players: contenders.map(({ i, s }) => ({ userId: String(s.userId), seatIndex: i })),
       winnerUserIds,
-      winnerSeatIndices: bestIdxs,
+      winnerSeatIndices: payoutWinnerIdxs,
       pauseMs,
       revealGapMs: gapMs,
       lastAggressorSeatIndex: lastAggSeat >= 0 ? lastAggSeat : null,
@@ -3007,7 +3252,7 @@ class PokerTable {
         userId: String(s.userId),
         seatIndex,
         cards: [String(s.hole[0] || ""), String(s.hole[1] || "")],
-        isWinner: bestIdxs.includes(seatIndex),
+        isWinner: payoutWinnerIdxs.includes(seatIndex),
         dramatic,
         step: step + 1,
         total,
@@ -3032,7 +3277,9 @@ class PokerTable {
     }
     const closingHandId = this.currentHandId;
 
-    const potsPayload = potDistribution.map((p) => ({
+    const potsPayload = potDistribution
+      .filter((p) => p.kind !== "uncalled_return")
+      .map((p) => ({
       amount: toSafeInt(p.amount, 0),
       eligibleUserIds: (Array.isArray(p.eligibleSeatIndices) ? p.eligibleSeatIndices : [])
         .map((si) => String(this.seats[toSafeInt(si, -1)]?.userId || ""))
@@ -3040,13 +3287,15 @@ class PokerTable {
       winnerUserIds: (Array.isArray(p.winners) ? p.winners : [])
         .map((w) => String(this.seats[toSafeInt(w.seatIndex, -1)]?.userId || ""))
         .filter(Boolean),
-    }));
+      }));
 
     let winnerBadge = "WINNER";
     if (bestIdxs.length > 1) {
       winnerBadge = "SPLIT_POT";
-    } else if (bestIdxs.length === 1) {
-      const ws = this.seats[bestIdxs[0]];
+    } else if (payoutWinnerIdxs.length > 1) {
+      winnerBadge = "MULTI_POT_WINNERS";
+    } else if (payoutWinnerIdxs.length === 1) {
+      const ws = this.seats[payoutWinnerIdxs[0]];
       if (ws && ws.allIn) winnerBadge = "ALL_IN_WIN";
     }
 
@@ -3056,8 +3305,22 @@ class PokerTable {
       reason: "showdown",
       showdownRanks,
       potDistribution,
+      uncalledReturns,
       handCategory,
     }, { manageLifecycle: false });
+
+    // Settlement may cap rake and exclude an uncalled return. Emit the net
+    // per-pot figures that were actually credited, not the earlier gross FX
+    // values, so the table animation and wallet can be reconciled by players.
+    const settledPotsPayload = Array.isArray(this.lastHand?.potDistribution)
+      ? this.lastHand.potDistribution.map((p) => ({
+        amount: toSafeInt(p.amount, 0),
+        eligibleUserIds: Array.isArray(p.eligiblePlayers) ? p.eligiblePlayers : [],
+        winnerUserIds: Array.isArray(p.winners)
+          ? p.winners.map((w) => String(w.playerId || "")).filter(Boolean)
+          : [],
+      }))
+      : potsPayload;
 
     this.showdownRevealedSeats = new Set();
     this.nsp.to(room).emit("showdown_end", {
@@ -3066,8 +3329,10 @@ class PokerTable {
       winnerUserIds,
       winners: winnerUserIds.slice(),
       pot: potBeforeSettlement,
+      rake: toSafeInt(this.lastHand?.rake, 0),
+      contestedPot: toSafeInt(this.lastHand?.contestedPot, potBeforeSettlement),
       contributions,
-      pots: potsPayload,
+      pots: settledPotsPayload,
       winnerBadge,
       stateRevision: toSafeInt(this.stateRevision, 0),
     });
@@ -3075,6 +3340,7 @@ class PokerTable {
     this.setRound("idle");
     await this.broadcastState();
     this.currentHandId = null;
+    this.fairnessCommitRequiredForHand = false;
     this.currentHandActions = [];
     this.processedActionIds = new Set();
 
@@ -3085,7 +3351,12 @@ class PokerTable {
 
   async applyJackpotContribution() {
     try {
-      const enabled = String(process.env.JACKPOT_ENABLED || "").toLowerCase() === "true";
+      // Island Jackpot is the supported poker jackpot. The older `Jackpot`
+      // collection can only be enabled explicitly, preventing accidental
+      // double entry fees/payouts when both systems are configured.
+      const enabled = ["1", "true", "yes", "on"].includes(
+        String(process.env.POKER_LEGACY_JACKPOT_ENABLED || "").toLowerCase()
+      );
       if (!enabled) return 0;
 
       const j = await Jackpot.getSingleton();
@@ -3103,10 +3374,9 @@ class PokerTable {
           if (s.chips === 0) s.allIn = true;
         }
       }
-      if (total > 0) {
-        j.pot += total;
-        await j.save();
-      }
+      // The actual pool write happens inside hand settlement with the wallet
+      // and hand history. A crash before settlement therefore cannot create
+      // an unfunded jackpot contribution.
       return total;
     } catch (e) {
       return 0;
@@ -3184,14 +3454,33 @@ class PokerTable {
 
   async persistAndPrepareNext(community, payoutBySeat, winnerIdxs, meta = {}, opts = {}) {
     const manageLifecycle = opts.manageLifecycle !== false;
-    // Rake simple percentage
-    const rakePct = Math.max(
-      0,
-      Math.min(0.2, parseFloat(process.env.RAKE_PERCENT || "0.05"))
-    );
-    const rake = Math.floor(this.pot * rakePct);
     const payouts = payoutBySeat instanceof Map ? new Map(payoutBySeat) : new Map();
-    const cutsBySeat = this.applyRakeToPayouts(payouts, rake);
+    const uncalledReturns = meta.uncalledReturns instanceof Map
+      ? new Map(meta.uncalledReturns)
+      : new Map();
+    const totalUncalledReturns = [...uncalledReturns.values()]
+      .reduce((sum, amount) => sum + Math.max(0, toSafeInt(amount, 0)), 0);
+    const potTotal = toSafeInt(this.pot, 0);
+    const contestedPot = Math.max(0, potTotal - totalUncalledReturns);
+    const flopDealt = Array.isArray(community) && community.length >= 3;
+    const rake = calculateRake({
+      contestedPot,
+      flopDealt,
+      policy: this.rakePolicy,
+    });
+
+    // Rake only the contested share of a payout. An unmatched overbet is a
+    // return of the player's own chip, not a win and not rakeable.
+    const rakeablePayouts = new Map();
+    for (const [idx, gross] of payouts.entries()) {
+      const returned = Math.max(0, toSafeInt(uncalledReturns.get(idx), 0));
+      rakeablePayouts.set(idx, Math.max(0, toSafeInt(gross, 0) - returned));
+    }
+    const cutsBySeat = this.applyRakeToPayouts(rakeablePayouts, rake);
+    for (const [idx, contestedNet] of rakeablePayouts.entries()) {
+      const returned = Math.max(0, toSafeInt(uncalledReturns.get(idx), 0));
+      payouts.set(idx, contestedNet + returned);
+    }
 
     const showdownRanks = meta.showdownRanks instanceof Map ? meta.showdownRanks : null;
     const handCategory =
@@ -3202,6 +3491,7 @@ class PokerTable {
     const potDistributionWork = potDistributionGross
       ? potDistributionGross.map((p) => ({
         potId: p.potId,
+        kind: p.kind || "contested",
         eligibleSeatIndices: Array.isArray(p.eligibleSeatIndices) ? [...p.eligibleSeatIndices] : [],
         winners: Array.isArray(p.winners) ? p.winners.map((w) => ({
           seatIndex: w.seatIndex,
@@ -3214,6 +3504,7 @@ class PokerTable {
     if (potDistributionWork && cutsBySeat && cutsBySeat.size > 0) {
       const remainingCuts = new Map(cutsBySeat);
       for (const pot of potDistributionWork) {
+        if (pot.kind === "uncalled_return") continue;
         for (const winner of pot.winners) {
           const seatIdx = winner.seatIndex;
           const cutLeft = remainingCuts.get(seatIdx) || 0;
@@ -3230,14 +3521,15 @@ class PokerTable {
     // mutating the live seats. The engine's RAM stacks are advanced only after the
     // DB transaction commits (below), so a settlement failure can never leave the
     // engine ahead of the wallet/DB — the two always stay reconcilable.
-    const potTotal = toSafeInt(this.pot, 0);
     const intendedChips = this.seats.map((s) => toSafeInt(s.chips, 0));
     const winners = [];
     for (const [idx, share] of payouts.entries()) {
       if (!Number.isFinite(share) || share <= 0) continue;
       intendedChips[idx] = toSafeInt(intendedChips[idx], 0) + share;
-      if (!this.seats[idx].isBot && !isBotUserId(this.seats[idx].userId)) {
-        winners.push({ user: this.seats[idx].userId, share });
+      const returned = Math.max(0, toSafeInt(uncalledReturns.get(idx), 0));
+      const potShare = Math.max(0, share - returned);
+      if (potShare > 0 && !this.seats[idx].isBot && !isBotUserId(this.seats[idx].userId)) {
+        winners.push({ user: this.seats[idx].userId, share: potShare });
       }
     }
 
@@ -3246,13 +3538,16 @@ class PokerTable {
       if (!Number.isFinite(share) || share <= 0) continue;
       const rankInfo = showdownRanks ? showdownRanks.get(idx) : null;
       const playerId = this.seats[idx]?.userId;
+      const returned = Math.max(0, toSafeInt(uncalledReturns.get(idx), 0));
+      const potShare = Math.max(0, share - returned);
+      if (potShare <= 0) continue;
       winnerSummaries.push({
         userId: this.seats[idx].userId,
         playerId: playerId,
         name: this.seats[idx].name,
         isBot: !!this.seats[idx].isBot,
-        share,
-        amountWon: share,
+        share: potShare,
+        amountWon: potShare,
         handCategory: rankInfo?.name || null,
       });
     }
@@ -3260,6 +3555,8 @@ class PokerTable {
     const seatSummaries = this.seats.map((s, idx) => {
       const chipsBefore = toSafeInt(s.handStartChips, s.chips);
       const chipsAfter = toSafeInt(intendedChips[idx], 0);
+      const returned = Math.max(0, toSafeInt(uncalledReturns.get(idx), 0));
+      const potWin = Math.max(0, toSafeInt(payouts.get(idx), 0) - returned);
       const rankInfo = showdownRanks ? showdownRanks.get(idx) : null;
       const atShowdown = meta.reason === "showdown" && s.inHand && !s.folded;
       return {
@@ -3272,7 +3569,7 @@ class PokerTable {
         net: chipsAfter - chipsBefore,
         folded: !!s.folded,
         allIn: !!s.allIn,
-        won: (payouts.get(idx) || 0) > 0,
+        won: potWin > 0,
         handCategory: rankInfo?.name || null,
         ...(atShowdown && Array.isArray(s.hole) && s.hole.length
           ? { hole: [...s.hole] }
@@ -3282,6 +3579,7 @@ class PokerTable {
 
     const potDistributionFinal = potDistributionWork
       ? potDistributionWork
+        .filter((p) => p.kind !== "uncalled_return")
         .map((p) => {
           const eligiblePlayers = p.eligibleSeatIndices
             .map((seatIdx) => this.seats[seatIdx]?.userId)
@@ -3314,6 +3612,12 @@ class PokerTable {
       reason: meta.reason || (showdownRanks ? "showdown" : "fold"),
       endedAt: Date.now(),
       pot: potTotal,
+      contestedPot,
+      uncalledReturns: [...uncalledReturns.entries()].map(([seatIndex, amount]) => ({
+        seatIndex,
+        userId: this.seats[seatIndex]?.userId || null,
+        amount: toSafeInt(amount, 0),
+      })),
       rake,
       community: [...community],
       winners: winnerSummaries,
@@ -3322,9 +3626,9 @@ class PokerTable {
       potDistribution: potDistributionFinal,
       actions: [...this.currentHandActions],
       provablyFair: {
-        serverSeed: this.serverSeed,
         serverSeedHash: this.serverSeedHash,
         clientSeedDigest: this.clientSeedDigest,
+        deckCommitmentRoot: this.deckCommitmentRoot,
         handId: this.currentHandId,
       },
     };
@@ -3407,7 +3711,16 @@ class PokerTable {
               })),
               auditLog,
               community,
+              dealtSeatIndices: this.seats
+                .map((s, index) => (Array.isArray(s.hole) && s.hole.length === 2 ? index : -1))
+                .filter((index) => index >= 0),
               pot: potTotal,
+              contestedPot,
+              uncalledReturns: [...uncalledReturns.entries()].map(([seatIndex, amount]) => ({
+                seatIndex,
+                user: this.seats[seatIndex]?.isBot ? undefined : this.seats[seatIndex]?.userId,
+                amount: toSafeInt(amount, 0),
+              })),
               rake,
               winners,
               potDistribution: potDistributionFinal || [],
@@ -3423,6 +3736,7 @@ class PokerTable {
                 serverSeed: this.serverSeed,
                 serverSeedHash: this.serverSeedHash,
                 clientSeedDigest: this.clientSeedDigest,
+                deckCommitmentRoot: this.deckCommitmentRoot,
                 handId: this.currentHandId,
               },
             },
@@ -3431,10 +3745,61 @@ class PokerTable {
         );
         settledHandHistoryId = handDoc?._id || null;
 
+        if (this.fairnessCommitRequiredForHand) {
+          const PokerHandCommit = require("../models/pokerHandCommitModel");
+          const revealResult = await PokerHandCommit.updateOne(
+            {
+              handId: this.currentHandId,
+              table: this.tableId,
+              serverSeedHash: this.serverSeedHash,
+              clientSeedDigest: this.clientSeedDigest,
+            },
+            { $set: { revealedAt: new Date() } },
+            session ? { session } : undefined
+          );
+          if (revealResult.matchedCount !== 1) {
+            throw new Error("FAIRNESS_COMMIT_NOT_FOUND");
+          }
+        }
+
+        // Freeze Island eligibility, policy and pool amount inside this same
+        // transaction. The outbox may run later, but must never recalculate
+        // against members/pool state that changed after this hand ended.
+        const islandSettlementPlan = await require("../services/islandJackpotService")
+          .reservePayoutForHand({
+            session,
+            handId: this.currentHandId,
+            tableId: this.tableId,
+            gameType: "poker",
+            community: [...community],
+            seats: seatSummaries,
+            handCategory: handCategory || null,
+            reason: meta.reason || (showdownRanks ? "showdown" : "fold"),
+          });
+        await require("../services/pokerPostSettlementJobService").enqueueIslandJackpotJob({
+          session,
+          handId: this.currentHandId,
+          handHistoryId: handDoc._id,
+          tableId: this.tableId,
+          payload: {
+            handId: this.currentHandId,
+            tableId: this.tableId,
+            gameType: "poker",
+            community: [...community],
+            seats: seatSummaries,
+            handCategory: handCategory || null,
+            reason: meta.reason || (showdownRanks ? "showdown" : "fold"),
+            settlementPlan: islandSettlementPlan,
+          },
+        });
+
         // Persist seat chips and write ledger entries for each human player delta.
         const tableQuery = Table.findById(this.tableId);
         const table = session ? await tableQuery.session(session) : await tableQuery;
         if (table) {
+          if (this.ownershipFence > 0 && toSafeInt(table.pokerOwnerFence, 0) > this.ownershipFence) {
+            throw new Error("POKER_FENCE_LOST");
+          }
           let humanNetDelta = 0;
           this.seats.forEach((s, i) => {
             if (s.isBot || isBotUserId(s.userId)) return;
@@ -3570,6 +3935,7 @@ class PokerTable {
       }
 
       if (!alreadySettled && settledHandHistoryId) {
+        require("../services/pokerPostSettlementJobService").schedulePokerPostSettlementProcessing();
         void require("../services/phase3HandArchiveService")
           .onHandSettled({
             handId: this.currentHandId,
@@ -3641,6 +4007,15 @@ class PokerTable {
       return;
     }
 
+    // This intent is durable in Mongo, so a restart cannot silently cancel a
+    // voluntary mid-hand cash-out. Re-arm it once this hand has committed.
+    void require("../services/pokerVacateService")
+      .resumePendingPermanentLeaves({ tableId: this.tableId })
+      .catch((err) => logger.warn("poker_resume_pending_leave_failed", {
+        tableId: this.tableId,
+        reason: err?.message || "unknown",
+      }));
+
     // Prepare next hand: move dealer to next alive seat
     const order = this.seatOrderFrom(this.dealerIndex);
     const nextDealer = order.find((i) => this.seats[i].chips > 0) ?? this.dealerIndex;
@@ -3652,6 +4027,7 @@ class PokerTable {
       await this.broadcastState(true); // reveal at end while round is showdown
       this.setRound("idle");
       this.currentHandId = null;
+      this.fairnessCommitRequiredForHand = false;
       this.currentHandActions = [];
       this.processedActionIds = new Set();
       // Short delay then auto-start the next hand when enough players remain.
@@ -3697,7 +4073,8 @@ class PokerTable {
       botFillDeadline: this.botFillDeadline,
       waitForPlayersDeadline: this.waitForPlayersDeadline,
       waitForPlayersSeconds: Math.ceil(POKER_TIMINGS.WAIT_FOR_PLAYERS_MS / 1000),
-      lastHand: this.lastHand,
+      fairnessCommit: this.fairnessCommit ? { ...this.fairnessCommit } : null,
+      lastHand: publicLastHand(this.lastHand),
       actionSpec,
       lastAction: this.computeLastTableAction(),
       activeTableTheme: this.activeTableTheme || null,
@@ -3738,9 +4115,13 @@ class PokerTable {
     // (the owner reaches every socket cluster-wide through the redis-adapter).
     if (!this.isOwner) return;
     // Persist snapshot first, then derive outgoing events from state.
-    await this.saveSnapshot({
+    const snapshotSaved = await this.saveSnapshot({
       finished: !this.running && (this.round === "idle" || this.round === "showdown"),
     });
+    // `false` is the explicit fencing signal.  Keeping this strict also makes
+    // the broadcaster compatible with alternative state-store implementations
+    // that predate the boolean return value.
+    if (snapshotSaved === false || !this.isOwner) return;
     await this.syncMongoTableStatus();
 
     const room = `tg:${this.tableId}`;
@@ -4187,6 +4568,14 @@ class GameRegistry {
     this.sweepTimer = null;
   }
 
+  async _recordFence(tableId, fence) {
+    if (!fence || fence <= 0) return;
+    await Table.updateOne(
+      { _id: tableId, gameType: "poker" },
+      { $max: { pokerOwnerFence: toSafeInt(fence, 0) } }
+    );
+  }
+
   /** Renew leases we own; demote any table whose lease we have lost. */
   async _heartbeat() {
     for (const [tid, entry] of this.map.entries()) {
@@ -4235,6 +4624,7 @@ class GameRegistry {
     gt.isOwner = true;
     gt.ownershipFence = own.fence || 0;
     try {
+      await this._recordFence(tid, gt.ownershipFence);
       const snapshot = await this.stateStore.load(tid);
       const table = await Table.findById(tid).populate({
         path: "seats.user",
@@ -4325,6 +4715,11 @@ class GameRegistry {
     } catch (_) {
       own = { owned: true, fence: 0 }; // Redis blip → behave as owner (lock still serializes)
     }
+    // A Redis-backed ownership result without a fencing token can only be the
+    // legacy error fallback. Treat it as unavailable, never as ownership.
+    if (this.ownershipEnabled && own.owned && !toSafeInt(own.fence, 0)) {
+      own = { owned: false, fence: 0 };
+    }
     const isOwner = own.owned;
 
     const table = await Table.findById(tid).populate({
@@ -4342,6 +4737,7 @@ class GameRegistry {
     });
     gt.isOwner = isOwner;
     gt.ownershipFence = own.fence || 0;
+    if (isOwner) await this._recordFence(tid, gt.ownershipFence);
 
     // Crash/restart recovery: restore from Redis snapshot if exists.
     const snapshot = await this.stateStore.load(tid);
@@ -4397,7 +4793,7 @@ function initTableGame(io, options = {}) {
   attachCosmeticsEquippedCache(options.redis || null);
   const nsp = io.of("/table-game");
   const registry = new GameRegistry(nsp, options);
-  const security = new SocketSecurityGuard();
+  const security = new SocketSecurityGuard(options.redis || null);
   activeRegistry = registry;
   registry.startOwnershipLoops();
 
@@ -4442,7 +4838,10 @@ function initTableGame(io, options = {}) {
             nsp.to(sid).emit("action_result", res);
           }
         } else if (sid) {
-          nsp.to(sid).emit("action_result", { status: "accepted" });
+          nsp.to(sid).emit("action_result", {
+            status: "accepted",
+            actionId: cmd.payload?.actionId,
+          });
         }
         break;
       }
@@ -4472,6 +4871,10 @@ function initTableGame(io, options = {}) {
       }
       case "disconnect": {
         game.onPlayerSocketDisconnected(cmd.userId);
+        break;
+      }
+      case "leave_pending": {
+        await game.requestPlayerLeave(cmd.userId);
         break;
       }
       case "resync": {
@@ -4579,9 +4982,23 @@ function initTableGame(io, options = {}) {
   });
 
   nsp.on("connection", (socket) => {
+    const presenceTables = new Set();
+    const presenceHeartbeat = setInterval(() => {
+      for (const tableId of presenceTables) {
+        void socketPresenceService.touchSocket(tableId, socket.userId, socket.id, {
+          ttlSec: socketPresenceService.POKER_TTL_SEC,
+        }).catch(() => {});
+      }
+    }, Math.max(10_000, Math.floor(socketPresenceService.POKER_TTL_SEC * 1000 / 3)));
+    presenceHeartbeat.unref?.();
+
     async function handleJoinTable({ tableId, clientSeed }) {
       try {
         if (!tableId) return;
+        if (!await security.onEvent(socket.userId, socket.userIp, "join", 12, 60)) {
+          socket.emit("invalid_move", { reason: "RATE_LIMITED" });
+          return;
+        }
         const table = await Table.findById(tableId).select("seats vacatingPlayers");
         if (!table) return;
         const uid = String(socket.userId);
@@ -4607,7 +5024,13 @@ function initTableGame(io, options = {}) {
         }
 
         socket.join(`tg:${tableId}`);
-        await socketPresenceService.registerSocket(tableId, socket.userId);
+        const presenceId = String(tableId);
+        if (!presenceTables.has(presenceId)) {
+          await socketPresenceService.registerSocket(tableId, socket.userId, socket.id, {
+            ttlSec: socketPresenceService.POKER_TTL_SEC,
+          });
+          presenceTables.add(presenceId);
+        }
 
         // H-3: the owner applies the (re)connect + emits initial state. On a
         // follower, forward it; the owner emits state to this socket cluster-wide.
@@ -4672,6 +5095,10 @@ function initTableGame(io, options = {}) {
     async function handleWatchTable({ tableId }) {
       try {
         if (!tableId) return;
+        if (!await security.onEvent(socket.userId, socket.userIp, "watch", 20, 60)) {
+          socket.emit("table_event", { type: "rate_limited", tableId: String(tableId) });
+          return;
+        }
         const table = await Table.findById(tableId).select("gameType seats settings");
         if (!table || table.gameType !== "poker") return;
         const seated = table.seats.some((s) => String(s.user) === String(socket.userId));
@@ -4756,6 +5183,7 @@ function initTableGame(io, options = {}) {
     socket.on("resync_turn", async ({ tableId }) => {
       try {
         if (!tableId) return;
+        if (!await security.onEvent(socket.userId, socket.userIp, "resync", 20, 60)) return;
         await ownerRunOrForward(
           String(tableId),
           { type: "resync", tableId: String(tableId), userId: socket.userId, socketId: socket.id },
@@ -4778,10 +5206,19 @@ function initTableGame(io, options = {}) {
     });
 
     socket.on("action", async ({ tableId, action, amount, actionId }) => {
+      if (!await security.onEvent(socket.userId, socket.userIp, "action", 30, 60)) {
+        socket.emit("invalid_move", { status: "rejected", reason: "RATE_LIMITED", actionId });
+        return;
+      }
       const sec = security.onAction(socket.userId, socket.userIp, actionId);
       if (sec.blocked) {
         metrics.actionsTotal.inc({ status: "blocked", action: String(action || "unknown") });
-        socket.emit("invalid_move", { status: "rejected", reason: sec.reason, retryAfterMs: sec.retryAfterMs });
+        socket.emit("invalid_move", {
+          status: "rejected",
+          reason: sec.reason,
+          retryAfterMs: sec.retryAfterMs,
+          actionId,
+        });
         return;
       }
       // H-3: only the owner processes the action; a follower forwards it. The
@@ -4802,7 +5239,7 @@ function initTableGame(io, options = {}) {
             socket.emit("invalid_move", res);
             socket.emit("action_result", res);
           } else {
-            socket.emit("action_result", { status: "accepted" });
+            socket.emit("action_result", { status: "accepted", actionId });
           }
         }
       );
@@ -4859,6 +5296,7 @@ function initTableGame(io, options = {}) {
     });
 
     socket.on("disconnect", async () => {
+      clearInterval(presenceHeartbeat);
       security.onDisconnect(socket, socket.userId);
       metrics.activePlayers.dec();
       if (socket.isSpectator) {
@@ -4888,10 +5326,11 @@ function initTableGame(io, options = {}) {
       for (const { game } of registry.map.values()) {
         const idx = game.findSeatIndexByUser(socket.userId);
         if (idx < 0) continue;
+        if (!presenceTables.delete(String(game.tableId))) continue;
         // Duplicate-tab guard: if this user still has another live socket
         // joined to this table (another tab/device), this disconnect is not
         // real abandonment — skip starting a reconnect/vacate timer.
-        const remaining = await socketPresenceService.releaseSocket(game.tableId, socket.userId);
+        const remaining = await socketPresenceService.releaseSocket(game.tableId, socket.userId, socket.id);
         if (remaining > 0) continue;
         if (game.isOwner) {
           game.onPlayerSocketDisconnected(socket.userId);
@@ -5027,6 +5466,25 @@ async function removeLiveHumanSeat(tableId, userId) {
   const game = await activeRegistry.get(String(tableId));
   if (!game) return false;
   return game.removeLiveHumanSeat(userId);
+}
+
+/** Route a voluntary leave to the table owner in a multi-instance deployment. */
+async function requestLivePokerLeave(tableId, userId) {
+  if (!activeRegistry) return false;
+  const tid = String(tableId);
+  const uid = String(userId);
+  const run = async (game) => game.requestPlayerLeave(uid);
+  if (typeof activeRegistry.ownerRunOrForward === "function") {
+    await activeRegistry.ownerRunOrForward(
+      tid,
+      { type: "leave_pending", tableId: tid, userId: uid },
+      run
+    );
+    return true;
+  }
+  const game = await activeRegistry.get(tid);
+  if (!game || !game.isOwner) return false;
+  return run(game);
 }
 
 async function restoreLiveEngineSeat(tableId, userId, meta = {}) {
@@ -5165,6 +5623,7 @@ module.exports = {
   syncLivePokerTableAfterLeave,
   vacateLiveEngineSeat,
   removeLiveHumanSeat,
+  requestLivePokerLeave,
   restoreLiveEngineSeat,
   buildAdminRealtimeTablePayload,
   getLiveTableGameForAdmin,

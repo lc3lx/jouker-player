@@ -21,5 +21,6 @@ module.exports = {
   vacateLiveEngineSeat: (tableId, userId, opts) => call("vacateLiveEngineSeat", tableId, userId, opts),
   restoreLiveEngineSeat: (tableId, userId, data) => call("restoreLiveEngineSeat", tableId, userId, data),
   removeLiveHumanSeat: (tableId, userId) => call("removeLiveHumanSeat", tableId, userId),
+  requestLivePokerLeave: (tableId, userId) => call("requestLivePokerLeave", tableId, userId),
   adminForceEndHandTable: (tableId) => call("adminForceEndHandTable", tableId),
 };
