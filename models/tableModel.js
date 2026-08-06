@@ -86,6 +86,8 @@ const tableSchema = new mongoose.Schema(
     pendingPermanentLeaves: { type: [pendingPermanentLeaveSchema], default: [] },
     isPrivate: { type: Boolean, default: false },
     password: { type: String },
+    /** Users admitted through an accepted game invitation (passwordless join). */
+    allowedUsers: [{ type: mongoose.Schema.ObjectId, ref: "User", index: true }],
     status: {
       type: String,
       enum: ["waiting", "ready", "playing", "full", "frozen", "open", "closed", "archived"],

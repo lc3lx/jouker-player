@@ -1,5 +1,6 @@
 const ApiError = require("../utils/apiError");
 const GameInvitation = require("../models/gameInvitationModel");
+const Table = require("../models/tableModel");
 const friendService = require("./friendService");
 const auditService = require("./auditService");
 
@@ -34,6 +35,21 @@ async function sendInvitation(fromId, {
   if (await friendService.isBlocked(fromId, toUserId)) {
     throw new ApiError("Cannot invite blocked player", 403);
   }
+  const relationship = await friendService.getRelationship(fromId, toUserId);
+  if (!relationship.isFriend) {
+    throw new ApiError("You can only invite friends", 403);
+  }
+
+  if (tableId) {
+    const table = await Table.findById(tableId).select("isPrivate owner seats").lean();
+    if (!table) throw new ApiError("Table not found", 404);
+    if (table.isPrivate) {
+      const mayInvite =
+        String(table.owner || "") === String(fromId) ||
+        table.seats.some((seat) => String(seat.user) === String(fromId));
+      if (!mayInvite) throw new ApiError("Only a participant can invite to this private table", 403);
+    }
+  }
 
   const expiresAt = new Date(Date.now() + INVITE_TTL_MS);
   const invite = await GameInvitation.create({
@@ -48,6 +64,15 @@ async function sendInvitation(fromId, {
     status: "pending",
     expiresAt,
   });
+
+  // A private-table invitation is an admission grant. Creating the invitation
+  // first prevents a failed invite write from granting access by itself.
+  if (tableId) {
+    await Table.updateOne(
+      { _id: tableId, isPrivate: true },
+      { $addToSet: { allowedUsers: toUserId } }
+    );
+  }
 
   const payload = {
     invitationId: String(invite._id),
@@ -88,6 +113,17 @@ async function respondInvitation(userId, invitationId, accept) {
     invite.status = "expired";
     await invite.save();
     throw new ApiError("Invitation expired", 410);
+  }
+
+  if (accept && invite.table) {
+    const table = await Table.findById(invite.table).select("isPrivate");
+    if (!table) throw new ApiError("Invited table no longer exists", 404);
+    if (table.isPrivate) {
+      await Table.updateOne(
+        { _id: invite.table },
+        { $addToSet: { allowedUsers: userId } }
+      );
+    }
   }
 
   invite.status = accept ? "accepted" : "declined";

@@ -433,6 +433,38 @@ exports.getTables = asyncHandler(async (req, res) => {
   });
 });
 
+// Private tables are never public lobby data. This authenticated endpoint only
+// returns rows the caller owns, is seated at, or entered through an accepted
+// invitation.
+exports.getPrivateTables = asyncHandler(async (req, res) => {
+  const gameType = req.query.gameType === "trix"
+    ? "trix"
+    : req.query.gameType === "tarneeb41"
+      ? "tarneeb41"
+      : "poker";
+  const userId = req.user._id;
+  const filter = {
+    gameType,
+    isPrivate: true,
+    $or: [
+      { owner: userId },
+      { "seats.user": userId },
+      { allowedUsers: userId },
+    ],
+  };
+  const tables = await Table.find(filter)
+    .sort({ updatedAt: -1 })
+    .limit(100)
+    .select(
+      "gameType tier tableNumber displayName smallBlind bigBlind minBuyIn maxBuyIn capacity seats status isPrivate tableKind owner settings"
+    );
+  const data = tables.map((table) => {
+    const obj = table.toObject ? table.toObject() : table;
+    return gameType === "poker" ? enrichPokerTableRow(obj, getTableGameDebugSnapshot(String(table._id))) : obj;
+  });
+  res.status(200).json({ results: data.length, data });
+});
+
 // Get table by id
 exports.getTable = asyncHandler(async (req, res, next) => {
   const table = await Table.findById(req.params.id)
@@ -446,6 +478,7 @@ exports.getTable = asyncHandler(async (req, res, next) => {
     table.isPrivate &&
     String(table.owner || "") !== String(req.user?._id || "") &&
     !table.seats.some((seat) => String(seat.user?._id || seat.user) === String(req.user?._id || "")) &&
+    !(table.allowedUsers || []).some((user) => String(user) === String(req.user?._id || "")) &&
     !["admin", "manager"].includes(req.user?.role)
   ) {
     return next(new ApiError("You do not have access to this private table", 403));
@@ -719,7 +752,11 @@ exports.joinTable = asyncHandler(async (req, res, next) => {
   // Check private table password. VIP tables store a bcrypt hash; legacy
   // admin-created tables store plaintext.
   if (table.isPrivate) {
-    let passwordOk = false;
+    const invitationGranted = (table.allowedUsers || []).some(
+      (user) => String(user) === String(req.user._id)
+    );
+    const isOwner = String(table.owner || "") === String(req.user._id);
+    let passwordOk = invitationGranted || isOwner;
     if (password && table.password) {
       if (/^\$2[aby]\$/.test(String(table.password))) {
         const bcrypt = require("bcryptjs");

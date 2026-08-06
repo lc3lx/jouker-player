@@ -96,6 +96,20 @@ exports.kick = asyncHandler(async (req, res) => {
     await markPendingPermanentLeave({ tableId: id, userId: targetUserId });
     await requestLivePokerLeave(String(id), targetUserId);
     scheduleDeferredPermanentLeave({ tableId: id, userId: targetUserId });
+    try {
+      const { getMainIo } = require("../utils/lobbyRealtime");
+      const tableNsp = getMainIo()?.of("/table-game");
+      if (tableNsp) {
+        const sockets = await tableNsp.in(`tg:${String(id)}`).fetchSockets();
+        for (const socket of sockets) {
+          if (String(socket.data?.userId || "") === String(targetUserId)) {
+            socket.emit("kicked_from_table", { tableId: String(id), reason: "owner_kick" });
+          }
+        }
+      }
+    } catch (_) {
+      // The durable leave has already been recorded; notification is best effort.
+    }
     emitTablesUpdated({ reason: "vip_kick_requested", tableId: String(id) });
     return res.status(202).json({
       status: "success",

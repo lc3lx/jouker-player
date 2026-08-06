@@ -2,6 +2,7 @@ const express = require("express");
 const authService = require("../services/authService");
 const {
   getTables,
+  getPrivateTables,
   getTable,
   createTable,
   joinTable,
@@ -27,6 +28,7 @@ router.get("/lobby", lobbyService.getFullLobby);
 router.get("/lobby/static", lobbyService.getStaticLobby);
 router.get("/lobby/dynamic", lobbyService.getDynamicLobby);
 router.get("/lobby/vip", lobbyService.getVipLobby);
+router.get("/private", authService.protect, getPrivateTables);
 
 router.route("/").get(getTables).post(
   authService.protect,
