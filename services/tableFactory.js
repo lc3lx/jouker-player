@@ -93,44 +93,56 @@ async function createVipTable({
   password,
   settings = {},
 }) {
-  const maxDoc = await Table.findOne({ gameType, tier, minBuyIn: buyIn, maxBuyIn: buyIn })
-    .sort({ tableNumber: -1 })
-    .select("tableNumber");
-  const tableNumber = (maxDoc?.tableNumber || 0) + 1;
-
   let hashedPassword;
   if (isPrivate && password) {
     hashedPassword = await bcrypt.hash(String(password), 10);
   }
 
   const cap = capacity || (gameType === "poker" ? 9 : 4);
-  const doc = await Table.create({
-    gameType,
-    tier,
-    tableNumber,
-    tableKind: "vip",
-    displayName: displayName || "VIP Table",
-    smallBlind: 0,
-    bigBlind: 0,
-    minBuyIn: buyIn,
-    maxBuyIn: buyIn,
-    capacity: cap,
-    isPrivate,
-    password: hashedPassword,
-    owner: ownerId,
-    status: gameType === "poker" ? "waiting" : "open",
-    settings: {
-      allowSpectators: settings.allowSpectators !== false,
-      botsEnabled: settings.botsEnabled !== false,
-      minPlayers: settings.minPlayers || 2,
-      maxPlayers: settings.maxPlayers || cap,
-      isLocked: false,
-    },
-    seats: [],
-  });
+  const normalizedBuyIn = Math.trunc(Number(buyIn));
+  const bigBlind = gameType === "poker" ? Math.max(1, Math.floor(normalizedBuyIn / 50)) : 0;
+  const smallBlind = gameType === "poker" ? Math.max(1, Math.floor(bigBlind / 2)) : 0;
 
-  emitTablesUpdated({ gameType, reason: "table_created", tableId: String(doc._id), tier, buyIn });
-  return doc;
+  // The unique index is (gameType, tier, tableNumber), not buy-in. Allocate
+  // against that full namespace and retry a concurrent allocation collision.
+  for (let attempt = 0; attempt < 5; attempt += 1) {
+    const maxDoc = await Table.findOne({ gameType, tier })
+      .sort({ tableNumber: -1 })
+      .select("tableNumber");
+    const tableNumber = (maxDoc?.tableNumber || 0) + 1;
+    try {
+      const doc = await Table.create({
+        gameType,
+        tier,
+        tableNumber,
+        tableKind: "vip",
+        displayName: displayName || "VIP Table",
+        smallBlind,
+        bigBlind,
+        minBuyIn: normalizedBuyIn,
+        maxBuyIn: normalizedBuyIn,
+        capacity: cap,
+        isPrivate,
+        password: hashedPassword,
+        owner: ownerId,
+        status: gameType === "poker" ? "waiting" : "open",
+        settings: {
+          allowSpectators: settings.allowSpectators !== false,
+          botsEnabled: settings.botsEnabled !== false,
+          minPlayers: settings.minPlayers || 2,
+          maxPlayers: settings.maxPlayers || cap,
+          isLocked: false,
+        },
+        seats: [],
+      });
+      emitTablesUpdated({ gameType, reason: "table_created", tableId: String(doc._id), tier, buyIn: normalizedBuyIn });
+      return doc;
+    } catch (err) {
+      if (err?.code !== 11000 || attempt === 4) throw err;
+    }
+  }
+
+  throw new Error("VIP_TABLE_NUMBER_ALLOCATION_FAILED");
 }
 
 /**

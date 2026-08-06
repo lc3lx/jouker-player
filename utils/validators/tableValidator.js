@@ -6,10 +6,10 @@ const tiers = ["beginner", "intermediate", "beast", "private"];
 exports.createTableValidator = [
   body("tier").notEmpty().isIn(tiers).withMessage("invalid tier"),
   body("tableNumber").notEmpty().isInt({ min: 1 }).withMessage("tableNumber required"),
-  body("smallBlind").notEmpty().isFloat({ min: 0 }),
-  body("bigBlind").notEmpty().isFloat({ min: 0 }),
-  body("minBuyIn").notEmpty().isFloat({ min: 0 }),
-  body("maxBuyIn").notEmpty().isFloat({ min: 0 }),
+  body("smallBlind").notEmpty().isInt({ min: 0 }),
+  body("bigBlind").notEmpty().isInt({ min: 0 }),
+  body("minBuyIn").notEmpty().isInt({ min: 0 }),
+  body("maxBuyIn").notEmpty().isInt({ min: 0 }),
   body("capacity").optional().isInt({ min: 2, max: 10 }),
   body("isPrivate").optional().isBoolean(),
   body("password").custom((val, { req }) => {
@@ -34,7 +34,7 @@ exports.getTableValidator = [
 
 exports.joinTableValidator = [
   param("id").isMongoId().withMessage("Invalid table id"),
-  body("buyIn").notEmpty().isFloat({ min: 0.01 }).withMessage("buyIn must be > 0"),
+  body("buyIn").notEmpty().isInt({ min: 1 }).withMessage("buyIn must be a positive whole number"),
   body("seatIndex").optional().isInt({ min: 0, max: 8 }).withMessage("seatIndex must be 0-8"),
   body("password").optional().isString(),
   validatorMiddleware,

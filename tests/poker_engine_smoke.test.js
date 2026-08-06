@@ -86,6 +86,90 @@ function testShortAllInDoesNotUpdateLastRaiseAmount() {
   assert.strictEqual(g.minRaise, 200);
 }
 
+async function testShortAllInRaiseIsLegalThroughActionHandler() {
+  const g = new PokerTable(createNspStub(), createTableWithSeats());
+  g.running = true;
+  g.round = "preflop";
+  g.currentIndex = 0;
+  g.currentBet = 1000;
+  g.lastRaiseAmount = 1000;
+  g.minRaise = 1000;
+  g.currentHandId = "short-all-in";
+  g.seats.forEach((s, i) => {
+    s.userId = `u${i + 1}`;
+    s.inHand = true;
+    s.folded = false;
+    s.allIn = false;
+    s.bet = 0;
+    s.invested = 0;
+  });
+  g.seats[0].chips = 1200;
+  g.advance = async () => {};
+
+  const spec = g.computeTurnActionSpec(0);
+  assert.ok(spec.allowed.includes("raise"));
+  const result = await g.handleAction("u1", {
+    action: "raise",
+    amount: 200,
+    actionId: "short-all-in-action",
+  });
+  assert.strictEqual(result.status, "accepted");
+  assert.strictEqual(g.seats[0].chips, 0);
+  assert.strictEqual(g.currentBet, 1200);
+  assert.strictEqual(g.shortAllInNoReopen, true);
+}
+
+function testSnapshotRetainsRecoveryAccountingAndSeatPosition() {
+  const g = new PokerTable(createNspStub(), createTableWithSeats());
+  g.running = true;
+  g.round = "flop";
+  g.handStartTotal = 9000;
+  g.handStartedAt = 123456;
+  g.handCounter = 12;
+  g.showdownEndSeq = 7;
+  g.seats[0].seatPosition = 6;
+  const snapshot = g.serializeSnapshot();
+  const restored = new PokerTable(createNspStub(), createTableWithSeats());
+  restored.isOwner = false;
+  restored.restoreFromSnapshot(snapshot);
+  assert.strictEqual(restored.handStartTotal, 9000);
+  assert.strictEqual(restored.handStartedAt, 123456);
+  assert.strictEqual(restored.handCounter, 12);
+  assert.strictEqual(restored.showdownEndSeq, 7);
+  assert.strictEqual(restored.seats[0].seatPosition, 6);
+}
+
+function testLegacySnapshotRebuildsConservationBaseline() {
+  const g = new PokerTable(createNspStub(), createTableWithSeats());
+  g.running = true;
+  g.round = "flop";
+  g.seats.forEach((seat) => {
+    seat.handStartChips = seat.chips;
+  });
+  const snapshot = g.serializeSnapshot();
+  delete snapshot.handStartTotal;
+  const restored = new PokerTable(createNspStub(), createTableWithSeats());
+  restored.isOwner = false;
+  restored.restoreFromSnapshot(snapshot);
+  assert.strictEqual(restored.handStartTotal, 9000);
+}
+
+async function testRecoveredShowdownResumesSettlementInsteadOfTurnTimer() {
+  const g = new PokerTable(createNspStub(), createTableWithSeats());
+  g.running = true;
+  g.round = "showdown";
+  const snapshot = g.serializeSnapshot();
+  const restored = new PokerTable(createNspStub(), createTableWithSeats());
+  let resumed = 0;
+  restored.showdown = async () => {
+    resumed += 1;
+  };
+  restored.restoreFromSnapshot(snapshot);
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.strictEqual(resumed, 1);
+  restored.disposeTimers();
+}
+
 function testSidePotsMultipleAllIns() {
   const g = new PokerTable(createNspStub(), createTableWithSeats());
   g.dealerIndex = 0;
@@ -217,6 +301,10 @@ async function testDuplicateActionIdRejected() {
 async function run() {
   testRaiseRuleTracksLastRaiseAmount();
   testShortAllInDoesNotUpdateLastRaiseAmount();
+  await testShortAllInRaiseIsLegalThroughActionHandler();
+  testSnapshotRetainsRecoveryAccountingAndSeatPosition();
+  testLegacySnapshotRebuildsConservationBaseline();
+  await testRecoveredShowdownResumesSettlementInsteadOfTurnTimer();
   testSidePotsMultipleAllIns();
   await testTimeoutCheckVsFold();
   testHandEvalTieSplitCorrectness();
@@ -226,4 +314,3 @@ async function run() {
 }
 
 run();
-

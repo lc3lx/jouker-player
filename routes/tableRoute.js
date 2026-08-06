@@ -37,7 +37,7 @@ router.route("/").get(getTables).post(
 
 router
   .route("/:id")
-  .get(getTableValidator, getTable);
+  .get(authService.protect, getTableValidator, getTable);
 
 router.post(
   "/:id/join",

@@ -48,6 +48,12 @@ exports.createVipHandler = asyncHandler(async (req, res) => {
   if (!gameType || !tier || !buyIn) {
     throw new ApiError("gameType, tier and buyIn are required", 400);
   }
+  if (!Number.isSafeInteger(Number(buyIn)) || Number(buyIn) <= 0) {
+    throw new ApiError("buyIn must be a positive whole number", 400);
+  }
+  if (isPrivate && (!password || String(password).trim().length < 4)) {
+    throw new ApiError("Private VIP tables require a password of at least 4 characters", 400);
+  }
   const doc = await tableFactory.createVipTable({
     gameType,
     tier,
@@ -76,6 +82,25 @@ exports.kick = asyncHandler(async (req, res) => {
   const { isTableSettlementBlocked } = require("./gameSettlementService");
   if (await isTableSettlementBlocked(id)) {
     throw new ApiError("Settlement in progress — kicking is temporarily blocked", 409);
+  }
+
+  const pokerTable = await Table.findById(id).select("gameType seats");
+  if (pokerTable?.gameType === "poker") {
+    if (!pokerTable.seats.some((seat) => String(seat.user) === String(targetUserId))) {
+      throw new ApiError("Player is not seated at this table", 404);
+    }
+    // A live Poker hand owns the authoritative chip totals in memory. Use the
+    // standard deferred leave flow so a player is only refunded post-settlement.
+    const { markPendingPermanentLeave, scheduleDeferredPermanentLeave } = require("./pokerVacateService");
+    const { requestLivePokerLeave } = require("../sockets/pokerTableGameBridge");
+    await markPendingPermanentLeave({ tableId: id, userId: targetUserId });
+    await requestLivePokerLeave(String(id), targetUserId);
+    scheduleDeferredPermanentLeave({ tableId: id, userId: targetUserId });
+    emitTablesUpdated({ reason: "vip_kick_requested", tableId: String(id) });
+    return res.status(202).json({
+      status: "success",
+      message: "Player removal requested; cash-out completes after any active hand settles",
+    });
   }
 
   await withMongoTransaction(async (session) => {
@@ -159,6 +184,8 @@ exports.toggleBots = asyncHandler(async (req, res) => {
   const table = await Table.findById(req.params.id).select("settings");
   const next = !table.settings.botsEnabled;
   await Table.findByIdAndUpdate(req.params.id, { $set: { "settings.botsEnabled": next } });
+  const { syncLivePokerTableAfterJoin } = require("../sockets/pokerTableGameBridge");
+  await syncLivePokerTableAfterJoin(String(req.params.id));
   res.status(200).json({ status: "success", botsEnabled: next });
 });
 
@@ -172,8 +199,10 @@ exports.start = asyncHandler(async (req, res) => {
   const table = await Table.findById(id).select("gameType seats capacity");
   if (!table) throw new ApiError("Table not found", 404);
   if (table.seats.length < 2) throw new ApiError("Not enough players to start", 400);
-  // Game-specific start is triggered by the socket layer (e.g. refresh game seats).
-  // Here we mark intent and let the countdown fire via existing socket handler.
+  if (table.gameType === "poker") {
+    const { syncLivePokerTableAfterJoin } = require("../sockets/pokerTableGameBridge");
+    await syncLivePokerTableAfterJoin(String(id));
+  }
   emitTablesUpdated({ reason: "vip_start_requested", tableId: String(id) });
   res.status(200).json({ status: "success", message: "Start requested" });
 });
@@ -193,6 +222,24 @@ exports.destroy = asyncHandler(async (req, res) => {
 
   const table = await Table.findById(id).select("seats gameType");
   if (!table) throw new ApiError("Table not found", 404);
+
+  if (table.gameType === "poker") {
+    const {
+      getTableGameDebugSnapshot,
+      evictTableFromRegistry,
+    } = require("../sockets/pokerTableGameBridge");
+    const live = getTableGameDebugSnapshot(String(id));
+    if (table.seats.length > 0 || live?.running) {
+      throw new ApiError(
+        "Remove all Poker players and wait for the active hand to finish before destroying this table",
+        409
+      );
+    }
+    // Do not leave an orphaned in-memory engine broadcasting a deleted table.
+    evictTableFromRegistry(String(id));
+    await tableFactory.destroyOrArchiveTable(id, { reason: "owner_destroy" });
+    return res.status(200).json({ status: "success", message: "Table destroyed" });
+  }
 
   // Refund all seated players.
   if (table.seats.length > 0) {

@@ -22,7 +22,12 @@ function enqueueSpectatorState(tableId, payload) {
   const delay = getDelayMs(tid);
   if (!buffers.has(tid)) buffers.set(tid, []);
   const q = buffers.get(tid);
-  q.push({ deliverAt: Date.now() + delay, payload });
+  // Engine arrays (for example `community`) mutate as a hand progresses. A
+  // delayed frame must therefore own an immutable point-in-time snapshot.
+  const snapshot = typeof structuredClone === "function"
+    ? structuredClone(payload)
+    : JSON.parse(JSON.stringify(payload));
+  q.push({ deliverAt: Date.now() + delay, payload: snapshot });
   if (q.length > 200) q.splice(0, q.length - 200);
 }
 

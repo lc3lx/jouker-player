@@ -364,6 +364,9 @@ exports.getTables = asyncHandler(async (req, res) => {
   if (req.query.gameType === "trix") gameType = "trix";
   else if (req.query.gameType === "tarneeb41") gameType = "tarneeb41";
   const filter = { gameType };
+  // Private poker tables are reached through their explicit join flow; never
+  // advertise their identifiers and roster in the public lobby listing.
+  if (gameType === "poker") filter.isPrivate = { $ne: true };
   if (req.query.tier) {
     filter.tier = req.query.tier;
   }
@@ -439,6 +442,14 @@ exports.getTable = asyncHandler(async (req, res, next) => {
       select: "name country profileImg",
     });
   if (!table) return next(new ApiError(`No table for id ${req.params.id}`, 404));
+  if (
+    table.isPrivate &&
+    String(table.owner || "") !== String(req.user?._id || "") &&
+    !table.seats.some((seat) => String(seat.user?._id || seat.user) === String(req.user?._id || "")) &&
+    !["admin", "manager"].includes(req.user?.role)
+  ) {
+    return next(new ApiError("You do not have access to this private table", 403));
+  }
   res.status(200).json({ data: table });
 });
 
@@ -483,6 +494,14 @@ exports.joinTable = asyncHandler(async (req, res, next) => {
 
   let table = await Table.findById(id);
   if (!table) return next(new ApiError("Table not found", 404));
+
+  if (
+    table.tableKind === "vip" &&
+    table.settings?.isLocked === true &&
+    String(table.owner || "") !== String(req.user._id)
+  ) {
+    return next(new ApiError("This VIP table is locked", 403));
+  }
 
   if (LOBBY_EXCLUDED_STATUSES.includes(table.status)) {
     if (table.gameType === "tarneeb41" || table.gameType === "trix") {
