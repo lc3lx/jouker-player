@@ -14,10 +14,10 @@ function getMainIo() {
 function emitTablesUpdated(payload = {}) {
   if (!mainIo) return;
   try {
-    // A lobby refresh never needs a table id. Omitting it prevents private
-    // table identifiers from being leaked through the unauthenticated root
+    // A lobby refresh never needs an individual table/player id. Omitting
+    // them prevents private identifiers from leaking through the root
     // Socket.IO broadcast.
-    const { tableId: _tableId, ...safePayload } = payload;
+    const { tableId: _tableId, userId: _userId, ...safePayload } = payload;
     mainIo.emit("tables_updated", {
       at: new Date().toISOString(),
       ...safePayload,

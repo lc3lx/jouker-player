@@ -14,12 +14,13 @@
 
 const svc = require("../services/tableInteractionsService");
 const logger = require("../utils/logger");
+const Table = require("../models/tableModel");
 
 /**
  * @param {import('socket.io').Namespace} nsp
  * @param {(gameType: string, tableId: string) => string|null} roomForGame
  */
-function registerTableInteractionHandlers(nsp, roomForGame) {
+function registerTableInteractionHandlers(nsp, roomForGame, fixedGameType = null) {
   nsp.on("connection", (socket) => {
     socket.on("interaction_catalog", async (_payload, ack) => {
       if (typeof ack !== "function") return;
@@ -70,16 +71,40 @@ function registerTableInteractionHandlers(nsp, roomForGame) {
         const { tableId, gameType, itemKey, targetUserId, actionId } = payload || {};
         if (!tableId || !itemKey) return done({ ok: false, reason: "BAD_REQUEST" });
 
-        // Sender must actually be in the table's room (seated or spectating).
-        const room = roomForGame(String(gameType || ""), String(tableId));
+        const resolvedGameType = fixedGameType || String(gameType || "").trim();
+        if (!["poker", "trix", "tarneeb41"].includes(resolvedGameType)) {
+          return done({ ok: false, reason: "BAD_REQUEST" });
+        }
+
+        // A room can contain spectators, but paid interactions are a seated
+        // player privilege. Check the durable seat to prevent a spectator (or
+        // a stale socket room) from spending/sending table effects.
+        const room = roomForGame(resolvedGameType, String(tableId));
         if (!room || !socket.rooms.has(room)) {
           return done({ ok: false, reason: "NOT_IN_ROOM" });
+        }
+
+        const table = await Table.findOne({
+          _id: String(tableId),
+          gameType: resolvedGameType,
+          "seats.user": socket.userId,
+        })
+          .select("_id seats.user")
+          .lean();
+        if (!table) return done({ ok: false, reason: "NOT_SEATED" });
+
+        const targetId = targetUserId ? String(targetUserId) : null;
+        if (
+          targetId &&
+          !(table.seats || []).some((seat) => String(seat?.user) === targetId)
+        ) {
+          return done({ ok: false, reason: "TARGET_NOT_IN_TABLE" });
         }
 
         const res = await svc.sendInteraction({
           userId: socket.userId,
           itemKey: String(itemKey),
-          targetUserId: targetUserId ? String(targetUserId) : null,
+          targetUserId: targetId,
           actionId: typeof actionId === "string" ? actionId.slice(0, 128) : null,
         });
         if (!res.ok) return done(res);

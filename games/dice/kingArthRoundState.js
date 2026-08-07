@@ -281,12 +281,20 @@ async function decrementFreeSpin(userId, tableId) {
   const cur = await getFreeSpinSession(userId, tableId);
   if (!cur || cur.remaining <= 0) return null;
   cur.remaining -= 1;
+  const snapshot = {
+    remaining: cur.remaining,
+    roundWon: Math.max(0, Number(cur.roundWon || 0)),
+    totalMultiplier: Math.max(0, Number(cur.totalMultiplier || 0)),
+    lockedBaseBet: cur.lockedBaseBet,
+    lockedDoubleChance: !!cur.lockedDoubleChance,
+    roundCap: Number(cur.roundCap || 0),
+  };
   if (cur.remaining <= 0) {
     await deleteFreeSpinSession(userId, tableId);
-    return null;
+    return snapshot;
   }
   await setFreeSpinSession(userId, tableId, cur);
-  return cur;
+  return snapshot;
 }
 
 async function peekFreeSpinRemaining(userId, tableId) {

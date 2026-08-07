@@ -4,6 +4,7 @@ const {
   getTables,
   getPrivateTables,
   getTable,
+  getPokerQueueStatus,
   createTable,
   joinTable,
   leaveTable,
@@ -23,18 +24,25 @@ const router = express.Router();
 
 // ── Lobby routes (before /:id to avoid param conflict) ──────────────────
 // GET /tables/lobby?gameType=&tier=&page=&limit=&kind=static|dynamic|vip
-router.get("/lobby", lobbyService.getFullLobby);
+router.get("/lobby", authService.protect, lobbyService.getFullLobby);
 // GET /tables/lobby/static|dynamic|vip
-router.get("/lobby/static", lobbyService.getStaticLobby);
-router.get("/lobby/dynamic", lobbyService.getDynamicLobby);
-router.get("/lobby/vip", lobbyService.getVipLobby);
+router.get("/lobby/static", authService.protect, lobbyService.getStaticLobby);
+router.get("/lobby/dynamic", authService.protect, lobbyService.getDynamicLobby);
+router.get("/lobby/vip", authService.protect, lobbyService.getVipLobby);
 router.get("/private", authService.protect, getPrivateTables);
 
-router.route("/").get(getTables).post(
+router.route("/").get(authService.protect, getTables).post(
   authService.protect,
   authService.allowedTo("admin", "manager"),
   createTableValidator,
   createTable
+);
+
+router.get(
+  "/:id/queue-status",
+  authService.protect,
+  getTableValidator,
+  getPokerQueueStatus
 );
 
 router

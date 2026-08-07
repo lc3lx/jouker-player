@@ -5005,7 +5005,11 @@ function initTableGame(io, options = {}) {
   // Shared interactions economy (paid emojis / throwables / gifts) — same
   // implementation as Trix/Tarneeb, bound to poker's `tg:` rooms.
   const { registerTableInteractionHandlers } = require("./tableInteractions");
-  registerTableInteractionHandlers(nsp, (gameType, tableId) => `tg:${tableId}`);
+  registerTableInteractionHandlers(
+    nsp,
+    (_gameType, tableId) => `tg:${tableId}`,
+    "poker"
+  );
 
   // Live economy catalog updates broadcast to this namespace on admin CMS edits.
   require("../services/economyBroadcast").registerNamespace(nsp);

@@ -356,6 +356,42 @@ function enrichPokerTableRow(tableObj, live) {
   };
 }
 
+/**
+ * Lobby clients only need seat counts and whether *they* are seated. Do not
+ * publish the roster or waiting-list identities in a list endpoint.
+ */
+function redactPokerLobbyRoster(row, viewerId) {
+  const seats = Array.isArray(row.seats) ? row.seats : [];
+  const vacatingPlayers = Array.isArray(row.vacatingPlayers)
+    ? row.vacatingPlayers
+    : [];
+  const viewer = String(viewerId || "");
+  const currentUserSeated = viewer
+    ? seats.some((seat) => String(seat?.user?._id || seat?.user || "") === viewer)
+    : false;
+  const currentUserVacating = viewer
+    ? vacatingPlayers.some(
+        (entry) => String(entry?.user?._id || entry?.user || "") === viewer
+      )
+    : false;
+  const {
+    seats: _seats,
+    waitingQueue: _waitingQueue,
+    vacatingPlayers: _vacatingPlayers,
+    ...safeRow
+  } = row;
+  return {
+    ...safeRow,
+    // Preserve list length for lobby occupancy without exposing identities.
+    seats: seats.map((seat) => ({ seatPosition: seat?.seatPosition ?? null })),
+    vacatingPlayers: vacatingPlayers.map((entry) => ({
+      vacateUntil: entry?.vacateUntil ?? null,
+    })),
+    currentUserSeated,
+    currentUserVacating,
+  };
+}
+
 // List tables with optional tier filter
 exports.getTables = asyncHandler(async (req, res) => {
   await ensureFixedTierTables();
@@ -365,7 +401,7 @@ exports.getTables = asyncHandler(async (req, res) => {
   else if (req.query.gameType === "tarneeb41") gameType = "tarneeb41";
   const filter = { gameType };
   // Private poker tables are reached through their explicit join flow; never
-  // advertise their identifiers and roster in the public lobby listing.
+  // advertise their identifiers and roster in the shared lobby listing.
   if (gameType === "poker") filter.isPrivate = { $ne: true };
   if (req.query.tier) {
     filter.tier = req.query.tier;
@@ -417,7 +453,10 @@ exports.getTables = asyncHandler(async (req, res) => {
       const live = withLive ? getTableGameDebugSnapshot(String(t._id)) : null;
       const row = enrichPokerTableRow(o, live);
       const qLen = await getWaitingQueueSize(String(t._id));
-      return { ...row, waitingQueueSize: qLen };
+      return {
+        ...redactPokerLobbyRoster(row, req.user?._id),
+        waitingQueueSize: qLen,
+      };
     })
   );
 
@@ -449,6 +488,7 @@ exports.getPrivateTables = asyncHandler(async (req, res) => {
     $or: [
       { owner: userId },
       { "seats.user": userId },
+      { "waitingQueue.user": userId },
       { allowedUsers: userId },
     ],
   };
@@ -460,7 +500,12 @@ exports.getPrivateTables = asyncHandler(async (req, res) => {
     );
   const data = tables.map((table) => {
     const obj = table.toObject ? table.toObject() : table;
-    return gameType === "poker" ? enrichPokerTableRow(obj, getTableGameDebugSnapshot(String(table._id))) : obj;
+    if (gameType !== "poker") return obj;
+    const row = enrichPokerTableRow(
+      obj,
+      getTableGameDebugSnapshot(String(table._id))
+    );
+    return redactPokerLobbyRoster(row, req.user?._id);
   });
   res.status(200).json({ results: data.length, data });
 });
@@ -478,12 +523,59 @@ exports.getTable = asyncHandler(async (req, res, next) => {
     table.isPrivate &&
     String(table.owner || "") !== String(req.user?._id || "") &&
     !table.seats.some((seat) => String(seat.user?._id || seat.user) === String(req.user?._id || "")) &&
+    !(table.waitingQueue || []).some(
+      (entry) => String(entry?.user?._id || entry?.user || "") === String(req.user?._id || "")
+    ) &&
     !(table.allowedUsers || []).some((user) => String(user) === String(req.user?._id || "")) &&
     !["admin", "manager"].includes(req.user?.role)
   ) {
     return next(new ApiError("You do not have access to this private table", 403));
   }
-  res.status(200).json({ data: table });
+  const data = table.toObject ? table.toObject() : table;
+  // Queue entries contain other players' identities and locked buy-ins. The
+  // table view never needs that roster; the owner-specific status endpoint
+  // below returns only the caller's own position.
+  delete data.waitingQueue;
+  res.status(200).json({ data });
+});
+
+// Return only the authenticated caller's queue/seating state for a poker
+// table. This lets clients recover from queue promotion without exposing the
+// waiting-list roster.
+exports.getPokerQueueStatus = asyncHandler(async (req, res, next) => {
+  const table = await Table.findById(req.params.id).select(
+    "gameType seats waitingQueue isPrivate owner allowedUsers"
+  );
+  if (!table) return next(new ApiError(`No table for id ${req.params.id}`, 404));
+  if (table.gameType !== "poker") {
+    return next(new ApiError("Queue status is only available for poker tables", 400));
+  }
+  const userId = String(req.user._id);
+  const queue = Array.isArray(table.waitingQueue) ? table.waitingQueue : [];
+  if (
+    table.isPrivate &&
+    String(table.owner || "") !== userId &&
+    !(table.allowedUsers || []).some((user) => String(user) === userId) &&
+    !(table.seats || []).some((seat) => String(seat.user) === userId) &&
+    !queue.some((entry) => String(entry?.user) === userId) &&
+    !["admin", "manager"].includes(req.user?.role)
+  ) {
+    return next(new ApiError("You do not have access to this private table", 403));
+  }
+  const seated = (table.seats || []).some(
+    (seat) => String(seat.user) === userId
+  );
+  const queueIndex = queue.findIndex(
+    (entry) => String(entry?.user) === userId
+  );
+  res.status(200).json({
+    status: "success",
+    data: {
+      seated,
+      queued: queueIndex >= 0,
+      queuePosition: queueIndex >= 0 ? queueIndex + 1 : 0,
+    },
+  });
 });
 
 // Create a new table (admin/manager)
@@ -1003,6 +1095,43 @@ exports.leaveTable = asyncHandler(async (req, res, next) => {
   const { id } = req.params;
   const table = await Table.findById(id);
   if (!table) return next(new ApiError("Table not found", 404));
+  // Queue cancellation must never become a seat cash-out if a queue entry was
+  // promoted between the client refresh and this request.
+  const queueOnly = req.body?.queueOnly === true || req.body?.queueOnly === "1";
+
+  // Do not decide from the snapshot above: a queue promotion can complete
+  // between that read and this request. dequeuePlayer rechecks the seat and
+  // queue inside its transaction, so a promoted player receives 409 instead
+  // of a queue refund or a cash-out.
+  if (queueOnly && table.gameType === "poker") {
+    const { dequeuePlayer } = require("./pokerWaitingQueueService");
+    try {
+      await withMongoTransaction(async (session) => {
+        await dequeuePlayer({ session, userId: req.user._id, tableId: id });
+      });
+    } catch (e) {
+      if (e.message === "ALREADY_SEATED") {
+        return next(new ApiError("You are already seated at this table", 409));
+      }
+      if (e.message === "NOT_IN_QUEUE") {
+        return next(new ApiError("You are not in this table's waiting queue", 400));
+      }
+      if (e.message === "TABLE_NOT_FOUND") {
+        return next(new ApiError("Table not found", 404));
+      }
+      throw e;
+    }
+    void trackJoinLeaveEvent(req.user._id, "leave_table");
+    emitTablesUpdated({ gameType: "poker", reason: "leave_queue", tableId: String(id) });
+    return res.status(200).json({
+      status: "success",
+      message: "Left waiting queue",
+      data: {
+        leftQueue: true,
+        rtcRoom: { roomId: table._id, type: "table" },
+      },
+    });
+  }
 
   const idx = table.seats.findIndex((s) => String(s.user) === String(req.user._id));
   const vacatingEntry =
@@ -1016,32 +1145,39 @@ exports.leaveTable = asyncHandler(async (req, res, next) => {
     // N-2: a poker player who is only in the waiting queue (never seated) must
     // have their locked buy-in refunded when they leave, not stranded.
     if (table.gameType === "poker") {
-      const {
-        getQueuePosition,
-        dequeuePlayer,
-      } = require("./pokerWaitingQueueService");
-      const queuePos = await getQueuePosition(id, req.user._id);
-      if (queuePos > 0) {
-        try {
-          await withMongoTransaction(async (session) => {
-            await dequeuePlayer({ session, userId: req.user._id, tableId: id });
-          });
-        } catch (e) {
-          if (e.message !== "NOT_IN_QUEUE") throw e;
-        }
-        void trackJoinLeaveEvent(req.user._id, "leave_table");
-        emitTablesUpdated({ gameType: "poker", reason: "leave_queue", tableId: String(id) });
-        return res.status(200).json({
-          status: "success",
-          message: "Left waiting queue",
-          data: {
-            leftQueue: true,
-            rtcRoom: { roomId: table._id, type: "table" },
-          },
+      const { dequeuePlayer } = require("./pokerWaitingQueueService");
+      try {
+        await withMongoTransaction(async (session) => {
+          await dequeuePlayer({ session, userId: req.user._id, tableId: id });
         });
+      } catch (e) {
+        if (e.message === "ALREADY_SEATED") {
+          return next(new ApiError("You are already seated at this table", 409));
+        }
+        if (e.message === "NOT_IN_QUEUE") {
+          return next(new ApiError("You are not seated at this table", 400));
+        }
+        if (e.message === "TABLE_NOT_FOUND") {
+          return next(new ApiError("Table not found", 404));
+        }
+        throw e;
       }
+      void trackJoinLeaveEvent(req.user._id, "leave_table");
+      emitTablesUpdated({ gameType: "poker", reason: "leave_queue", tableId: String(id) });
+      return res.status(200).json({
+        status: "success",
+        message: "Left waiting queue",
+        data: {
+          leftQueue: true,
+          rtcRoom: { roomId: table._id, type: "table" },
+        },
+      });
     }
     return next(new ApiError("You are not seated at this table", 400));
+  }
+
+  if (queueOnly) {
+    return next(new ApiError("You are already seated at this table", 409));
   }
 
   if (await isTableSettlementBlocked(id)) {

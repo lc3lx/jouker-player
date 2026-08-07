@@ -926,6 +926,8 @@ function registerGameHandlers(nsp, jwtVerify) {
         await recordSpinAnalytics(userId, stake, payout, outcome.winType);
 
         let freeSpinsAwarded = 0;
+        let freeSpinsRemaining = 0;
+        let bonusTotalWon = 0;
         if (isFreeSpin) {
           await kingArthRoundState.setFreeSpinTotalMultiplier(
             userId,
@@ -934,7 +936,13 @@ function registerGameHandlers(nsp, jwtVerify) {
           );
           if (roundCapReached) {
             // 4000× reached — end the round now, forfeit remaining spins.
+            const ended = await kingArthRoundState.getFreeSpinSession(
+              userId,
+              tableId
+            );
+            bonusTotalWon = Math.max(0, Number(ended?.roundWon || 0));
             await kingArthRoundState.deleteFreeSpinSession(userId, tableId);
+            freeSpinsRemaining = 0;
           } else {
             // Retrigger: 3+ scatters during free spins add 5 more.
             if (outcome.scatterCount >= DiceEngine.RETRIGGER_MIN_SCATTER) {
@@ -945,12 +953,21 @@ function registerGameHandlers(nsp, jwtVerify) {
                 DiceEngine.RETRIGGER_AWARD
               );
             }
-            await kingArthRoundState.decrementFreeSpin(userId, tableId);
+            const after = await kingArthRoundState.decrementFreeSpin(
+              userId,
+              tableId
+            );
+            freeSpinsRemaining = after?.remaining ?? 0;
+            bonusTotalWon = Math.max(0, Number(after?.roundWon || 0));
+            if (after == null) {
+              // Session already gone — keep last known total at 0.
+              freeSpinsRemaining = 0;
+            }
           }
         } else if (outcome.scatterCount >= 4 && !roundCapReached) {
-          // Base spin trigger: 4+ scatters award 15 free spins.
+          // Base spin trigger: 4+ scatters award free spins (engine constant).
           freeSpinsAwarded = DiceEngine.FREE_SPINS_AWARD;
-          await kingArthRoundState.awardFreeSpins(
+          const session = await kingArthRoundState.awardFreeSpins(
             userId,
             tableId,
             outcome.scatterCount,
@@ -961,6 +978,11 @@ function registerGameHandlers(nsp, jwtVerify) {
               initialWin: payout,
             }
           );
+          freeSpinsRemaining = session?.remaining ?? 0;
+          bonusTotalWon = Math.max(0, Number(session?.roundWon || 0));
+        } else {
+          freeSpinsRemaining =
+            await kingArthRoundState.peekFreeSpinRemaining(userId, tableId);
         }
 
         wallet = await Wallet.findOne({ user: userId });
@@ -986,11 +1008,9 @@ function registerGameHandlers(nsp, jwtVerify) {
             winType: outcome.winType,
             isFreeSpin,
             nearMiss: outcome.nearMiss,
+            bonusTotalWon,
           }),
         });
-
-        const freeSpinsRemaining =
-          await kingArthRoundState.peekFreeSpinRemaining(userId, tableId);
 
         publishSpinCompleted(userId, {
           sourceId: String(play._id),
@@ -1054,6 +1074,7 @@ function registerGameHandlers(nsp, jwtVerify) {
           multipliers: outcome.multipliers,
           freeSpinsRemaining,
           freeSpinsAwarded,
+          bonusTotalWon,
           balance: wallet.balance,
           playId: String(play._id),
           fairness,
@@ -1066,7 +1087,7 @@ function registerGameHandlers(nsp, jwtVerify) {
       }
     });
 
-    // King Earth — buy free spins (100× the total bet; disabled while ante is on)
+    // King Earth — buy free spins (30× bet; disabled while ante is on)
     socket.on("dice_buy_bonus", async (payload) => {
       const tableId = (payload && payload.tableId) || "king-arth";
       if (!(await kingArthRoundState.tryAcquireLock(userId, tableId))) {

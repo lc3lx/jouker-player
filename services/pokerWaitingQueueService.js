@@ -103,6 +103,13 @@ async function dequeuePlayer({ session, userId, tableId }) {
   const tableTx = await Table.findById(tableId).session(session);
   if (!tableTx) throw new Error("TABLE_NOT_FOUND");
 
+  // Keep this check in the same transaction as the queue removal. A queue
+  // promotion writes this document too, so a transaction retry observes the
+  // durable state and cannot refund a player who has just been seated.
+  if (tableTx.seats.some((seat) => String(seat.user) === String(userId))) {
+    throw new Error("ALREADY_SEATED");
+  }
+
   tableTx.waitingQueue = Array.isArray(tableTx.waitingQueue) ? tableTx.waitingQueue : [];
   const idx = tableTx.waitingQueue.findIndex((q) => queueEntryUserId(q) === String(userId));
   if (idx === -1) throw new Error("NOT_IN_QUEUE");

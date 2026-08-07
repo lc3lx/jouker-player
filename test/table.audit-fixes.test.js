@@ -319,6 +319,32 @@ test("seatNextFromQueue assigns the next free seatPosition", async () => {
 // pokerTableGcService refused to ever garbage-collect them. It must now
 // route through tableFactory.createDynamicTable.
 
+test("dequeuePlayer never refunds a queued player who was already promoted", async () => {
+  const Table = require("../models/tableModel");
+  const origFindById = Table.findById;
+  const tableDoc = {
+    _id: "queue-seat-race-1",
+    gameType: "poker",
+    seats: [{ user: "queued-user", chips: 1000, seatPosition: 2 }],
+    waitingQueue: [{ user: "queued-user", player: "pq", buyIn: 1000 }],
+    save: async function save() {
+      return this;
+    },
+  };
+  Table.findById = () => thenable(() => tableDoc);
+
+  try {
+    const { dequeuePlayer } = require("../services/pokerWaitingQueueService");
+    await assert.rejects(
+      dequeuePlayer({ session: null, userId: "queued-user", tableId: tableDoc._id }),
+      /ALREADY_SEATED/
+    );
+    assert.equal(tableDoc.waitingQueue.length, 1, "queue entry must remain untouched");
+  } finally {
+    Table.findById = origFindById;
+  }
+});
+
 test("findAvailablePokerTable creates overflow tables via tableFactory as tableKind:dynamic", async () => {
   const Table = require("../models/tableModel");
   const orig = { findOne: Table.findOne, create: Table.create };

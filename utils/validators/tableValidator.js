@@ -36,11 +36,13 @@ exports.joinTableValidator = [
   param("id").isMongoId().withMessage("Invalid table id"),
   body("buyIn").notEmpty().isInt({ min: 1 }).withMessage("buyIn must be a positive whole number"),
   body("seatIndex").optional().isInt({ min: 0, max: 8 }).withMessage("seatIndex must be 0-8"),
+  body("preferQueue").optional().isBoolean().withMessage("preferQueue must be boolean"),
   body("password").optional().isString(),
   validatorMiddleware,
 ];
 
 exports.leaveTableValidator = [
   param("id").isMongoId().withMessage("Invalid table id"),
+  body("queueOnly").optional().isBoolean().withMessage("queueOnly must be boolean"),
   validatorMiddleware,
 ];

@@ -26,6 +26,7 @@ function parsePagination(query) {
 function buildBaseFilter(query, kind) {
   const filter = {
     tableKind: kind,
+    isPrivate: { $ne: true },
     status: { $nin: LOBBY_EXCLUDED_STATUSES },
   };
   if (query.gameType) filter.gameType = query.gameType;
@@ -33,7 +34,22 @@ function buildBaseFilter(query, kind) {
   return filter;
 }
 
-async function enrichRow(t) {
+function redactPokerRoster(row, viewerId) {
+  if (row.gameType !== "poker") return row;
+  const seats = Array.isArray(row.seats) ? row.seats : [];
+  const viewer = String(viewerId || "");
+  const currentUserSeated = viewer
+    ? seats.some((seat) => String(seat?.user?._id || seat?.user || "") === viewer)
+    : false;
+  const { seats: _seats, waitingQueue: _waitingQueue, ...safeRow } = row;
+  return {
+    ...safeRow,
+    seats: seats.map((seat) => ({ seatPosition: seat?.seatPosition ?? null })),
+    currentUserSeated,
+  };
+}
+
+async function enrichRow(t, viewerId) {
   const o = t.toObject ? t.toObject() : t;
   const tid = String(t._id);
   const qSize =
@@ -42,22 +58,23 @@ async function enrichRow(t) {
       : Array.isArray(o.waitingQueue)
       ? o.waitingQueue.length
       : 0;
-  return {
+  const row = {
     ...o,
     waitingQueueSize: qSize,
     spectatorCount: spectatorService.getCount(tid),
     seatedCount: Array.isArray(o.seats) ? o.seats.length : 0,
   };
+  return redactPokerRoster(row, viewerId);
 }
 
-async function querySection(filter, { page, limit, skip }) {
+async function querySection(filter, { page, limit, skip }, viewerId) {
   const total = await Table.countDocuments(filter);
   const rows = await Table.find(filter)
     .sort({ tableNumber: 1 })
     .skip(skip)
     .limit(limit)
     .select(LOBBY_SELECT);
-  const data = await Promise.all(rows.map(enrichRow));
+  const data = await Promise.all(rows.map((row) => enrichRow(row, viewerId)));
   return {
     results: rows.length,
     total,
@@ -76,7 +93,7 @@ async function querySection(filter, { page, limit, skip }) {
 exports.getStaticLobby = asyncHandler(async (req, res) => {
   const pagination = parsePagination(req.query);
   const filter = buildBaseFilter(req.query, "static");
-  res.status(200).json(await querySection(filter, pagination));
+  res.status(200).json(await querySection(filter, pagination, req.user?._id));
 });
 
 /**
@@ -86,7 +103,7 @@ exports.getStaticLobby = asyncHandler(async (req, res) => {
 exports.getDynamicLobby = asyncHandler(async (req, res) => {
   const pagination = parsePagination(req.query);
   const filter = buildBaseFilter(req.query, "dynamic");
-  res.status(200).json(await querySection(filter, pagination));
+  res.status(200).json(await querySection(filter, pagination, req.user?._id));
 });
 
 /**
@@ -103,7 +120,7 @@ exports.getVipLobby = asyncHandler(async (req, res) => {
   };
   if (req.query.gameType) filter.gameType = req.query.gameType;
   if (req.query.tier) filter.tier = req.query.tier;
-  res.status(200).json(await querySection(filter, pagination));
+  res.status(200).json(await querySection(filter, pagination, req.user?._id));
 });
 
 /**
@@ -121,7 +138,12 @@ exports.getFullLobby = asyncHandler(async (req, res) => {
   const tier = req.query.tier;
 
   const makeFilter = (k, extra = {}) => {
-    const f = { tableKind: k, status: { $nin: LOBBY_EXCLUDED_STATUSES }, ...extra };
+    const f = {
+      tableKind: k,
+      isPrivate: { $ne: true },
+      status: { $nin: LOBBY_EXCLUDED_STATUSES },
+      ...extra,
+    };
     if (gameType) f.gameType = gameType;
     if (tier) f.tier = tier;
     return f;
@@ -136,7 +158,9 @@ exports.getFullLobby = asyncHandler(async (req, res) => {
   ]);
 
   const allRows = [...staticRows, ...dynamicRows, ...vipRows];
-  const data = await Promise.all(allRows.map(enrichRow));
+  const data = await Promise.all(
+    allRows.map((row) => enrichRow(row, req.user?._id))
+  );
 
   // Apply pagination to the combined result.
   const total = data.length;
