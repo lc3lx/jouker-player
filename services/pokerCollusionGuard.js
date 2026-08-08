@@ -1,5 +1,6 @@
 const Table = require("../models/tableModel");
 const logger = require("../utils/logger");
+const { allowSharedVpnIp } = require("../utils/proxyConfig");
 
 let redisClient = null;
 
@@ -111,8 +112,11 @@ async function assertNoCollusionAtPublicTable({
     .map((s) => String(s.user))
     .filter((id) => id !== uid);
 
+  // Shared VPN exit IPs are common; skip IP collusion when ALLOW_SHARED_VPN_IP / ALLOW_VPN_PROXY.
+  const checkIpCollusion = !allowSharedVpnIp();
+
   if (redisClient) {
-    if (nip && nip !== "unknown") {
+    if (checkIpCollusion && nip && nip !== "unknown") {
       const ipMembers = await redisClient.sMembers(ipIndexKey(String(tableId), nip));
       const conflict = ipMembers.find((m) => m !== uid && seatedOthers.includes(m));
       if (conflict) {
@@ -139,7 +143,7 @@ async function assertNoCollusionAtPublicTable({
   for (const [otherId, meta] of present.entries()) {
     if (otherId === uid) continue;
     if (!seatedOthers.includes(otherId)) continue;
-    if (nip && nip !== "unknown" && meta.ip === nip) {
+    if (checkIpCollusion && nip && nip !== "unknown" && meta.ip === nip) {
       const err = new Error("COLLUSION_IP");
       err.code = "COLLUSION_IP";
       throw err;

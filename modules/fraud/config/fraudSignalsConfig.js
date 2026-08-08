@@ -13,12 +13,19 @@ const MANUAL_REVIEW_MIN_RISK = Math.max(
   parseInt(process.env.REFERRAL_MANUAL_REVIEW_MIN_RISK || "81", 10) || 81
 );
 
+const { allowVpnProxy } = require("../../../utils/proxyConfig");
+
+// VPN/proxy weight defaults to 0 when ALLOW_VPN_PROXY is on (default).
+const vpnProxyWeight = allowVpnProxy()
+  ? Math.max(0, parseInt(process.env.VPN_PROXY_RISK_WEIGHT || "0", 10) || 0)
+  : Math.max(0, parseInt(process.env.VPN_PROXY_RISK_WEIGHT || "10", 10) || 10);
+
 const SIGNAL_WEIGHTS = {
   repeated_registrations_same_fingerprint: 15,
   same_referrer_similar_devices: 20,
   very_fast_level_progression: 15,
   fast_reward_claim_after_signup: 10,
-  vpn_or_proxy_hint: 10,
+  vpn_or_proxy_hint: vpnProxyWeight,
   emulator_or_rooted: 10,
   shared_payment_method: 25,
   repeated_invites_same_network: 10,

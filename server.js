@@ -18,6 +18,7 @@ const globalError = require("./middlewares/errorMiddleware");
 const dbConnection = require("./config/database");
 const { runProductionChecks } = require("./scripts/validateProductionChecks");
 const { isProduction } = require("./utils/appConfig");
+const { getTrustProxySetting } = require("./utils/proxyConfig");
 // Routes
 const mountRoutes = require("./routes");
 
@@ -50,9 +51,10 @@ const corsConfig = buildCorsConfig();
 // express app
 const app = express();
 
-const trustProxyHops = Number(process.env.TRUST_PROXY_HOPS || 0);
-if (Number.isInteger(trustProxyHops) && trustProxyHops > 0) {
-  app.set("trust proxy", trustProxyHops);
+// Honor X-Forwarded-* when behind nginx / CDN / VPN gateways (see utils/proxyConfig).
+const trustProxy = getTrustProxySetting();
+if (trustProxy !== false) {
+  app.set("trust proxy", trustProxy);
 }
 
 // Enable other domains to access your application

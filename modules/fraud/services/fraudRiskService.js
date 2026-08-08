@@ -48,7 +48,10 @@ async function computeRiskScore(context = {}) {
     score += SIGNAL_WEIGHTS.emulator_or_rooted;
     reasons.push("جهاز محاكي أو معدّل");
   }
-  if (mergedSignals.vpn || mergedSignals.proxy) {
+  if (
+    (mergedSignals.vpn || mergedSignals.proxy) &&
+    SIGNAL_WEIGHTS.vpn_or_proxy_hint > 0
+  ) {
     score += SIGNAL_WEIGHTS.vpn_or_proxy_hint;
     reasons.push("شبكة VPN/بروكسي محتملة");
   }

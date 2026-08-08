@@ -2,6 +2,8 @@ const fraudService = require("./fraudService");
 const auditService = require("./auditService");
 const AuditLog = require("../models/auditLogModel");
 
+const { allowVpnProxy } = require("../utils/proxyConfig");
+
 const RISK_WEIGHTS = {
   chip_dumping: 25,
   soft_play: 20,
@@ -10,7 +12,9 @@ const RISK_WEIGHTS = {
   multi_account: 35,
   device_sharing: 20,
   same_ip_abuse: 25,
-  vpn_abuse: 10,
+  vpn_abuse: allowVpnProxy()
+    ? Math.max(0, parseInt(process.env.VPN_PROXY_RISK_WEIGHT || "0", 10) || 0)
+    : 10,
   abnormal_betting: 15,
   repeated_partnership: 15,
 };
@@ -74,7 +78,7 @@ async function computeRiskScore(userId, { tableId = null, partnerUserId = null, 
     flags.push("same_ip_abuse");
   }
 
-  if (handMeta?.vpnDetected) {
+  if (handMeta?.vpnDetected && RISK_WEIGHTS.vpn_abuse > 0) {
     factors.push({ type: "vpn_abuse", weight: RISK_WEIGHTS.vpn_abuse });
     score += RISK_WEIGHTS.vpn_abuse;
     flags.push("vpn_abuse");

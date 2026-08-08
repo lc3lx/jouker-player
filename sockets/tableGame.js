@@ -307,7 +307,7 @@ class SocketSecurityGuard {
     this.violations = new Map();
     this.bans = new Map();
     this.socketSeen = new Set();
-    this.trustForwardedIp = Number(process.env.TRUST_PROXY_HOPS || 0) > 0;
+    this.trustForwardedIp = require("../utils/proxyConfig").trustsForwardedIp();
   }
 
   getIp(socket) {
