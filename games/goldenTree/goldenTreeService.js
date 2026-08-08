@@ -10,7 +10,7 @@ const {
   roundMoney,
 } = require("./constants");
 const { generateSpin, secureRandomInt } = require("./spinEngine");
-const { calculateWins } = require("./winCalculator");
+const { hardenWinResult } = require("./winGuard");
 const roundManager = require("./roundManager");
 const wallet = require("./goldenTreeWalletAdapter");
 const jackpotMeters = require("./jackpotMeters");
@@ -123,7 +123,8 @@ async function executeSpin(userId, betAmountInput) {
     bonusMode: isBonusSpin,
   });
 
-  const winResult = calculateWins(matrix, wildMultipliers, betAmount, {
+  // Single payable path: contiguous L→R from reel 0 only (hardened).
+  const winResult = hardenWinResult(matrix, wildMultipliers, betAmount, {
     bonusMode: isBonusSpin,
   });
   // HUD meters still tick on paid main spins; cash jackpot is match-3 scratch only.

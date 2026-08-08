@@ -243,6 +243,36 @@ test("landscape screenshot board — oranges with reel gaps pay nothing", () => 
   assert.equal(result.lineWins.length, 0);
 });
 
+test("screenshot Aug9 — watermelon/bell start, distant oranges → 0 (not 40k)", () => {
+  // User board that wrongly showed WIN 40,000.
+  const matrix = [
+    [SYMBOLS.WATERMELON, SYMBOLS.WATERMELON, SYMBOLS.BELL],
+    [SYMBOLS.SEVEN, SYMBOLS.ORANGE, SYMBOLS.ORANGE],
+    [SYMBOLS.BANANA, SYMBOLS.BANANA, SYMBOLS.GRAPES],
+    [SYMBOLS.ORANGE, SYMBOLS.ORANGE, SYMBOLS.PINEAPPLE],
+    [SYMBOLS.SEVEN, SYMBOLS.ORANGE, SYMBOLS.ORANGE],
+  ];
+  const { hardenWinResult } = require("../games/goldenTree/winGuard");
+  const result = hardenWinResult(matrix, {}, 10000, { bonusMode: false });
+  assert.equal(result.totalWin, 0);
+  assert.equal(result.lineWins.length, 0);
+  assert.notEqual(result.totalWin, 40000);
+});
+
+test("screenshot Aug9 — gapped 4 sevens → 0 (not 50k)", () => {
+  const matrix = [
+    [SYMBOLS.ORANGE, SYMBOLS.SEVEN, SYMBOLS.SEVEN],
+    [SYMBOLS.ORANGE, SYMBOLS.ORANGE, SYMBOLS.CHERRY],
+    [SYMBOLS.SEVEN, SYMBOLS.SEVEN, SYMBOLS.CHERRY],
+    [SYMBOLS.ORANGE, SYMBOLS.ORANGE, SYMBOLS.ORANGE],
+    [SYMBOLS.GRAPES, SYMBOLS.GRAPES, SYMBOLS.WATERMELON],
+  ];
+  const { hardenWinResult } = require("../games/goldenTree/winGuard");
+  const result = hardenWinResult(matrix, {}, 10000, { bonusMode: false });
+  assert.equal(result.totalWin, 0);
+  assert.notEqual(result.totalWin, 50000);
+});
+
 test("two sevens do not pay across missing reels", () => {
   const matrix = [
     [SYMBOLS.ORANGE, SYMBOLS.SEVEN, SYMBOLS.SEVEN],
