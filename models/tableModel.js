@@ -17,6 +17,9 @@ const waitingQueueEntrySchema = new mongoose.Schema(
     user: { type: mongoose.Schema.ObjectId, ref: "User", required: true },
     player: { type: mongoose.Schema.ObjectId, ref: "Player" },
     buyIn: { type: Number, required: true, min: 0 },
+    /** Normalized join metadata reused when the queue entry is later promoted. */
+    clientIp: { type: String, default: null },
+    deviceId: { type: String, default: null },
     queuedAt: { type: Date, default: Date.now },
   },
   { _id: false }

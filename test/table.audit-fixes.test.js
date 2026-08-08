@@ -281,7 +281,9 @@ test("poker join throws ALREADY_QUEUED when switched table already queues the us
 
 test("seatNextFromQueue assigns the next free seatPosition", async () => {
   const Table = require("../models/tableModel");
+  const collusion = require("../services/pokerCollusionGuard");
   const origFindById = Table.findById;
+  const origAssertNoCollusion = collusion.assertNoCollusionAtPublicTable;
 
   const tableDoc = {
     _id: "queue-seat-1",
@@ -293,22 +295,82 @@ test("seatNextFromQueue assigns the next free seatPosition", async () => {
       { user: "b", chips: 1000, seatPosition: 1 },
       { user: "c", chips: 1000, seatPosition: 3 },
     ],
-    waitingQueue: [{ user: "queued-user", player: "pq", buyIn: 1000 }],
+    waitingQueue: [
+      { user: "queued-user", player: "pq", buyIn: 1000, clientIp: "198.51.100.1" },
+    ],
     save: async function save() {
       return this;
     },
   };
   Table.findById = () => thenable(() => tableDoc);
+  collusion.assertNoCollusionAtPublicTable = async () => {};
 
   try {
+    delete require.cache[require.resolve("../services/pokerWaitingQueueService")];
     const { seatNextFromQueue } = require("../services/pokerWaitingQueueService");
     const seated = await seatNextFromQueue({ session: null, tableId: tableDoc._id });
-    assert.equal(seated, "queued-user");
+    assert.equal(seated?.userId, "queued-user");
+    assert.equal(seated?.clientIp, "198.51.100.1");
     const newSeat = tableDoc.seats.find((s) => String(s.user) === "queued-user");
     assert.ok(newSeat, "queued player must be seated");
     assert.equal(newSeat.seatPosition, 2, "first free chair (2) must be assigned");
   } finally {
     Table.findById = origFindById;
+    collusion.assertNoCollusionAtPublicTable = origAssertNoCollusion;
+    delete require.cache[require.resolve("../services/pokerWaitingQueueService")];
+  }
+});
+
+test("seatNextFromQueue skips a colliding queue head and seats the next eligible player", async () => {
+  const Table = require("../models/tableModel");
+  const collusion = require("../services/pokerCollusionGuard");
+  const origFindById = Table.findById;
+  const origAssertNoCollusion = collusion.assertNoCollusionAtPublicTable;
+
+  const tableDoc = {
+    _id: "queue-seat-collide-1",
+    gameType: "poker",
+    capacity: 9,
+    minBuyIn: 1000,
+    seats: [
+      { user: "a", chips: 1000, seatPosition: 0 },
+      { user: "b", chips: 1000, seatPosition: 1 },
+    ],
+    waitingQueue: [
+      { user: "blocked-user", player: "p1", buyIn: 1000, clientIp: "203.0.113.10" },
+      { user: "eligible-user", player: "p2", buyIn: 1000, clientIp: "203.0.113.11" },
+    ],
+    save: async function save() {
+      return this;
+    },
+  };
+  Table.findById = () => thenable(() => tableDoc);
+  collusion.assertNoCollusionAtPublicTable = async ({ userId }) => {
+    if (String(userId) === "blocked-user") {
+      const err = new Error("COLLUSION_IP");
+      err.code = "COLLUSION_IP";
+      throw err;
+    }
+  };
+
+  try {
+    delete require.cache[require.resolve("../services/pokerWaitingQueueService")];
+    const { seatNextFromQueue } = require("../services/pokerWaitingQueueService");
+    const seated = await seatNextFromQueue({ session: null, tableId: tableDoc._id });
+    assert.equal(seated?.userId, "eligible-user");
+    assert.equal(
+      tableDoc.waitingQueue.map((row) => String(row.user)).join(","),
+      "blocked-user",
+      "the blocked head must stay queued instead of being silently dropped"
+    );
+    assert.ok(
+      tableDoc.seats.some((s) => String(s.user) === "eligible-user"),
+      "the first eligible queued player must be promoted"
+    );
+  } finally {
+    Table.findById = origFindById;
+    collusion.assertNoCollusionAtPublicTable = origAssertNoCollusion;
+    delete require.cache[require.resolve("../services/pokerWaitingQueueService")];
   }
 });
 

@@ -380,6 +380,17 @@ test("jackpot roll — disabled on bonus spins", () => {
   assert.equal(bonus.jackpotAmount, 0);
 });
 
+test("match-3 jackpot triggers at 3+ jackpot symbols", () => {
+  const goldenTreeJackpot = require("../games/goldenTree/goldenTreeJackpot");
+  const matrix = emptyMatrix(SYMBOLS.ORANGE);
+  assert.equal(goldenTreeJackpot.isJackpotTriggered(matrix), false);
+  matrix[0][0] = SYMBOLS.JACKPOT;
+  matrix[1][1] = SYMBOLS.JACKPOT;
+  assert.equal(goldenTreeJackpot.isJackpotTriggered(matrix), false);
+  matrix[2][2] = SYMBOLS.JACKPOT;
+  assert.equal(goldenTreeJackpot.isJackpotTriggered(matrix), true);
+});
+
 test("spin response includes jackpot fields", async () => {
   wallet.clearStubForTests();
   roundManager.clearAllForTests();

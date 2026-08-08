@@ -15,6 +15,7 @@ const { calculateWins } = require("./winCalculator");
 const roundManager = require("./roundManager");
 const wallet = require("./goldenTreeWalletAdapter");
 const jackpotMeters = require("./jackpotMeters");
+const goldenTreeJackpot = require("./goldenTreeJackpot");
 
 function mapWalletError(err) {
   if (
@@ -130,14 +131,12 @@ async function executeSpin(userId, betAmountInput) {
   const winResult = calculateWins(matrix, wildMultipliers, betAmount, {
     bonusMode: isBonusSpin,
   });
-  const jackpot = rollJackpot(betAmount, { isBonusSpin });
-  const combinedWin = roundMoney(winResult.totalWin + jackpot.jackpotAmount);
-  const { totalWin, capped, cap } = capWin(combinedWin, betAmount);
-  // If the global cap trimmed the pot, keep jackpotAmount as what was credited
-  // toward totalWin (may be reduced when line wins already near the cap).
-  const creditedJackpot = jackpot.jackpotHit
-    ? Math.min(jackpot.jackpotAmount, totalWin)
-    : 0;
+  // HUD meters still tick on paid main spins; cash jackpot is match-3 scratch only.
+  const meters = isBonusSpin
+    ? jackpotMeters.snapshot()
+    : jackpotMeters.contribute(betAmount);
+
+  const { totalWin, capped, cap } = capWin(winResult.totalWin, betAmount);
 
   let balanceAfter;
   try {
@@ -146,9 +145,6 @@ async function executeSpin(userId, betAmountInput) {
       winAmount: totalWin,
       meta: {
         type: isBonusSpin ? "bonus_spin" : "main_spin",
-        jackpotHit: jackpot.jackpotHit,
-        jackpotAmount: creditedJackpot,
-        jackpotMultiplier: JACKPOT_MULTIPLIER,
       },
     });
   } catch (err) {
@@ -170,6 +166,18 @@ async function executeSpin(userId, betAmountInput) {
     bonusSessionId: bonusSession?.sessionId || null,
   });
 
+  let jackpotGame = null;
+  if (goldenTreeJackpot.isJackpotTriggered(matrix)) {
+    try {
+      jackpotGame = await goldenTreeJackpot.createRoundForSpin({
+        spinId: round.roundId,
+        userId: userKey,
+      });
+    } catch (_) {
+      jackpotGame = null;
+    }
+  }
+
   if (capped) {
     roundManager.settleRound(round.roundId);
   }
@@ -189,9 +197,10 @@ async function executeSpin(userId, betAmountInput) {
     isFreeSpin: isBonusSpin,
     bonusSessionId: bonusSession?.sessionId || null,
     freeSpinsRemaining: remainingBonus?.freeSpinsRemaining ?? 0,
-    jackpotHit: jackpot.jackpotHit,
-    jackpotAmount: creditedJackpot,
-    jackpotMeters: jackpot.meters,
+    jackpotHit: false,
+    jackpotAmount: 0,
+    jackpotMeters: meters,
+    jackpotGame,
   });
 }
 

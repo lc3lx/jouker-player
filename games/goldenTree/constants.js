@@ -38,9 +38,17 @@ const SYMBOLS = Object.freeze({
   WILD: "wild",
   STAR: "star",
   DOLLAR: "dollar",
+  /** Match-3 scratch trigger (same as Zeus / Atlantis). */
+  JACKPOT: "jackpot",
 });
 
 const SCATTERS = new Set([SYMBOLS.STAR, SYMBOLS.DOLLAR]);
+/** Symbols that break adjacent-path wins (scatters + jackpot scatter). */
+const LINE_BREAKERS = new Set([
+  SYMBOLS.STAR,
+  SYMBOLS.DOLLAR,
+  SYMBOLS.JACKPOT,
+]);
 const LOW_FRUITS = new Set([
   SYMBOLS.CHERRY,
   SYMBOLS.ORANGE,
@@ -142,6 +150,10 @@ function isScatter(symbol) {
   return SCATTERS.has(symbol);
 }
 
+function isLineBreaker(symbol) {
+  return LINE_BREAKERS.has(symbol);
+}
+
 function roundMoney(value) {
   const n = Number(value);
   if (!Number.isFinite(n)) return 0;
@@ -163,6 +175,7 @@ module.exports = {
   FREE_SPINS_PER_BONUS,
   SYMBOLS,
   SCATTERS,
+  LINE_BREAKERS,
   LOW_FRUITS,
   WILD_REELS,
   WILD_ROW,
@@ -179,5 +192,6 @@ module.exports = {
   BONUS_GUARANTEED_WILDS,
   minMatchCount,
   isScatter,
+  isLineBreaker,
   roundMoney,
 };

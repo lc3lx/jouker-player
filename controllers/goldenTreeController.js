@@ -2,7 +2,11 @@ const asyncHandler = require("express-async-handler");
 const goldenTreeService = require("../games/goldenTree/goldenTreeService");
 
 function requireUserId(req, res, next) {
-  const userId = req.body?.userId || req.user?._id || req.user?.id;
+  const userId =
+    req.body?.userId ||
+    req.query?.userId ||
+    req.user?._id ||
+    req.user?.id;
   if (!userId) {
     return res.status(400).json({
       status: "fail",

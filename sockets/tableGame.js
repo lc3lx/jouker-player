@@ -5239,6 +5239,11 @@ function initTableGame(io, options = {}) {
           return;
         }
 
+        const socketDeviceId =
+          socket.handshake?.headers?.["x-device-id"] ||
+          socket.handshake?.auth?.deviceId ||
+          socket.handshake?.query?.deviceId ||
+          null;
         // This socket is now a SEATED player (may have been a spectator socket
         // that took a seat). Clear the spectator flag so its disconnect routes
         // through the seat-vacate path, not the spectator short-circuit — else
@@ -5249,7 +5254,12 @@ function initTableGame(io, options = {}) {
         // reconnects its socket still gets its seat/chips back.
         if (!isSeated && isVacating) {
           const { tryRestoreVacatedSeat } = require("../services/pokerVacateService");
-          const restored = await tryRestoreVacatedSeat({ tableId, userId: socket.userId });
+          const restored = await tryRestoreVacatedSeat({
+            tableId,
+            userId: socket.userId,
+            clientIp: socket.userIp,
+            deviceId: socketDeviceId,
+          });
           if (!restored?.restored) {
             socket.emit("table_event", { type: "reconnect_expired", tableId: String(tableId) });
             return;
@@ -5268,6 +5278,12 @@ function initTableGame(io, options = {}) {
           });
           presenceTables.add(presenceId);
         }
+        await require("../services/pokerCollusionGuard").registerSeatPresence({
+          tableId,
+          userId: socket.userId,
+          ip: socket.userIp,
+          deviceId: socketDeviceId,
+        });
 
         // H-3: the owner applies the (re)connect + emits initial state. On a
         // follower, forward it; the owner emits state to this socket cluster-wide.
@@ -5340,13 +5356,16 @@ function initTableGame(io, options = {}) {
           socket.emit("table_event", { type: "rate_limited", tableId: String(tableId) });
           return;
         }
-        const table = await Table.findById(tableId).select("gameType seats settings isPrivate");
+        const table = await Table.findById(tableId).select("gameType seats vacatingPlayers settings isPrivate");
         if (!table || table.gameType !== "poker") {
           socket.emit("table_event", { type: "table_not_found", tableId: String(tableId) });
           return;
         }
         const seated = table.seats.some((s) => String(s.user) === String(socket.userId));
-        if (seated) {
+        const vacating = (table.vacatingPlayers || []).some(
+          (v) => String(v.user) === String(socket.userId) && new Date(v.vacateUntil).getTime() > Date.now()
+        );
+        if (seated || vacating) {
           return handleJoinTable({ tableId });
         }
         // A seat password is not a spectator credential. Private tables stay

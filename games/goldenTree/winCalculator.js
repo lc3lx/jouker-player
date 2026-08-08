@@ -11,6 +11,7 @@ const {
   WILD_ROW,
   minMatchCount,
   isScatter,
+  isLineBreaker,
   roundMoney,
 } = require("./constants");
 
@@ -123,7 +124,7 @@ function calculateWins(matrix, wildMultipliers, betAmount, options = {}) {
     for (let col = 0; col < REEL_COUNT; col += 1) {
       const row = path[col];
       const raw = evalMatrix[col][row];
-      if (isScatter(raw)) break;
+      if (isLineBreaker(raw)) break;
 
       symbols.push(raw);
       positions.push({ col, row });

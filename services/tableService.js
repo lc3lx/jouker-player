@@ -616,6 +616,10 @@ exports.joinTable = asyncHandler(async (req, res, next) => {
   let { id } = req.params;
   const buyIn = Number(req.body.buyIn || 0);
   const password = req.body.password;
+  const clientIp = String(
+    req.headers["x-forwarded-for"] || req.socket?.remoteAddress || ""
+  );
+  const deviceId = String(req.body?.deviceId || req.headers["x-device-id"] || "");
 
   let table = await Table.findById(id);
   if (!table) return next(new ApiError("Table not found", 404));
@@ -682,6 +686,8 @@ exports.joinTable = asyncHandler(async (req, res, next) => {
     const vacRestore = await tryRestoreVacatedSeat({
       tableId: id,
       userId: req.user._id,
+      clientIp,
+      deviceId: deviceId || null,
     });
     if (vacRestore) {
       void trackJoinLeaveEvent(req.user._id, "join_table");
@@ -962,10 +968,6 @@ exports.joinTable = asyncHandler(async (req, res, next) => {
       });
     } else if (table.gameType === "poker") {
       const preferQueue = req.body.preferQueue === true || req.body.preferQueue === "1";
-      const clientIp = String(
-        req.headers["x-forwarded-for"] || req.socket?.remoteAddress || ""
-      );
-      const deviceId = String(req.body?.deviceId || req.headers["x-device-id"] || "");
       const reqSeatRaw = req.body.seatIndex;
       const reqSeat =
         reqSeatRaw != null && Number.isFinite(Number(reqSeatRaw))

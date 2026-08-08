@@ -108,11 +108,13 @@ async function createJackpotRound({ spinId, userId, game = "poseidon" }) {
   const cards = buildMatchThreeLayout();
 
   const now = Date.now();
+  const allowedGames = new Set(["poseidon", "king-arth", "golden-tree"]);
+  const gameKey = allowedGames.has(game) ? game : "poseidon";
   const round = {
     roundId,
     spinId,
     userId: String(userId),
-    game: game === "king-arth" ? "king-arth" : "poseidon",
+    game: gameKey,
     prizeType: "pending",
     prizeAmount: 0,
     cards,

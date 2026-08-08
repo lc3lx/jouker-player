@@ -7,6 +7,11 @@ const {
 } = require("./walletLedgerService");
 const { normalizeCapacity } = require("../utils/pokerTableStatus");
 const { emitTablesUpdated } = require("../utils/lobbyRealtime");
+const {
+  assertNoCollusionAtPublicTable,
+  normalizeIp,
+  normalizeDeviceId,
+} = require("./pokerCollusionGuard");
 
 function queueEntryUserId(entry) {
   return String(entry?.user?._id || entry?.user || "");
@@ -18,7 +23,15 @@ function queueEntryUserId(entry) {
  * a queue source here: Mongo transaction retries cannot safely replay a
  * destructive Redis operation.
  */
-async function enqueuePlayer({ session, userId, playerId, buyIn, tableId }) {
+async function enqueuePlayer({
+  session,
+  userId,
+  playerId,
+  buyIn,
+  tableId,
+  clientIp = null,
+  deviceId = null,
+}) {
   const tableTx = await Table.findById(tableId).session(session);
   if (!tableTx) throw new Error("TABLE_NOT_FOUND");
   if (tableTx.gameType !== "poker") throw new Error("NOT_POKER");
@@ -46,6 +59,8 @@ async function enqueuePlayer({ session, userId, playerId, buyIn, tableId }) {
     user: userId,
     player: playerId,
     buyIn,
+    clientIp: normalizeIp(clientIp),
+    deviceId: normalizeDeviceId(deviceId),
     queuedAt: new Date(),
   });
   await tableTx.save({ session });
@@ -64,38 +79,83 @@ async function seatNextFromQueue({ session, tableId }) {
   const cap = normalizeCapacity(tableTx.capacity);
   if (tableTx.seats.length >= cap) return null;
   tableTx.waitingQueue = Array.isArray(tableTx.waitingQueue) ? tableTx.waitingQueue : [];
-  const row = tableTx.waitingQueue.shift();
-  if (!row) return null;
-
-  const uid = queueEntryUserId(row);
-  const buyIn = Number(row.buyIn || tableTx.minBuyIn);
-  if (!uid) {
-    await tableTx.save({ session });
-    return seatNextFromQueue({ session, tableId });
-  }
-  if (tableTx.seats.some((s) => String(s.user) === uid)) {
-    await tableTx.save({ session });
-    return seatNextFromQueue({ session, tableId });
-  }
+  if (tableTx.waitingQueue.length === 0) return null;
 
   const {
     nextFreeSeatPosition,
     POKER_OPPOSITE_DEALER_SEAT,
   } = require("./pokerTableAllocationService");
-  const seatPosition =
-    nextFreeSeatPosition(tableTx.seats, cap) ?? POKER_OPPOSITE_DEALER_SEAT;
 
-  tableTx.seats.push({
-    user: uid,
-    player: row.player,
-    chips: buyIn,
-    seatPosition,
-  });
+  let promoted = null;
+  let queueChanged = false;
+
+  for (let i = 0; i < tableTx.waitingQueue.length; i += 1) {
+    const row = tableTx.waitingQueue[i];
+    const uid = queueEntryUserId(row);
+    if (!uid) {
+      tableTx.waitingQueue.splice(i, 1);
+      queueChanged = true;
+      i -= 1;
+      continue;
+    }
+    if (tableTx.seats.some((s) => String(s.user) === uid)) {
+      tableTx.waitingQueue.splice(i, 1);
+      queueChanged = true;
+      i -= 1;
+      continue;
+    }
+
+    const rowIp = normalizeIp(row?.clientIp);
+    const rowDeviceId = normalizeDeviceId(row?.deviceId);
+    if ((rowIp && rowIp !== "unknown") || rowDeviceId) {
+      try {
+        await assertNoCollusionAtPublicTable({
+          tableId: tableTx._id,
+          userId: uid,
+          ip: rowIp,
+          deviceId: rowDeviceId,
+          session,
+        });
+      } catch (err) {
+        if (err?.message === "COLLUSION_IP" || err?.message === "COLLUSION_DEVICE") {
+          continue;
+        }
+        throw err;
+      }
+    }
+
+    const buyIn = Number(row.buyIn || tableTx.minBuyIn);
+    const seatPosition =
+      nextFreeSeatPosition(tableTx.seats, cap) ?? POKER_OPPOSITE_DEALER_SEAT;
+    tableTx.waitingQueue.splice(i, 1);
+    tableTx.seats.push({
+      user: uid,
+      player: row.player,
+      chips: buyIn,
+      seatPosition,
+    });
+    promoted = {
+      userId: uid,
+      clientIp: rowIp,
+      deviceId: rowDeviceId,
+    };
+    queueChanged = true;
+    break;
+  }
+
+  if (!queueChanged) return null;
+
   await tableTx.save({ session });
+  if (!promoted) return null;
   // Informational only. A transaction retry may emit this more than once; the
   // lobby reloads authoritative data and never treats it as a money event.
-  emitTablesUpdated({ gameType: "poker", reason: "queue_seated", tableId: String(tableId), userId: uid });
-  return uid;
+  emitTablesUpdated({
+    gameType: "poker",
+    reason: "queue_seated",
+    tableId: String(tableId),
+    userId: promoted.userId,
+  });
+  return promoted;
 }
 
 /** Remove a queue entry and release the same locked amount atomically. */

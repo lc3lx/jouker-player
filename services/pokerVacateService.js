@@ -4,7 +4,7 @@ const { POKER_TIMINGS } = require("../utils/poker/timings");
 const { withMongoTransaction, releaseTableSeatToBalance } = require("./walletLedgerService");
 const { statusAfterSeatChange } = require("./pokerTableAllocationService");
 const { seatNextFromQueue } = require("./pokerWaitingQueueService");
-const { removeSeatPresence } = require("./pokerCollusionGuard");
+const { removeSeatPresence, registerSeatPresence } = require("./pokerCollusionGuard");
 const { emitTablesUpdated } = require("../utils/lobbyRealtime");
 
 function getTableGameBridge() {
@@ -83,6 +83,7 @@ async function vacatePokerSeat({
   const uid = String(userId);
   let chips = 0;
   let vacateUntil = null;
+  let promotedSeat = null;
 
   try {
     await withMongoTransaction(async (session) => {
@@ -119,7 +120,7 @@ async function vacatePokerSeat({
 
       table.status = statusAfterSeatChange(table, table.seats.length);
       await table.save({ session });
-      await seatNextFromQueue({ session, tableId: tid });
+      promotedSeat = await seatNextFromQueue({ session, tableId: tid });
     });
   } catch (e) {
     if (e.message === "NOT_SEATED" || e.message === "NOT_POKER") {
@@ -142,6 +143,7 @@ async function vacatePokerSeat({
     ip: clientIp,
     deviceId: deviceId || null,
   });
+  await registerPromotedQueueSeatPresence(tid, promotedSeat);
 
   await getTableGameBridge().vacateLiveEngineSeat(tid, uid, { chips, vacateUntil });
 
@@ -159,7 +161,12 @@ async function vacatePokerSeat({
 /**
  * Return within vacate window — restore mongo seat + engine seat (not a fresh buy-in).
  */
-async function tryRestoreVacatedSeat({ tableId, userId }) {
+async function tryRestoreVacatedSeat({
+  tableId,
+  userId,
+  clientIp = null,
+  deviceId = null,
+}) {
   const tid = String(tableId);
   const uid = String(userId);
   let restored = null;
@@ -203,6 +210,23 @@ async function tryRestoreVacatedSeat({ tableId, userId }) {
   });
 
   if (!restored) return null;
+
+  if ((clientIp && String(clientIp).trim().isNotEmpty) || deviceId) {
+    try {
+      await registerSeatPresence({
+        tableId: tid,
+        userId: uid,
+        ip: clientIp,
+        deviceId: deviceId || null,
+      });
+    } catch (err) {
+      logger.warn("poker_restore_presence_register_failed", {
+        tableId: tid,
+        userId: uid,
+        reason: err?.message || "unknown",
+      });
+    }
+  }
 
   await getTableGameBridge().restoreLiveEngineSeat(tid, uid, restored);
   emitTablesUpdated({ gameType: "poker", reason: "vacate_restore", tableId: tid });
@@ -269,6 +293,7 @@ async function permanentLeavePokerTable({
   const uid = String(userId);
   let cashedOut = 0;
   let wasSeated = false;
+  let promotedSeat = null;
 
   try {
     await withMongoTransaction(async (session) => {
@@ -324,7 +349,7 @@ async function permanentLeavePokerTable({
       );
       table.status = statusAfterSeatChange(table, table.seats.length);
       await table.save({ session });
-      await seatNextFromQueue({ session, tableId: tid });
+      promotedSeat = await seatNextFromQueue({ session, tableId: tid });
     });
   } catch (e) {
     if (
@@ -344,6 +369,7 @@ async function permanentLeavePokerTable({
     ip: clientIp,
     deviceId: deviceId || null,
   });
+  await registerPromotedQueueSeatPresence(tid, promotedSeat);
 
   const afterLeave = await Table.findById(tid).select("seats gameType vacatingPlayers");
   const activeVacating = (afterLeave?.vacatingPlayers || []).filter((v) => isVacateActive(v));
@@ -366,6 +392,24 @@ async function permanentLeavePokerTable({
   logger.info("poker_permanent_leave", { tableId: tid, userId: uid, cashedOut });
 
   return { left: true, cashedOut };
+}
+
+async function registerPromotedQueueSeatPresence(tableId, promotedSeat) {
+  if (!promotedSeat?.userId) return;
+  try {
+    await registerSeatPresence({
+      tableId,
+      userId: promotedSeat.userId,
+      ip: promotedSeat.clientIp,
+      deviceId: promotedSeat.deviceId || null,
+    });
+  } catch (err) {
+    logger.warn("poker_queue_promotion_presence_register_failed", {
+      tableId: String(tableId),
+      userId: String(promotedSeat.userId),
+      reason: err?.message || "unknown",
+    });
+  }
 }
 
 function toSafeInt(value, fallback = 0) {

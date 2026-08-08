@@ -177,7 +177,15 @@ async function executePokerJoinTransaction({
 
   if (tableTx.seats.length >= cap) {
     if (preferQueue) {
-      return enqueuePlayer({ session, userId, playerId, buyIn, tableId: tableTx._id });
+      return enqueuePlayer({
+        session,
+        userId,
+        playerId,
+        buyIn,
+        tableId: tableTx._id,
+        clientIp,
+        deviceId,
+      });
     }
     // Do NOT find-or-create a replacement table here: that allocation must
     // go through withPokerAllocationLock (per-tier+buyIn serialization) to
@@ -195,7 +203,15 @@ async function executePokerJoinTransaction({
   const capNow = normalizeCapacity(tableTx.capacity);
   if (tableTx.seats.length >= capNow) {
     if (preferQueue) {
-      return enqueuePlayer({ session, userId, playerId, buyIn, tableId: tableTx._id });
+      return enqueuePlayer({
+        session,
+        userId,
+        playerId,
+        buyIn,
+        tableId: tableTx._id,
+        clientIp,
+        deviceId,
+      });
     }
     throw new Error("TABLE_FULL");
   }

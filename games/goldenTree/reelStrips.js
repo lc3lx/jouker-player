@@ -46,6 +46,10 @@ function stripForReel(reelIndex, mode) {
     mix.push([SYMBOLS.WILD, wildWeight]);
   }
 
+  // Match-3 jackpot scatter (Zeus / Atlantis style) — all reels, low weight.
+  const jackpotWeight = mode === "bonus" ? 3 : 2;
+  mix.push([SYMBOLS.JACKPOT, jackpotWeight]);
+
   return buildStrip(mix);
 }
 
