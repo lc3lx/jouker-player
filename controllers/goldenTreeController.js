@@ -54,7 +54,7 @@ exports.winRules = asyncHandler(async (_req, res) => {
     data: {
       winRulesVersion: WIN_RULES_VERSION,
       rules:
-        "contiguous L→R from reel 0; |Δrow|≤1; one best path per symbol (no multi-way stack)",
+        "min 3 consecutive L→R from reel 0 for EVERY line symbol (orange/seven same as cherry); |Δrow|≤1; one best path per symbol",
     },
   });
 });

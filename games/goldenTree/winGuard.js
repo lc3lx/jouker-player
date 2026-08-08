@@ -9,6 +9,7 @@ const {
   REFERENCE_BET,
   ROW_COUNT,
   REEL_COUNT,
+  MIN_CONSECUTIVE,
   WIN_RULES_VERSION,
 } = require("./constants");
 const {
@@ -37,6 +38,8 @@ function hardenWinResult(matrix, wildMultipliers, betAmount, options = {}) {
   let lineTotal = 0;
   for (const w of fresh.lineWins) {
     if (!w || w.count !== w.positions?.length) continue;
+    // Same bar for orange, seven, cherry, … — never pay under 3-in-a-row.
+    if (!Number.isInteger(w.count) || w.count < MIN_CONSECUTIVE) continue;
     // Reject mid-board / right-side clusters that never touch reel 0.
     const startsAtCol0 =
       Array.isArray(w.positions) &&

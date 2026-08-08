@@ -1,11 +1,16 @@
 /**
  * Golden Tree — core game constants.
  * Matrix: 5 reels (columns) × 3 rows.
- * Wins: 3+ matching symbols/wilds on contiguous left→right reels,
- * starting on reel 0. A connection may move horizontally or diagonally to a
- * touching cell on the next reel; a gap still ends the run — no skipping
- * columns or jumping over a row.
+ *
+ * Win rule (EVERY line symbol — cherry, orange, seven, grapes, … identical):
+ * at least MIN_CONSECUTIVE matching symbols/wilds on contiguous left→right
+ * reels, starting on reel 0. A connection may move horizontally or diagonally
+ * to a touching cell on the next reel; a gap ends the run — no skipping
+ * columns, no “count anywhere on the board”.
  */
+
+/** Minimum run length for any line symbol (orange / seven included). */
+const MIN_CONSECUTIVE = 3;
 
 const REEL_COUNT = 5;
 const ROW_COUNT = 3;
@@ -152,8 +157,8 @@ const BONUS_WILD_MULTIPLIERS = [2, 3, 5];
 const BUY_BONUS_TYPE = "Triple";
 const BUY_BONUS_COST = 350;
 
-function minMatchCount() {
-  return 3;
+function minMatchCount(_symbol) {
+  return MIN_CONSECUTIVE;
 }
 
 function isScatter(symbol) {
@@ -183,6 +188,7 @@ module.exports = {
   GAMBLE_MAX_ATTEMPTS_CAP,
   GAMBLE_MAX_WIN_MULTIPLIER,
   FREE_SPINS_PER_BONUS,
+  MIN_CONSECUTIVE,
   WIN_RULES_VERSION,
   SYMBOLS,
   SCATTERS,

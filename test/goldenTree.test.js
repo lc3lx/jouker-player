@@ -333,6 +333,22 @@ test("orange and cherry use identical match rules on the same shape", () => {
   assert.equal(orange.totalWin, cherry.totalWin);
 });
 
+test("screenshot 02:41 — gapped 4 sevens + mid oranges → 0 (not 5× bet)", () => {
+  // 7|7|JP · O|O|C · O|7|7 · O|O|O · B|B|G — anywhere-count of 4 sevens = 5×.
+  const matrix = [
+    [SYMBOLS.SEVEN, SYMBOLS.SEVEN, SYMBOLS.JACKPOT],
+    [SYMBOLS.ORANGE, SYMBOLS.ORANGE, SYMBOLS.CHERRY],
+    [SYMBOLS.ORANGE, SYMBOLS.SEVEN, SYMBOLS.SEVEN],
+    [SYMBOLS.ORANGE, SYMBOLS.ORANGE, SYMBOLS.ORANGE],
+    [SYMBOLS.BANANA, SYMBOLS.BANANA, SYMBOLS.GRAPES],
+  ];
+  const bet = 40000000;
+  const { hardenWinResult } = require("../games/goldenTree/winGuard");
+  const result = hardenWinResult(matrix, {}, bet, { bonusMode: false });
+  assert.equal(result.totalWin, 0);
+  assert.notEqual(result.totalWin, bet * 5);
+});
+
 test("seven cluster — one best path only (not 6× multi-way)", () => {
   const matrix = [
     [SYMBOLS.SEVEN, SYMBOLS.SEVEN, SYMBOLS.ORANGE],
