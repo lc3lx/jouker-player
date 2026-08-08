@@ -333,6 +333,24 @@ test("orange and cherry use identical match rules on the same shape", () => {
   assert.equal(orange.totalWin, cherry.totalWin);
 });
 
+test("screenshot 02:51 — sevens with reel1 gap → 0 (not 5× / 50k at bet 10k)", () => {
+  // Bell|Bell|7 · O|O|Pine · 7|7|Cherry · 7|7|O · O|O|7
+  // Anywhere-count of 4 sevens would pay bet×5 = 50_000.
+  const matrix = [
+    [SYMBOLS.BELL, SYMBOLS.BELL, SYMBOLS.SEVEN],
+    [SYMBOLS.ORANGE, SYMBOLS.ORANGE, SYMBOLS.PINEAPPLE],
+    [SYMBOLS.SEVEN, SYMBOLS.SEVEN, SYMBOLS.CHERRY],
+    [SYMBOLS.SEVEN, SYMBOLS.SEVEN, SYMBOLS.ORANGE],
+    [SYMBOLS.ORANGE, SYMBOLS.ORANGE, SYMBOLS.SEVEN],
+  ];
+  const bet = 10000;
+  const { hardenWinResult } = require("../games/goldenTree/winGuard");
+  const result = hardenWinResult(matrix, {}, bet, { bonusMode: false });
+  assert.equal(result.totalWin, 0);
+  assert.equal(result.lineWins.length, 0);
+  assert.notEqual(result.totalWin, bet * 5);
+});
+
 test("screenshot 02:41 — gapped 4 sevens + mid oranges → 0 (not 5× bet)", () => {
   // 7|7|JP · O|O|C · O|7|7 · O|O|O · B|B|G — anywhere-count of 4 sevens = 5×.
   const matrix = [
