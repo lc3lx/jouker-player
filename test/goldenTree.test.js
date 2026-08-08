@@ -304,6 +304,33 @@ test("orange cluster — one best path only (not 10× multi-way)", () => {
   assert.equal(result.lineWins[0].count, 3);
   assert.equal(result.totalWin, bet * 0.2); // single 3-orange pay
   assert.ok(result.totalWin < bet); // never the old multi-way 80M/160M
+  // Flattest path among equal pays (same rules / beam look as other fruits).
+  const rows = result.lineWins[0].positions.map((p) => p.row);
+  assert.equal(new Set(rows).size, 1);
+});
+
+test("orange and cherry use identical match rules on the same shape", () => {
+  const shape = (sym) => [
+    [sym, SYMBOLS.BANANA, SYMBOLS.BANANA],
+    [sym, SYMBOLS.BANANA, SYMBOLS.BANANA],
+    [sym, SYMBOLS.BANANA, SYMBOLS.BANANA],
+    [SYMBOLS.PLUM, SYMBOLS.PLUM, SYMBOLS.PLUM],
+    [SYMBOLS.BELL, SYMBOLS.BELL, SYMBOLS.BELL],
+  ];
+  const orange = calculateWins(shape(SYMBOLS.ORANGE), {}, 10000, {
+    bonusMode: false,
+  });
+  const cherry = calculateWins(shape(SYMBOLS.CHERRY), {}, 10000, {
+    bonusMode: false,
+  });
+  assert.equal(orange.lineWins.length, cherry.lineWins.length);
+  assert.equal(orange.lineWins[0].count, cherry.lineWins[0].count);
+  assert.deepEqual(
+    orange.lineWins[0].positions,
+    cherry.lineWins[0].positions,
+  );
+  // Same shape → same paytable band for low fruit (0.2×).
+  assert.equal(orange.totalWin, cherry.totalWin);
 });
 
 test("seven cluster — one best path only (not 6× multi-way)", () => {
