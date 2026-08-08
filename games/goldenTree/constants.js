@@ -2,8 +2,9 @@
  * Golden Tree — core game constants.
  * Matrix: 5 reels (columns) × 3 rows.
  * Wins: 3+ matching symbols/wilds on contiguous left→right reels,
- * starting on reel 0. A connection may use any row on the next reel;
- * a gap still ends the run — no skipping columns.
+ * starting on reel 0. A connection may move horizontally or diagonally to a
+ * touching cell on the next reel; a gap still ends the run — no skipping
+ * columns or jumping over a row.
  */
 
 const REEL_COUNT = 5;
@@ -88,12 +89,10 @@ const PAYLINES = Object.freeze([
 
 /**
  * All left→right paths of length REEL_COUNT with exactly one cell on every
- * consecutive reel. Each next symbol may be in any of the three rows.
- *
- * The exported name is retained for compatibility: "adjacent" refers to
- * adjacent reels, not adjacent rows.
+ * consecutive reel. The next symbol must be in the same row or a directly
+ * touching diagonal row (absolute row difference ≤ 1).
  */
-function buildConnectedPaths() {
+function buildAdjacentPaths() {
   const paths = [];
 
   function walk(path) {
@@ -101,8 +100,11 @@ function buildConnectedPaths() {
       paths.push(path.slice());
       return;
     }
-    for (let row = 0; row < ROW_COUNT; row += 1) {
-      path.push(row);
+    const previousRow = path[path.length - 1];
+    const firstNextRow = Math.max(0, previousRow - 1);
+    const lastNextRow = Math.min(ROW_COUNT - 1, previousRow + 1);
+    for (let nextRow = firstNextRow; nextRow <= lastNextRow; nextRow += 1) {
+      path.push(nextRow);
       walk(path);
       path.pop();
     }
@@ -115,7 +117,7 @@ function buildConnectedPaths() {
   return Object.freeze(paths.map((p) => Object.freeze(p)));
 }
 
-const ADJACENT_PATHS = buildConnectedPaths();
+const ADJACENT_PATHS = buildAdjacentPaths();
 
 /**
  * Paytable multipliers at REFERENCE_BET (1 FUN).

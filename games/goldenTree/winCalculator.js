@@ -95,15 +95,18 @@ function positionsKey(symbol, positions) {
 
 /**
  * Contiguous L→R from col 0 only: positions[i].col === i.
- * Rows may change freely between neighbouring columns; any skipped column is
- * rejected (for example, positions on reels 0, 1 and 3).
+ * Each next position must touch the prior one horizontally or diagonally, so
+ * its row may differ by at most one. Any skipped column is rejected.
  */
 function isContiguousFromCol0(positions) {
   if (!Array.isArray(positions) || positions.length === 0) return false;
   for (let i = 0; i < positions.length; i += 1) {
     const p = positions[i];
     if (!p || p.col !== i) return false;
-    if (p.row < 0 || p.row >= ROW_COUNT) return false;
+    if (!Number.isInteger(p.row) || p.row < 0 || p.row >= ROW_COUNT) {
+      return false;
+    }
+    if (i > 0 && Math.abs(p.row - positions[i - 1].row) > 1) return false;
   }
   return true;
 }
@@ -135,8 +138,9 @@ function cellContinues(sym, baseSymbol) {
 
 /**
  * Walk contiguous paths starting ONLY at column 0.
- * Extends to the next column when a matching symbol/wild appears in any row.
- * First column with no valid extension ends that path (no skipping).
+ * Extends to the next column when a matching symbol/wild appears in the same
+ * row or a touching diagonal row. First column with no valid extension ends
+ * that path (no skipping).
  */
 function collectContiguousWins(evalMatrix) {
   const found = [];
@@ -149,17 +153,19 @@ function collectContiguousWins(evalMatrix) {
     found.push({ symbol: paySymbol, count, positions: positions.slice() });
   }
 
-  function dfs(col, baseSymbol, positions) {
+  function dfs(col, row, baseSymbol, positions) {
     const atEnd = col >= REEL_COUNT - 1;
     let extended = false;
 
     if (!atEnd) {
-      for (let nextRow = 0; nextRow < ROW_COUNT; nextRow += 1) {
+      const firstNextRow = Math.max(0, row - 1);
+      const lastNextRow = Math.min(ROW_COUNT - 1, row + 1);
+      for (let nextRow = firstNextRow; nextRow <= lastNextRow; nextRow += 1) {
         const sym = evalMatrix[col + 1][nextRow];
         const step = cellContinues(sym, baseSymbol);
         if (!step.ok) continue;
         extended = true;
-        dfs(col + 1, step.base, [
+        dfs(col + 1, nextRow, step.base, [
           ...positions,
           { col: col + 1, row: nextRow },
         ]);
@@ -176,7 +182,7 @@ function collectContiguousWins(evalMatrix) {
     const sym = evalMatrix[0][startRow];
     const step = cellContinues(sym, null);
     if (!step.ok) continue;
-    dfs(0, step.base, [{ col: 0, row: startRow }]);
+    dfs(0, startRow, step.base, [{ col: 0, row: startRow }]);
   }
 
   return found;
@@ -221,7 +227,8 @@ function normalizeLandscapeMatrix(matrix) {
 }
 
 /**
- * Contiguous wins from the leftmost reel (any row connection) + scatters.
+ * Contiguous wins from the leftmost reel (touching horizontal/diagonal cells)
+ * plus scatters.
  * @param {object} [options]
  * @param {boolean} [options.bonusMode] — expanding wilds + multipliers
  */

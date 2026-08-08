@@ -18,16 +18,25 @@ function emptyMatrix(fill = SYMBOLS.CHERRY) {
   return Array.from({ length: 5 }, () => Array(3).fill(fill));
 }
 
-test("consecutive-column paths allow every row-to-row connection", () => {
-  assert.equal(ADJACENT_PATHS.length, 243);
+test("consecutive-column paths only allow touching row connections", () => {
+  assert.equal(ADJACENT_PATHS.length, 99);
   for (const path of ADJACENT_PATHS) {
     assert.equal(path.length, 5);
     assert.ok(path.every((row) => row >= 0 && row < 3));
+    assert.ok(
+      path.every(
+        (row, index) => index === 0 || Math.abs(row - path[index - 1]) <= 1,
+      ),
+    );
   }
   assert.ok(
     ADJACENT_PATHS.some(
-      (p) => p[0] === 0 && p[1] === 2 && p[2] === 0 && p[3] === 2 && p[4] === 0,
+      (p) => p[0] === 0 && p[1] === 1 && p[2] === 2 && p[3] === 1 && p[4] === 0,
     ),
+  );
+  assert.equal(
+    ADJACENT_PATHS.some((p) => p[0] === 0 && p[1] === 2),
+    false,
   );
 });
 
@@ -69,34 +78,23 @@ test("diagonal path pays in main (no expand)", () => {
   assert.equal(result.expandedWilds.length, 0);
 });
 
-test("steep zig-zag across consecutive columns forms a path win", () => {
+test("screenshot-style separated sevens do not form a win", () => {
   const matrix = emptyMatrix(SYMBOLS.BANANA);
-  for (let col = 0; col < 5; col += 1) {
-    for (let row = 0; row < 3; row += 1) {
-      matrix[col][row] = SYMBOLS.ORANGE;
-    }
-  }
-  matrix[0][0] = SYMBOLS.CHERRY;
-  matrix[1][2] = SYMBOLS.CHERRY;
-  matrix[2][0] = SYMBOLS.CHERRY;
+  // Reels 0→2: bottom seven → top seven → middle seven. The first
+  // connection skips over a row, so the symbols do not touch and must not pay.
+  matrix[0][2] = SYMBOLS.SEVEN;
+  matrix[1][0] = SYMBOLS.SEVEN;
+  matrix[2][1] = SYMBOLS.SEVEN;
 
   const result = calculateWins(matrix, {}, 10000, { bonusMode: false });
-  const win = result.lineWins.find(
-    (w) =>
-      w.symbol === SYMBOLS.CHERRY &&
-      w.count === 3 &&
-      w.positions.every(
-        (p, i) => p.col === i && p.row === [0, 2, 0][i],
-      ),
-  );
-  assert.ok(win, "expected a top-bottom-top cherry win");
-  assert.equal(win.amount, 2000);
+  const sevenWins = result.lineWins.filter((w) => w.symbol === SYMBOLS.SEVEN);
+  assert.equal(sevenWins.length, 0);
 });
 
 test("a skipped column never connects a win path", () => {
   const matrix = emptyMatrix(SYMBOLS.BANANA);
   matrix[0][0] = SYMBOLS.CHERRY;
-  matrix[1][2] = SYMBOLS.CHERRY;
+  matrix[1][1] = SYMBOLS.CHERRY;
   matrix[3][0] = SYMBOLS.CHERRY;
 
   const result = calculateWins(matrix, {}, 10000, { bonusMode: false });
