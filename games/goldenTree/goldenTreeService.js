@@ -126,24 +126,11 @@ async function executeSpin(userId, betAmountInput) {
     bonusMode: isBonusSpin,
   });
 
-  // Backend is the sole win authority (client is display-only).
-  // hardenWinResult: ≥3 contiguous from reel 0; one best path per symbol.
-  const winResult = hardenWinResult(matrix, wildMultipliers, betAmount, {
+  // Backend is the sole win authority (Flutter client is display-only).
+  // ≥3 contiguous from reel 0; orange/seven same as every other line symbol.
+  const payable = hardenWinResult(matrix, wildMultipliers, betAmount, {
     bonusMode: isBonusSpin,
   });
-  // Second pass — never credit a total the matrix cannot justify.
-  const verified = hardenWinResult(matrix, wildMultipliers, betAmount, {
-    bonusMode: isBonusSpin,
-  });
-  if (verified.totalWin !== winResult.totalWin) {
-    const logger = require("../../utils/logger");
-    logger.error("golden_tree_win_verify_mismatch", {
-      first: winResult.totalWin,
-      second: verified.totalWin,
-      matrix,
-    });
-  }
-  const payable = verified.totalWin <= winResult.totalWin ? verified : winResult;
 
   // HUD meters still tick on paid main spins; cash jackpot is match-3 scratch only.
   const meters = isBonusSpin
