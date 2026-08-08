@@ -33,15 +33,9 @@ function assignGambleAttempts() {
   return crypto.randomInt(1, GAMBLE_MAX_ATTEMPTS_CAP + 1);
 }
 
-function isGambleEligible(round) {
-  if (!round || round.settled) return false;
-  if (round.isFreeSpin || round.isBonusRound) return false;
-  if (round.currentWin <= 0) return false;
-  if (round.currentWin > roundMoney(round.betAmount * GAMBLE_MAX_WIN_MULTIPLIER)) {
-    return false;
-  }
-  if (round.gambleAttemptsUsed >= round.maxGambleAttempts) return false;
-  return true;
+function isGambleEligible(_round) {
+  // Card-flip / red-black gamble removed from Golden Tree.
+  return false;
 }
 
 function createRound({

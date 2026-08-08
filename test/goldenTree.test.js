@@ -274,31 +274,24 @@ test("settlement is all-or-nothing on insufficient funds (no partial debit)", as
   assert.equal(await wallet.getBalance("upoor"), before);
 });
 
-test("gamble doubles or zeroes win", async () => {
+test("gamble feature is disabled", async () => {
   wallet.clearStubForTests();
   roundManager.clearAllForTests();
   wallet.seedStubBalance("u2", 500000);
 
   const spin = await goldenTreeService.executeSpin("u2", 10000);
-  if (spin.totalWin <= 0 || !spin.gambleEligible) {
+  assert.equal(spin.gambleEligible, false);
+
+  if (spin.totalWin <= 0 || !spin.roundId) {
     return;
   }
 
-  const before = await wallet.getBalance("u2");
-  const gamble = await goldenTreeService.executeGamble(
-    "u2",
-    spin.roundId,
-    "Red",
+  await assert.rejects(
+    () => goldenTreeService.executeGamble("u2", spin.roundId, "Red"),
+    (err) =>
+      err.statusCode === 403 &&
+      /gamble not available/i.test(String(err.message || "")),
   );
-  const after = await wallet.getBalance("u2");
-
-  if (gamble.won) {
-    assert.equal(gamble.currentWin, roundMoney(spin.totalWin * 2));
-    assert.equal(after, roundMoney(before + spin.totalWin));
-  } else {
-    assert.equal(gamble.currentWin, 0);
-    assert.equal(after, roundMoney(before - spin.totalWin));
-  }
 });
 
 test("buy bonus creates 5 free spins session", async () => {

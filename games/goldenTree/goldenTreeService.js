@@ -59,7 +59,7 @@ function buildSpinResponse(round, balance, extra = {}) {
     totalWin: round.totalWin,
     currentWin: round.currentWin,
     balance: roundMoney(balance),
-    gambleEligible: roundManager.isGambleEligible(round),
+    gambleEligible: false,
     maxGambleAttempts: round.maxGambleAttempts,
     gambleAttemptsUsed: round.gambleAttemptsUsed,
     ...extra,
