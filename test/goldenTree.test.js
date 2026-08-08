@@ -115,13 +115,14 @@ test("diagonal cherries do NOT pay — same-row only", () => {
 });
 
 test("horizontal 3 cherries on one row pay", () => {
-  // Fill with breakers so only the cherry row can score.
-  const matrix = emptyMatrix(SYMBOLS.STAR);
-  matrix[0][1] = SYMBOLS.CHERRY;
-  matrix[1][1] = SYMBOLS.CHERRY;
-  matrix[2][1] = SYMBOLS.CHERRY;
-  matrix[3][1] = SYMBOLS.STAR;
-  matrix[4][1] = SYMBOLS.STAR;
+  // Unique fillers — no other 3-run and no scatter pay.
+  const matrix = [
+    [SYMBOLS.BELL, SYMBOLS.CHERRY, SYMBOLS.BANANA],
+    [SYMBOLS.ORANGE, SYMBOLS.CHERRY, SYMBOLS.GRAPES],
+    [SYMBOLS.PLUM, SYMBOLS.CHERRY, SYMBOLS.WATERMELON],
+    [SYMBOLS.SEVEN, SYMBOLS.BANANA, SYMBOLS.BELL],
+    [SYMBOLS.DOLLAR, SYMBOLS.ORANGE, SYMBOLS.PLUM],
+  ];
 
   const result = calculateWins(matrix, {}, 10000, { bonusMode: false });
   assert.equal(result.lineWins.length, 1);
