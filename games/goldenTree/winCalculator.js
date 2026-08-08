@@ -93,6 +93,26 @@ function positionsKey(symbol, positions) {
   return `${symbol}|${positions.map((p) => `${p.col},${p.row}`).join(";")}`;
 }
 
+/** Lower = flatter path (classic payline look). Used only to break amount ties. */
+function pathZigZag(positions) {
+  let zig = 0;
+  for (let i = 1; i < positions.length; i += 1) {
+    zig += Math.abs(positions[i].row - positions[i - 1].row);
+  }
+  return zig;
+}
+
+/** True if [next] is a better showcase path than [prev] at equal/better pay. */
+function isBetterPathWin(next, prev) {
+  if (!prev) return true;
+  if (next.amount > prev.amount) return true;
+  if (next.amount < prev.amount) return false;
+  if (next.count > prev.count) return true;
+  if (next.count < prev.count) return false;
+  // Same pay: prefer the flattest path so orange/7 beams match other fruits.
+  return pathZigZag(next.positions) < pathZigZag(prev.positions);
+}
+
 /**
  * Contiguous L→R from col 0 only: positions[i].col === i.
  * Each next position must touch the prior one horizontally or diagonally, so
@@ -283,12 +303,7 @@ function calculateWins(matrix, wildMultipliers, betAmount, options = {}) {
       amount,
     };
 
-    const prev = bestBySymbol.get(symbol);
-    if (
-      !prev ||
-      candidate.amount > prev.amount ||
-      (candidate.amount === prev.amount && candidate.count > prev.count)
-    ) {
+    if (isBetterPathWin(candidate, bestBySymbol.get(symbol))) {
       bestBySymbol.set(symbol, candidate);
     }
   }
