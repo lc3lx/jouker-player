@@ -127,7 +127,9 @@ async function executeSpin(userId, betAmountInput) {
     guaranteedWilds,
   });
 
-  const winResult = calculateWins(matrix, wildMultipliers, betAmount);
+  const winResult = calculateWins(matrix, wildMultipliers, betAmount, {
+    bonusMode: isBonusSpin,
+  });
   const jackpot = rollJackpot(betAmount, { isBonusSpin });
   const combinedWin = roundMoney(winResult.totalWin + jackpot.jackpotAmount);
   const { totalWin, capped, cap } = capWin(combinedWin, betAmount);

@@ -1,6 +1,7 @@
 /**
  * Golden Tree — core game constants.
- * Matrix: 5 reels (columns) × 3 rows. Paylines traverse columns left → right.
+ * Matrix: 5 reels (columns) × 3 rows.
+ * Wins: left→right adjacent paths (|Δrow| ≤ 1 between consecutive reels).
  */
 
 const REEL_COUNT = 5;
@@ -58,7 +59,7 @@ const WILD_ROW = 1;
 const STAR_REELS = new Set([0, 2, 4]);
 
 /**
- * 10 fixed paylines.
+ * Legacy 10 fixed paylines (kept for reference / UI diagrams).
  * Each entry is [rowAtCol0, rowAtCol1, … rowAtCol4] on the 5×3 grid.
  * Row 0 = top, row 2 = bottom.
  */
@@ -74,6 +75,37 @@ const PAYLINES = Object.freeze([
   [1, 2, 2, 2, 1],
   [0, 1, 1, 1, 0],
 ]);
+
+/**
+ * All left→right paths of length REEL_COUNT where each step stays on the
+ * same row or an adjacent row (|Δrow| ≤ 1). Used for win evaluation.
+ */
+function buildAdjacentPaths() {
+  const paths = [];
+
+  function walk(path) {
+    if (path.length === REEL_COUNT) {
+      paths.push(path.slice());
+      return;
+    }
+    const prev = path[path.length - 1];
+    for (let row = 0; row < ROW_COUNT; row += 1) {
+      if (Math.abs(row - prev) <= 1) {
+        path.push(row);
+        walk(path);
+        path.pop();
+      }
+    }
+  }
+
+  for (let row = 0; row < ROW_COUNT; row += 1) {
+    walk([row]);
+  }
+
+  return Object.freeze(paths.map((p) => Object.freeze(p)));
+}
+
+const ADJACENT_PATHS = buildAdjacentPaths();
 
 /**
  * Paytable multipliers at REFERENCE_BET (1 FUN).
@@ -136,6 +168,7 @@ module.exports = {
   WILD_ROW,
   STAR_REELS,
   PAYLINES,
+  ADJACENT_PATHS,
   PAYTABLE,
   STAR_SCATTER_PAY,
   DOLLAR_SCATTER_PAY,

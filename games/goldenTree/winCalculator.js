@@ -1,7 +1,7 @@
 const {
   REEL_COUNT,
   ROW_COUNT,
-  PAYLINES,
+  ADJACENT_PATHS,
   PAYTABLE,
   STAR_REELS,
   STAR_SCATTER_PAY,
@@ -17,6 +17,7 @@ const {
 /**
  * Each landed wild tree expands over its whole reel (all rows) for win
  * evaluation, substituting every symbol on that reel except Scatters.
+ * Used in bonus mode only.
  */
 function applyExpandingWilds(matrix, wildMultipliers) {
   const expandedReels = new Set(Object.keys(wildMultipliers).map(Number));
@@ -36,7 +37,7 @@ function applyExpandingWilds(matrix, wildMultipliers) {
 }
 
 /**
- * Left-to-right payline match parser.
+ * Left-to-right path match parser (wild substitutes in-cell).
  */
 function matchPayline(symbols) {
   let base = null;
@@ -72,8 +73,11 @@ function basePayout(symbol, count, betAmount) {
 
 /**
  * Wild multipliers on winning positions ADD together (e.g. x2 + x3 = x5).
+ * Main game connector wilds have no multipliers (treated as ×1).
  */
-function wildMultiplierSum(positions, matrix, wildMultipliers) {
+function wildMultiplierSum(positions, matrix, wildMultipliers, bonusMode) {
+  if (!bonusMode) return 1;
+
   let sum = 0;
   for (const { col, row } of positions) {
     if (matrix[col][row] === SYMBOLS.WILD) {
@@ -83,26 +87,42 @@ function wildMultiplierSum(positions, matrix, wildMultipliers) {
   return sum > 0 ? sum : 1;
 }
 
+function positionsKey(symbol, positions) {
+  return `${symbol}|${positions.map((p) => `${p.col},${p.row}`).join(";")}`;
+}
+
 /**
- * Evaluate all 10 paylines and scatter pays.
+ * Evaluate adjacent paths (|Δrow| ≤ 1) and scatter pays.
+ * @param {object} [options]
+ * @param {boolean} [options.bonusMode] — expanding wilds + multipliers
  */
-function calculateWins(matrix, wildMultipliers, betAmount) {
-  const { matrix: expandedMatrix, expandedReels } = applyExpandingWilds(
-    matrix,
-    wildMultipliers,
-  );
+function calculateWins(matrix, wildMultipliers, betAmount, options = {}) {
+  const bonusMode = options.bonusMode === true;
+
+  let evalMatrix;
+  let expandedReels;
+
+  if (bonusMode) {
+    const expanded = applyExpandingWilds(matrix, wildMultipliers);
+    evalMatrix = expanded.matrix;
+    expandedReels = expanded.expandedReels;
+  } else {
+    evalMatrix = matrix.map((col) => [...col]);
+    expandedReels = new Set();
+  }
 
   const lineWins = [];
   let lineTotal = 0;
+  const seen = new Set();
 
-  for (let lineIndex = 0; lineIndex < PAYLINES.length; lineIndex += 1) {
-    const payline = PAYLINES[lineIndex];
+  for (let lineIndex = 0; lineIndex < ADJACENT_PATHS.length; lineIndex += 1) {
+    const path = ADJACENT_PATHS[lineIndex];
     const symbols = [];
     const positions = [];
 
     for (let col = 0; col < REEL_COUNT; col += 1) {
-      const row = payline[col];
-      const raw = expandedMatrix[col][row];
+      const row = path[col];
+      const raw = evalMatrix[col][row];
       if (isScatter(raw)) break;
 
       symbols.push(raw);
@@ -115,10 +135,19 @@ function calculateWins(matrix, wildMultipliers, betAmount) {
     if (!match) continue;
 
     const winPositions = positions.slice(0, match.count);
+    const key = positionsKey(match.symbol, winPositions);
+    if (seen.has(key)) continue;
+    seen.add(key);
+
     const base = basePayout(match.symbol, match.count, betAmount);
     if (base <= 0) continue;
 
-    const mult = wildMultiplierSum(winPositions, expandedMatrix, wildMultipliers);
+    const mult = wildMultiplierSum(
+      winPositions,
+      evalMatrix,
+      wildMultipliers,
+      bonusMode,
+    );
     const amount = roundMoney(base * mult);
 
     lineTotal = roundMoney(lineTotal + amount);
@@ -139,7 +168,7 @@ function calculateWins(matrix, wildMultipliers, betAmount) {
   let starCount = 0;
   for (const col of STAR_REELS) {
     for (let row = 0; row < ROW_COUNT; row += 1) {
-      if (expandedMatrix[col][row] === SYMBOLS.STAR) starCount += 1;
+      if (evalMatrix[col][row] === SYMBOLS.STAR) starCount += 1;
     }
   }
   if (starCount >= 3) {
@@ -153,7 +182,7 @@ function calculateWins(matrix, wildMultipliers, betAmount) {
   let dollarCount = 0;
   for (let col = 0; col < REEL_COUNT; col += 1) {
     for (let row = 0; row < ROW_COUNT; row += 1) {
-      if (expandedMatrix[col][row] === SYMBOLS.DOLLAR) dollarCount += 1;
+      if (evalMatrix[col][row] === SYMBOLS.DOLLAR) dollarCount += 1;
     }
   }
   if (dollarCount >= 3) {
@@ -166,14 +195,16 @@ function calculateWins(matrix, wildMultipliers, betAmount) {
 
   const totalWin = roundMoney(lineTotal + scatterTotal);
 
-  const expandedWilds = [...expandedReels].sort().map((reel) => ({
-    reel,
-    row: WILD_ROW,
-    multiplier: wildMultipliers[reel] || 2,
-  }));
+  const expandedWilds = bonusMode
+    ? [...expandedReels].sort().map((reel) => ({
+        reel,
+        row: WILD_ROW,
+        multiplier: wildMultipliers[reel] || 2,
+      }))
+    : [];
 
   return {
-    expandedMatrix,
+    expandedMatrix: evalMatrix,
     expandedWilds,
     lineWins,
     scatterWins,

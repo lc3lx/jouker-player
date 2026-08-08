@@ -4,7 +4,7 @@ const { test } = require("node:test");
 const assert = require("node:assert/strict");
 
 const {
-  PAYLINES,
+  ADJACENT_PATHS,
   SYMBOLS,
   roundMoney,
 } = require("../games/goldenTree/constants");
@@ -18,6 +18,21 @@ function emptyMatrix(fill = SYMBOLS.CHERRY) {
   return Array.from({ length: 5 }, () => Array(3).fill(fill));
 }
 
+test("adjacent paths are generated with |Δrow| ≤ 1", () => {
+  assert.ok(ADJACENT_PATHS.length > 10);
+  for (const path of ADJACENT_PATHS) {
+    assert.equal(path.length, 5);
+    for (let i = 1; i < path.length; i += 1) {
+      assert.ok(Math.abs(path[i] - path[i - 1]) <= 1);
+    }
+  }
+  assert.ok(
+    ADJACENT_PATHS.some(
+      (p) => p[0] === 0 && p[1] === 1 && p[2] === 2 && p[3] === 1 && p[4] === 0,
+    ),
+  );
+});
+
 test("payline parser — left-to-right with wild substitution", () => {
   const symbols = [SYMBOLS.WILD, SYMBOLS.WILD, SYMBOLS.CHERRY, SYMBOLS.PINEAPPLE, SYMBOLS.PLUM];
   const match = matchPayline(symbols);
@@ -30,19 +45,108 @@ test("seven pays from 2-of-a-kind", () => {
   assert.equal(pay, 2000);
 });
 
-test("wild multipliers add on line win", () => {
-  const matrix = emptyMatrix();
-  matrix[0][PAYLINES[0][0]] = SYMBOLS.CHERRY;
-  matrix[1][PAYLINES[0][1]] = SYMBOLS.CHERRY;
-  matrix[2][PAYLINES[0][2]] = SYMBOLS.CHERRY;
+test("diagonal adjacent path pays in main (no expand)", () => {
+  const matrix = emptyMatrix(SYMBOLS.BANANA);
+  for (let col = 0; col < 5; col += 1) {
+    for (let row = 0; row < 3; row += 1) {
+      matrix[col][row] = SYMBOLS.PLUM;
+    }
+  }
+  matrix[0][0] = SYMBOLS.CHERRY;
+  matrix[1][1] = SYMBOLS.CHERRY;
+  matrix[2][2] = SYMBOLS.CHERRY;
 
-  const wildMults = { 0: 2, 1: 3 };
+  const result = calculateWins(matrix, {}, 10000, { bonusMode: false });
+  assert.ok(result.lineWins.length >= 1);
+  const win = result.lineWins.find(
+    (w) =>
+      w.symbol === SYMBOLS.CHERRY &&
+      w.count === 3 &&
+      w.positions[0].row === 0 &&
+      w.positions[1].row === 1 &&
+      w.positions[2].row === 2,
+  );
+  assert.ok(win, "expected diagonal cherry win");
+  assert.equal(win.amount, 2000);
+  assert.equal(result.expandedWilds.length, 0);
+});
+
+test("row jump |Δrow|=2 does not form a path win", () => {
+  const matrix = emptyMatrix(SYMBOLS.BANANA);
+  for (let col = 0; col < 5; col += 1) {
+    for (let row = 0; row < 3; row += 1) {
+      matrix[col][row] = SYMBOLS.ORANGE;
+    }
+  }
+  matrix[0][0] = SYMBOLS.CHERRY;
+  matrix[1][2] = SYMBOLS.CHERRY;
+  matrix[2][0] = SYMBOLS.CHERRY;
+
+  const result = calculateWins(matrix, {}, 10000, { bonusMode: false });
+  const cherryWins = result.lineWins.filter((w) => w.symbol === SYMBOLS.CHERRY);
+  assert.equal(cherryWins.length, 0);
+});
+
+test("wild connector in the middle completes a match (main)", () => {
+  const matrix = emptyMatrix(SYMBOLS.BANANA);
+  for (let col = 0; col < 5; col += 1) {
+    for (let row = 0; row < 3; row += 1) {
+      matrix[col][row] = SYMBOLS.ORANGE;
+    }
+  }
+  matrix[0][1] = SYMBOLS.SEVEN;
+  matrix[1][1] = SYMBOLS.WILD;
+  matrix[2][1] = SYMBOLS.SEVEN;
+
+  const result = calculateWins(matrix, { 1: 2 }, 10000, { bonusMode: false });
+  assert.equal(result.expandedWilds.length, 0);
+  assert.equal(result.expandedMatrix[1][0], SYMBOLS.ORANGE);
+  const win = result.lineWins.find(
+    (w) => w.symbol === SYMBOLS.SEVEN && w.count >= 2,
+  );
+  assert.ok(win);
+  assert.equal(win.wildMultiplier, 1);
+});
+
+test("fruit needs 3; longer runs pay more", () => {
+  const matrix3 = emptyMatrix(SYMBOLS.BANANA);
+  for (let col = 0; col < 5; col += 1) {
+    for (let row = 0; row < 3; row += 1) matrix3[col][row] = SYMBOLS.ORANGE;
+  }
+  matrix3[0][1] = SYMBOLS.GRAPES;
+  matrix3[1][1] = SYMBOLS.GRAPES;
+  const noWin = calculateWins(matrix3, {}, 10000, { bonusMode: false });
+  assert.equal(
+    noWin.lineWins.filter((w) => w.symbol === SYMBOLS.GRAPES).length,
+    0,
+  );
+
+  matrix3[2][1] = SYMBOLS.GRAPES;
+  const win3 = calculateWins(matrix3, {}, 10000, { bonusMode: false });
+  const g3 = win3.lineWins.find((w) => w.symbol === SYMBOLS.GRAPES && w.count === 3);
+  assert.ok(g3);
+  assert.equal(g3.baseAmount, 8000);
+
+  matrix3[3][1] = SYMBOLS.GRAPES;
+  const win4 = calculateWins(matrix3, {}, 10000, { bonusMode: false });
+  const g4 = win4.lineWins.find((w) => w.symbol === SYMBOLS.GRAPES && w.count === 4);
+  assert.ok(g4);
+  assert.equal(g4.baseAmount, 24000);
+  assert.ok(g4.baseAmount > g3.baseAmount);
+});
+
+test("wild multipliers add on bonus line win", () => {
+  const matrix = emptyMatrix();
   matrix[0] = [SYMBOLS.WILD, SYMBOLS.WILD, SYMBOLS.WILD];
   matrix[1] = [SYMBOLS.WILD, SYMBOLS.WILD, SYMBOLS.WILD];
+  matrix[2][1] = SYMBOLS.CHERRY;
+  matrix[3][1] = SYMBOLS.ORANGE;
+  matrix[4][1] = SYMBOLS.PLUM;
 
-  const result = calculateWins(matrix, wildMults, 1);
+  const wildMults = { 0: 2, 1: 3 };
+  const result = calculateWins(matrix, wildMults, 1, { bonusMode: true });
   assert.ok(result.totalWin > 0);
-  assert.equal(result.lineWins[0].wildMultiplier, 5);
+  assert.ok(result.lineWins.some((w) => w.wildMultiplier === 5));
 });
 
 test("payline parser — all-wild run defaults to seven", () => {
@@ -51,7 +155,7 @@ test("payline parser — all-wild run defaults to seven", () => {
   assert.equal(match.symbol, SYMBOLS.SEVEN);
 });
 
-test("expanding wild substitutes the whole reel — top-row line pays", () => {
+test("bonus expanding wild substitutes the whole reel", () => {
   const matrix = [
     [SYMBOLS.BELL, SYMBOLS.PLUM, SYMBOLS.ORANGE],
     [SYMBOLS.GRAPES, SYMBOLS.WILD, SYMBOLS.BANANA],
@@ -60,22 +164,44 @@ test("expanding wild substitutes the whole reel — top-row line pays", () => {
     [SYMBOLS.ORANGE, SYMBOLS.WATERMELON, SYMBOLS.PLUM],
   ];
 
-  const result = calculateWins(matrix, { 1: 3 }, 10000);
+  const result = calculateWins(matrix, { 1: 3 }, 10000, { bonusMode: true });
 
-  assert.equal(result.lineWins.length, 1);
-  const win = result.lineWins[0];
-  assert.equal(win.lineIndex, 1); // top row [0,0,0,0,0]
-  assert.equal(win.symbol, SYMBOLS.BELL);
-  assert.equal(win.count, 3);
-  assert.deepEqual(win.positions[1], { col: 1, row: 0 });
-  assert.equal(win.baseAmount, 4000); // bell 3x = 0.4 × bet
-  assert.equal(win.wildMultiplier, 3);
-  assert.equal(win.amount, 12000);
   assert.equal(result.expandedMatrix[1][0], SYMBOLS.WILD);
   assert.equal(result.expandedMatrix[1][2], SYMBOLS.WILD);
+  assert.equal(result.expandedWilds.length, 1);
+  assert.equal(result.expandedWilds[0].multiplier, 3);
+
+  const win = result.lineWins.find(
+    (w) =>
+      w.symbol === SYMBOLS.BELL &&
+      w.count === 3 &&
+      w.positions[0].col === 0 &&
+      w.positions[0].row === 0 &&
+      w.positions[1].col === 1 &&
+      w.positions[1].row === 0,
+  );
+  assert.ok(win, "expected top-row bell win via expanded wild");
+  assert.equal(win.baseAmount, 4000);
+  assert.equal(win.wildMultiplier, 3);
+  assert.equal(win.amount, 12000);
 });
 
-test("expanding wild preserves scatters on the same reel", () => {
+test("main mode does not expand wilds", () => {
+  const matrix = [
+    [SYMBOLS.BELL, SYMBOLS.PLUM, SYMBOLS.ORANGE],
+    [SYMBOLS.GRAPES, SYMBOLS.WILD, SYMBOLS.BANANA],
+    [SYMBOLS.BELL, SYMBOLS.GRAPES, SYMBOLS.WATERMELON],
+    [SYMBOLS.PLUM, SYMBOLS.ORANGE, SYMBOLS.GRAPES],
+    [SYMBOLS.ORANGE, SYMBOLS.WATERMELON, SYMBOLS.PLUM],
+  ];
+
+  const result = calculateWins(matrix, { 1: 3 }, 10000, { bonusMode: false });
+  assert.equal(result.expandedWilds.length, 0);
+  assert.equal(result.expandedMatrix[1][0], SYMBOLS.GRAPES);
+  assert.equal(result.expandedMatrix[1][2], SYMBOLS.BANANA);
+});
+
+test("expanding wild preserves scatters on the same reel (bonus)", () => {
   const matrix = [
     [SYMBOLS.BELL, SYMBOLS.PLUM, SYMBOLS.ORANGE],
     [SYMBOLS.DOLLAR, SYMBOLS.WILD, SYMBOLS.BANANA],
@@ -84,15 +210,14 @@ test("expanding wild preserves scatters on the same reel", () => {
     [SYMBOLS.DOLLAR, SYMBOLS.WATERMELON, SYMBOLS.PLUM],
   ];
 
-  const result = calculateWins(matrix, { 1: 2 }, 10000);
+  const result = calculateWins(matrix, { 1: 2 }, 10000, { bonusMode: true });
 
   assert.equal(result.expandedMatrix[1][0], SYMBOLS.DOLLAR);
   assert.equal(result.expandedMatrix[1][2], SYMBOLS.WILD);
-  assert.equal(result.lineWins.length, 0);
   assert.equal(result.scatterWins.length, 1);
   assert.equal(result.scatterWins[0].kind, SYMBOLS.DOLLAR);
   assert.equal(result.scatterWins[0].count, 3);
-  assert.equal(result.scatterWins[0].amount, 10000); // dollar 3x = 1 × bet
+  assert.equal(result.scatterWins[0].amount, 10000);
 });
 
 test("max win cap at 10,000x bet", () => {
@@ -125,7 +250,6 @@ test("winning spin credits net (win - bet) to the wallet", async () => {
   roundManager.clearAllForTests();
   wallet.seedStubBalance("uwin", 1_000_000);
 
-  // Force a guaranteed win via a fully-controlled settlement.
   const before = await wallet.getBalance("uwin");
   const balanceAfter = await wallet.atomicSpinWallet("uwin", {
     betAmount: 10000,
@@ -147,7 +271,6 @@ test("settlement is all-or-nothing on insufficient funds (no partial debit)", as
     () => wallet.atomicSpinWallet("upoor", { betAmount: 10000, winAmount: 0 }),
     (err) => err.code === "INSUFFICIENT_BALANCE",
   );
-  // Balance must be untouched — bet was never taken.
   assert.equal(await wallet.getBalance("upoor"), before);
 });
 
@@ -201,8 +324,9 @@ test("bet validation rejects out-of-range amounts", async () => {
     () => goldenTreeService.executeSpin("u4", 9999),
     (err) => err.statusCode === 400,
   );
+  const { BET_MAX } = require("../games/goldenTree/constants");
   await assert.rejects(
-    () => goldenTreeService.executeSpin("u4", 40000001),
+    () => goldenTreeService.executeSpin("u4", BET_MAX + 1),
     (err) => err.statusCode === 400,
   );
 });
@@ -214,7 +338,9 @@ test("RTP probe — main game simulation (informational)", () => {
 
   for (let i = 0; i < rounds; i += 1) {
     const { matrix, wildMultipliers } = generateSpin({ bonusMode: false });
-    const { totalWin } = calculateWins(matrix, wildMultipliers, bet);
+    const { totalWin } = calculateWins(matrix, wildMultipliers, bet, {
+      bonusMode: false,
+    });
     totalReturned += totalWin;
   }
 
@@ -226,7 +352,7 @@ test("jackpot roll — miss does not award", () => {
   const { JACKPOT_MULTIPLIER } = require("../games/goldenTree/constants");
   const miss = goldenTreeService.rollJackpot(10000, {
     isBonusSpin: false,
-    rng: () => 1, // never 0 → miss
+    rng: () => 1,
   });
   assert.equal(miss.jackpotHit, false);
   assert.equal(miss.jackpotAmount, 0);
@@ -238,7 +364,7 @@ test("jackpot roll — miss does not award", () => {
 test("jackpot roll — hit awards bet × 1000", () => {
   const hit = goldenTreeService.rollJackpot(10000, {
     isBonusSpin: false,
-    rng: () => 0, // force hit
+    rng: () => 0,
   });
   assert.equal(hit.jackpotHit, true);
   assert.equal(hit.jackpotAmount, 10_000_000);

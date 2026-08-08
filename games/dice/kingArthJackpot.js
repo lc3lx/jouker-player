@@ -1,6 +1,6 @@
 /**
- * King Arth jackpot — thin wrapper over the shared Poseidon match-3 service.
- * Trigger: 3+ JACKPOT cells on DiceEngine finalGrid.
+ * King Arth jackpot — shared Poseidon match-3 service (same jackpot as
+ * Atlantis / Golden Tree). Trigger: 3+ JACKPOT cells on DiceEngine finalGrid.
  */
 
 const DiceEngine = require("./DiceEngine");
