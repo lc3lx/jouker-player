@@ -4,7 +4,7 @@ const { test } = require("node:test");
 const assert = require("node:assert/strict");
 
 const {
-  ADJACENT_PATHS,
+  PAYLINES,
   SYMBOLS,
   roundMoney,
 } = require("../games/goldenTree/constants");
@@ -82,26 +82,12 @@ function atLeastThreeIndependentCells(cellCount, cellChance) {
   return probability;
 }
 
-test("consecutive-column paths only allow touching row connections", () => {
-  assert.equal(ADJACENT_PATHS.length, 99);
-  for (const path of ADJACENT_PATHS) {
-    assert.equal(path.length, 5);
-    assert.ok(path.every((row) => row >= 0 && row < 3));
-    assert.ok(
-      path.every(
-        (row, index) => index === 0 || Math.abs(row - path[index - 1]) <= 1,
-      ),
-    );
+test("only three horizontal paylines (no diagonal lines)", () => {
+  assert.equal(PAYLINES.length, 3);
+  for (const line of PAYLINES) {
+    assert.equal(line.length, 5);
+    assert.equal(new Set(line).size, 1);
   }
-  assert.ok(
-    ADJACENT_PATHS.some(
-      (p) => p[0] === 0 && p[1] === 1 && p[2] === 2 && p[3] === 1 && p[4] === 0,
-    ),
-  );
-  assert.equal(
-    ADJACENT_PATHS.some((p) => p[0] === 0 && p[1] === 2),
-    false,
-  );
 });
 
 test("payline parser — left-to-right with wild substitution", () => {
@@ -116,30 +102,29 @@ test("every line symbol needs at least 3 matches", () => {
   assert.equal(basePayout(SYMBOLS.SEVEN, 3, 10000), 10000);
 });
 
-test("diagonal path pays in main (no expand)", () => {
+test("diagonal cherries do NOT pay — same-row only", () => {
   const matrix = emptyMatrix(SYMBOLS.BANANA);
-  for (let col = 0; col < 5; col += 1) {
-    for (let row = 0; row < 3; row += 1) {
-      matrix[col][row] = SYMBOLS.PLUM;
-    }
-  }
   matrix[0][0] = SYMBOLS.CHERRY;
   matrix[1][1] = SYMBOLS.CHERRY;
   matrix[2][2] = SYMBOLS.CHERRY;
 
   const result = calculateWins(matrix, {}, 10000, { bonusMode: false });
-  assert.ok(result.lineWins.length >= 1);
-  const win = result.lineWins.find(
-    (w) =>
-      w.symbol === SYMBOLS.CHERRY &&
-      w.count === 3 &&
-      w.positions[0].row === 0 &&
-      w.positions[1].row === 1 &&
-      w.positions[2].row === 2,
-  );
-  assert.ok(win, "expected diagonal cherry win");
-  assert.equal(win.amount, 2000);
-  assert.equal(result.expandedWilds.length, 0);
+  const cherryWins = result.lineWins.filter((w) => w.symbol === SYMBOLS.CHERRY);
+  assert.equal(cherryWins.length, 0);
+  assert.equal(result.totalWin, 0);
+});
+
+test("horizontal 3 cherries on one row pay", () => {
+  const matrix = emptyMatrix(SYMBOLS.BANANA);
+  matrix[0][1] = SYMBOLS.CHERRY;
+  matrix[1][1] = SYMBOLS.CHERRY;
+  matrix[2][1] = SYMBOLS.CHERRY;
+
+  const result = calculateWins(matrix, {}, 10000, { bonusMode: false });
+  assert.equal(result.lineWins.length, 1);
+  assert.equal(result.lineWins[0].symbol, SYMBOLS.CHERRY);
+  assert.equal(result.lineWins[0].count, 3);
+  assert.equal(result.totalWin, 2000);
 });
 
 test("screenshot-style separated sevens do not form a win", () => {
@@ -457,31 +442,21 @@ test("wild connector in the middle completes a match (main)", () => {
   assert.equal(win.wildMultiplier, 1);
 });
 
-test("an unmultiplied tree connects two touching matching symbols", () => {
-  // The normal (main-game) tree is a plain wild. It must still complete a
-  // touching diagonal run even when no multiplier entry was supplied.
-  const matrix = [
-    [SYMBOLS.CHERRY, SYMBOLS.STAR, SYMBOLS.DOLLAR],
-    [SYMBOLS.JACKPOT, SYMBOLS.WILD, SYMBOLS.STAR],
-    [SYMBOLS.DOLLAR, SYMBOLS.JACKPOT, SYMBOLS.CHERRY],
-    [SYMBOLS.STAR, SYMBOLS.DOLLAR, SYMBOLS.JACKPOT],
-    [SYMBOLS.DOLLAR, SYMBOLS.STAR, SYMBOLS.JACKPOT],
-  ];
+test("an unmultiplied tree connects two matching symbols on the same row", () => {
+  const matrix = emptyMatrix(SYMBOLS.BANANA);
+  matrix[0][1] = SYMBOLS.CHERRY;
+  matrix[1][1] = SYMBOLS.WILD;
+  matrix[2][1] = SYMBOLS.CHERRY;
 
   const result = calculateWins(matrix, {}, 10000, { bonusMode: false });
   const win = result.lineWins.find(
-    (w) =>
-      w.symbol === SYMBOLS.CHERRY &&
-      w.count === 3 &&
-      w.positions.every(
-        (position, index) =>
-          position.col === index && position.row === index,
-      ),
+    (w) => w.symbol === SYMBOLS.CHERRY && w.count === 3,
   );
 
-  assert.ok(win, "expected cherry → plain tree → cherry to pay");
+  assert.ok(win, "expected cherry → plain tree → cherry on one row");
   assert.equal(win.wildMultiplier, 1);
   assert.equal(win.amount, 2000);
+  assert.ok(win.positions.every((p) => p.row === 1));
 });
 
 test("the reported screenshot board has no server-side win", () => {
