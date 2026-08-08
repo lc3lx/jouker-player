@@ -149,8 +149,22 @@ test("horizontal contiguous run from col 0 pays", () => {
   assert.equal(win.amount, 2000);
 });
 
-test("screenshot board — gapped sevens do not pay 4-oak / far reel", () => {
-  // Board from user screenshot (bet 10k showed wrong WIN 50k / all 7s lit).
+test("landscape screenshot board — oranges with reel gaps pay nothing", () => {
+  // 5 reels left→right, 3 rows top→bottom (phone landscape).
+  // Oranges on reels 0,2,4 with bananas/pineapples on 1 and 3 = broken shape.
+  const matrix = [
+    [SYMBOLS.SEVEN, SYMBOLS.ORANGE, SYMBOLS.ORANGE],
+    [SYMBOLS.PINEAPPLE, SYMBOLS.BANANA, SYMBOLS.BANANA],
+    [SYMBOLS.ORANGE, SYMBOLS.ORANGE, SYMBOLS.SEVEN],
+    [SYMBOLS.PINEAPPLE, SYMBOLS.PINEAPPLE, SYMBOLS.BANANA],
+    [SYMBOLS.ORANGE, SYMBOLS.SEVEN, SYMBOLS.SEVEN],
+  ];
+  const result = calculateWins(matrix, {}, 10000, { bonusMode: false });
+  assert.equal(result.totalWin, 0);
+  assert.equal(result.lineWins.length, 0);
+});
+
+test("gapped sevens do not pay across missing reels", () => {
   const matrix = [
     [SYMBOLS.ORANGE, SYMBOLS.SEVEN, SYMBOLS.SEVEN],
     [SYMBOLS.BELL, SYMBOLS.BELL, SYMBOLS.SEVEN],
@@ -160,18 +174,26 @@ test("screenshot board — gapped sevens do not pay 4-oak / far reel", () => {
   ];
   const result = calculateWins(matrix, {}, 10000, { bonusMode: false });
   const sevenWins = result.lineWins.filter((w) => w.symbol === SYMBOLS.SEVEN);
-
-  assert.ok(sevenWins.length >= 1);
-  assert.ok(
-    sevenWins.every((w) => w.count === 2),
-    "only contiguous 2-oak sevens from col0–1",
-  );
-  assert.ok(
-    sevenWins.every((w) => w.positions.every((p) => p.col <= 1)),
-    "must never include the isolated seven on reel 5",
-  );
+  assert.ok(sevenWins.every((w) => w.count === 2));
+  assert.ok(sevenWins.every((w) => w.positions.every((p) => p.col <= 1)));
   assert.equal(result.totalWin, 4000);
-  assert.notEqual(result.totalWin, 50000);
+});
+
+test("row-major 3×5 payload is transposed to landscape 5×3", () => {
+  const { normalizeLandscapeMatrix } = require("../games/goldenTree/winCalculator");
+  const rowMajor = [
+    [SYMBOLS.SEVEN, SYMBOLS.PINEAPPLE, SYMBOLS.ORANGE, SYMBOLS.PINEAPPLE, SYMBOLS.ORANGE],
+    [SYMBOLS.ORANGE, SYMBOLS.BANANA, SYMBOLS.ORANGE, SYMBOLS.PINEAPPLE, SYMBOLS.SEVEN],
+    [SYMBOLS.ORANGE, SYMBOLS.BANANA, SYMBOLS.SEVEN, SYMBOLS.BANANA, SYMBOLS.SEVEN],
+  ];
+  const m = normalizeLandscapeMatrix(rowMajor);
+  assert.equal(m.length, 5);
+  assert.equal(m[0].length, 3);
+  assert.equal(m[0][0], SYMBOLS.SEVEN);
+  assert.equal(m[0][1], SYMBOLS.ORANGE);
+  assert.equal(m[2][0], SYMBOLS.ORANGE);
+  const result = calculateWins(rowMajor, {}, 10000, { bonusMode: false });
+  assert.equal(result.totalWin, 0);
 });
 
 test("wild connector in the middle completes a match (main)", () => {

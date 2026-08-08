@@ -183,22 +183,61 @@ function collectContiguousWins(evalMatrix) {
 }
 
 /**
- * Contiguous adjacent wins from reel 0 (|Δrow| ≤ 1) + scatters.
+ * Landscape layout: matrix[reel][row]
+ * - reel 0..4 = columns left → right on the horizontal screen
+ * - row 0..2 = top → bottom
+ * Auto-transposes a mistaken 3×5 row-major payload.
+ */
+function normalizeLandscapeMatrix(matrix) {
+  if (!Array.isArray(matrix) || matrix.length === 0) {
+    return Array.from({ length: REEL_COUNT }, () =>
+      Array(ROW_COUNT).fill(SYMBOLS.CHERRY),
+    );
+  }
+
+  if (
+    matrix.length === ROW_COUNT &&
+    matrix.every((row) => Array.isArray(row) && row.length === REEL_COUNT)
+  ) {
+    const out = Array.from({ length: REEL_COUNT }, () => Array(ROW_COUNT));
+    for (let row = 0; row < ROW_COUNT; row += 1) {
+      for (let reel = 0; reel < REEL_COUNT; reel += 1) {
+        out[reel][row] = matrix[row][reel];
+      }
+    }
+    return out;
+  }
+
+  const out = [];
+  for (let reel = 0; reel < REEL_COUNT; reel += 1) {
+    const src = Array.isArray(matrix[reel]) ? matrix[reel] : [];
+    const col = [];
+    for (let row = 0; row < ROW_COUNT; row += 1) {
+      col.push(src[row] != null ? src[row] : SYMBOLS.CHERRY);
+    }
+    out.push(col);
+  }
+  return out;
+}
+
+/**
+ * Contiguous adjacent wins from leftmost reel (|Δrow| ≤ 1) + scatters.
  * @param {object} [options]
  * @param {boolean} [options.bonusMode] — expanding wilds + multipliers
  */
 function calculateWins(matrix, wildMultipliers, betAmount, options = {}) {
   const bonusMode = options.bonusMode === true;
+  const landed = normalizeLandscapeMatrix(matrix);
 
   let evalMatrix;
   let expandedReels;
 
   if (bonusMode) {
-    const expanded = applyExpandingWilds(matrix, wildMultipliers);
+    const expanded = applyExpandingWilds(landed, wildMultipliers);
     evalMatrix = expanded.matrix;
     expandedReels = expanded.expandedReels;
   } else {
-    evalMatrix = matrix.map((col) => [...col]);
+    evalMatrix = landed.map((col) => [...col]);
     expandedReels = new Set();
   }
 
@@ -299,4 +338,5 @@ module.exports = {
   collectContiguousWins,
   isContiguousFromCol0,
   pathMatchesMatrix,
+  normalizeLandscapeMatrix,
 };
