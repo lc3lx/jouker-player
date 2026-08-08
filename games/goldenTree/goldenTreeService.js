@@ -47,6 +47,7 @@ function formatMatrixForClient(matrix) {
 }
 
 function buildSpinResponse(round, balance, extra = {}) {
+  const { WIN_RULES_VERSION } = require("./constants");
   return {
     roundId: round.roundId,
     roundHash: round.roundHash,
@@ -61,6 +62,8 @@ function buildSpinResponse(round, balance, extra = {}) {
     gambleEligible: false,
     maxGambleAttempts: round.maxGambleAttempts,
     gambleAttemptsUsed: round.gambleAttemptsUsed,
+    // Clients/ops can verify the host is not on legacy “count anywhere”.
+    winRulesVersion: WIN_RULES_VERSION,
     ...extra,
   };
 }

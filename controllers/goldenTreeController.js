@@ -46,4 +46,16 @@ exports.buyBonus = asyncHandler(async (req, res) => {
   res.status(200).json({ status: "success", data });
 });
 
+/** Public: confirm deployed win rules (contiguous-col0-v1). */
+exports.winRules = asyncHandler(async (_req, res) => {
+  const { WIN_RULES_VERSION } = require("../games/goldenTree/constants");
+  res.status(200).json({
+    status: "success",
+    data: {
+      winRulesVersion: WIN_RULES_VERSION,
+      rules: "contiguous L→R from reel 0; |Δrow|≤1; no mid-board anywhere-count",
+    },
+  });
+});
+
 exports.requireUserId = requireUserId;

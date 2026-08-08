@@ -273,6 +273,21 @@ test("screenshot Aug9 — gapped 4 sevens → 0 (not 50k)", () => {
   assert.notEqual(result.totalWin, 50000);
 });
 
+test("screenshot Aug9 — mid-board 3 sevens → 0 (not 1× bet / anywhere-count)", () => {
+  // Grapes/WM on reel 0; three 7s on reels 1–2 only. Anywhere-count pays 40M.
+  const matrix = [
+    [SYMBOLS.GRAPES, SYMBOLS.WATERMELON, SYMBOLS.WATERMELON],
+    [SYMBOLS.SEVEN, SYMBOLS.ORANGE, SYMBOLS.ORANGE],
+    [SYMBOLS.SEVEN, SYMBOLS.SEVEN, SYMBOLS.ORANGE],
+    [SYMBOLS.WATERMELON, SYMBOLS.WATERMELON, SYMBOLS.BELL],
+    [SYMBOLS.GRAPES, SYMBOLS.WATERMELON, SYMBOLS.WATERMELON],
+  ];
+  const { hardenWinResult } = require("../games/goldenTree/winGuard");
+  const result = hardenWinResult(matrix, {}, 40000000, { bonusMode: false });
+  assert.equal(result.totalWin, 0);
+  assert.notEqual(result.totalWin, 40000000);
+});
+
 test("two sevens do not pay across missing reels", () => {
   const matrix = [
     [SYMBOLS.ORANGE, SYMBOLS.SEVEN, SYMBOLS.SEVEN],

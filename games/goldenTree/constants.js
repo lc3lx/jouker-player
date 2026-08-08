@@ -28,6 +28,9 @@ const GAMBLE_MAX_WIN_MULTIPLIER = 35;
 
 const FREE_SPINS_PER_BONUS = 5;
 
+/** Contiguous L→R from reel 0 only — not “count anywhere” on the board. */
+const WIN_RULES_VERSION = "contiguous-col0-v1";
+
 const SYMBOLS = Object.freeze({
   CHERRY: "cherry",
   ORANGE: "orange",
@@ -180,6 +183,7 @@ module.exports = {
   GAMBLE_MAX_ATTEMPTS_CAP,
   GAMBLE_MAX_WIN_MULTIPLIER,
   FREE_SPINS_PER_BONUS,
+  WIN_RULES_VERSION,
   SYMBOLS,
   SCATTERS,
   LINE_BREAKERS,

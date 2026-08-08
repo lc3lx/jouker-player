@@ -1,6 +1,16 @@
 "use strict";
 
-const { roundMoney, SYMBOLS, STAR_REELS, STAR_SCATTER_PAY, DOLLAR_SCATTER_PAY, REFERENCE_BET, ROW_COUNT, REEL_COUNT } = require("./constants");
+const {
+  roundMoney,
+  SYMBOLS,
+  STAR_REELS,
+  STAR_SCATTER_PAY,
+  DOLLAR_SCATTER_PAY,
+  REFERENCE_BET,
+  ROW_COUNT,
+  REEL_COUNT,
+  WIN_RULES_VERSION,
+} = require("./constants");
 const {
   calculateWins,
   pathMatchesMatrix,
@@ -27,8 +37,14 @@ function hardenWinResult(matrix, wildMultipliers, betAmount, options = {}) {
   let lineTotal = 0;
   for (const w of fresh.lineWins) {
     if (!w || w.count !== w.positions?.length) continue;
-    if (!pathMatchesMatrix(w.positions, w.symbol, evalMatrix)) {
+    // Reject mid-board / right-side clusters that never touch reel 0.
+    const startsAtCol0 =
+      Array.isArray(w.positions) &&
+      w.positions[0] &&
+      w.positions[0].col === 0;
+    if (!startsAtCol0 || !pathMatchesMatrix(w.positions, w.symbol, evalMatrix)) {
       logger.warn("golden_tree_win_guard_drop_line", {
+        winRulesVersion: WIN_RULES_VERSION,
         symbol: w.symbol,
         count: w.count,
         positions: w.positions,
@@ -91,7 +107,8 @@ function hardenWinResult(matrix, wildMultipliers, betAmount, options = {}) {
     lineWinTotal: lineTotal,
     scatterWinTotal: scatterTotal,
     totalWin,
+    winRulesVersion: WIN_RULES_VERSION,
   };
 }
 
-module.exports = { hardenWinResult };
+module.exports = { hardenWinResult, WIN_RULES_VERSION };

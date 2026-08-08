@@ -3,6 +3,7 @@ const {
   spin,
   gamble,
   buyBonus,
+  winRules,
   requireUserId,
 } = require("../controllers/goldenTreeController");
 const {
@@ -16,6 +17,7 @@ const router = express.Router();
 router.post("/spin", requireUserId, spin);
 router.post("/gamble", requireUserId, gamble);
 router.post("/buy-bonus", requireUserId, buyBonus);
+router.get("/win-rules", winRules);
 
 // Match-3 jackpot (same flow as Zeus / Atlantis)
 router.get("/jackpot", jackpotRecover);
