@@ -8,8 +8,8 @@ const {
   REFERENCE_BET,
   SYMBOLS,
   WILD_ROW,
+  MIN_CONSECUTIVE,
   minMatchCount,
-  isScatter,
   isLineBreaker,
   roundMoney,
 } = require("./constants");
@@ -17,8 +17,7 @@ const {
 /**
  * Each landed wild tree expands over its whole reel (all rows) for win
  * evaluation, substituting every symbol on that reel except scatter and
- * jackpot symbols.
- * Used in bonus mode only.
+ * jackpot symbols. Used in bonus mode only.
  */
 function applyExpandingWilds(matrix, wildMultipliers) {
   const expandedReels = new Set(Object.keys(wildMultipliers).map(Number));
@@ -38,8 +37,7 @@ function applyExpandingWilds(matrix, wildMultipliers) {
 }
 
 /**
- * Left-to-right path match parser (wild substitutes in-cell).
- * Kept for unit tests / helpers; win eval uses walkFromCol0.
+ * Left-to-right match on one horizontal strip (wild substitutes in-cell).
  */
 function matchPayline(symbols) {
   let base = null;
@@ -73,10 +71,6 @@ function basePayout(symbol, count, betAmount) {
   return roundMoney(table[idx] * (betAmount / REFERENCE_BET));
 }
 
-/**
- * Wild multipliers on winning positions ADD together (e.g. x2 + x3 = x5).
- * Main game connector wilds have no multipliers (treated as ×1).
- */
 function wildMultiplierSum(positions, matrix, wildMultipliers, bonusMode) {
   if (!bonusMode) return 1;
 
@@ -89,53 +83,27 @@ function wildMultiplierSum(positions, matrix, wildMultipliers, bonusMode) {
   return sum > 0 ? sum : 1;
 }
 
-function positionsKey(symbol, positions) {
-  return `${symbol}|${positions.map((p) => `${p.col},${p.row}`).join(";")}`;
-}
-
-/** Lower = flatter path (classic payline look). Used only to break amount ties. */
-function pathZigZag(positions) {
-  let zig = 0;
-  for (let i = 1; i < positions.length; i += 1) {
-    zig += Math.abs(positions[i].row - positions[i - 1].row);
-  }
-  return zig;
-}
-
-/** True if [next] is a better showcase path than [prev] at equal/better pay. */
-function isBetterPathWin(next, prev) {
-  if (!prev) return true;
-  if (next.amount > prev.amount) return true;
-  if (next.amount < prev.amount) return false;
-  if (next.count > prev.count) return true;
-  if (next.count < prev.count) return false;
-  // Same pay: prefer the flattest path so orange/7 beams match other fruits.
-  return pathZigZag(next.positions) < pathZigZag(prev.positions);
-}
-
 /**
- * Contiguous L→R from col 0 only: positions[i].col === i.
- * Each next position must touch the prior one horizontally or diagonally, so
- * its row may differ by at most one. Any skipped column is rejected.
+ * Strict rule: positions stay on ONE row, consecutive reels from 0, no gaps.
+ * (No diagonals, no mid-board starts, no “count anywhere”.)
  */
 function isContiguousFromCol0(positions) {
   if (!Array.isArray(positions) || positions.length === 0) return false;
+  const row0 = positions[0].row;
   for (let i = 0; i < positions.length; i += 1) {
     const p = positions[i];
     if (!p || p.col !== i) return false;
     if (!Number.isInteger(p.row) || p.row < 0 || p.row >= ROW_COUNT) {
       return false;
     }
-    if (i > 0 && Math.abs(p.row - positions[i - 1].row) > 1) return false;
+    if (p.row !== row0) return false;
   }
   return true;
 }
 
-/**
- * Every cell on the path must be [symbol] or wild (no foreign symbols / gaps).
- */
 function pathMatchesMatrix(positions, symbol, matrix) {
   if (!isContiguousFromCol0(positions)) return false;
+  if (positions.length < MIN_CONSECUTIVE) return false;
   for (const { col, row } of positions) {
     const cell = matrix[col]?.[row];
     if (cell == null) return false;
@@ -145,9 +113,6 @@ function pathMatchesMatrix(positions, symbol, matrix) {
   return true;
 }
 
-/**
- * Can this cell continue a run for [baseSymbol] (null = unresolved, all-wild so far)?
- */
 function cellContinues(sym, baseSymbol) {
   if (isLineBreaker(sym)) return { ok: false, base: baseSymbol };
   if (sym === SYMBOLS.WILD) return { ok: true, base: baseSymbol };
@@ -157,63 +122,38 @@ function cellContinues(sym, baseSymbol) {
 }
 
 /**
- * Walk contiguous paths starting ONLY at column 0.
- * Extends to the next column when a matching symbol/wild appears in the same
- * row or a touching diagonal row. First column with no valid extension ends
- * that path (no skipping).
+ * One horizontal run per row, starting at reel 0 only.
+ * Stops at the first gap / foreign symbol. Needs ≥ MIN_CONSECUTIVE.
  */
 function collectContiguousWins(evalMatrix) {
   const found = [];
 
-  function record(baseSymbol, positions) {
-    const paySymbol = baseSymbol || SYMBOLS.SEVEN;
-    const count = positions.length;
-    if (count < minMatchCount(paySymbol)) return;
-    if (!pathMatchesMatrix(positions, paySymbol, evalMatrix)) return;
-    found.push({ symbol: paySymbol, count, positions: positions.slice() });
-  }
+  for (let row = 0; row < ROW_COUNT; row += 1) {
+    let base = null;
+    const positions = [];
 
-  function dfs(col, row, baseSymbol, positions) {
-    const atEnd = col >= REEL_COUNT - 1;
-    let extended = false;
-
-    if (!atEnd) {
-      const firstNextRow = Math.max(0, row - 1);
-      const lastNextRow = Math.min(ROW_COUNT - 1, row + 1);
-      for (let nextRow = firstNextRow; nextRow <= lastNextRow; nextRow += 1) {
-        const sym = evalMatrix[col + 1][nextRow];
-        const step = cellContinues(sym, baseSymbol);
-        if (!step.ok) continue;
-        extended = true;
-        dfs(col + 1, nextRow, step.base, [
-          ...positions,
-          { col: col + 1, row: nextRow },
-        ]);
-      }
+    for (let col = 0; col < REEL_COUNT; col += 1) {
+      const sym = evalMatrix[col][row];
+      const step = cellContinues(sym, base);
+      if (!step.ok) break;
+      base = step.base;
+      positions.push({ col, row });
     }
 
-    // Maximal path only: record when we cannot extend further (gap / end).
-    if (atEnd || !extended) {
-      record(baseSymbol, positions);
-    }
-  }
-
-  for (let startRow = 0; startRow < ROW_COUNT; startRow += 1) {
-    const sym = evalMatrix[0][startRow];
-    const step = cellContinues(sym, null);
-    if (!step.ok) continue;
-    dfs(0, startRow, step.base, [{ col: 0, row: startRow }]);
+    const paySymbol = base || SYMBOLS.SEVEN;
+    if (positions.length < minMatchCount(paySymbol)) continue;
+    if (!pathMatchesMatrix(positions, paySymbol, evalMatrix)) continue;
+    found.push({
+      symbol: paySymbol,
+      count: positions.length,
+      positions: positions.slice(),
+    });
   }
 
   return found;
 }
 
-/**
- * Landscape layout: matrix[reel][row]
- * - reel 0..4 = columns left → right on the horizontal screen
- * - row 0..2 = top → bottom
- * Auto-transposes a mistaken 3×5 row-major payload.
- */
+/** Landscape: matrix[reel][row]. Auto-transposes mistaken 3×5 row-major. */
 function normalizeLandscapeMatrix(matrix) {
   if (!Array.isArray(matrix) || matrix.length === 0) {
     return Array.from({ length: REEL_COUNT }, () =>
@@ -247,10 +187,8 @@ function normalizeLandscapeMatrix(matrix) {
 }
 
 /**
- * Contiguous wins from the leftmost reel (touching horizontal/diagonal cells)
- * plus scatters.
- * @param {object} [options]
- * @param {boolean} [options.bonusMode] — expanding wilds + multipliers
+ * Horizontal line wins (≥3 from reel 0, same row) + scatters.
+ * One best win kept per symbol. Backend is sole payout authority.
  */
 function calculateWins(matrix, wildMultipliers, betAmount, options = {}) {
   const bonusMode = options.bonusMode === true;
@@ -268,21 +206,13 @@ function calculateWins(matrix, wildMultipliers, betAmount, options = {}) {
     expandedReels = new Set();
   }
 
-  // Collect every valid path, then keep ONE win per symbol (best amount).
-  // Paying every DFS path stacked oranges/sevens into huge multi-way totals
-  // (e.g. 10× 3-orange paths → 80M instead of a single 0.2× bet).
-  const seen = new Set();
   const bestBySymbol = new Map();
-
   const candidates = collectContiguousWins(evalMatrix);
+
   for (let i = 0; i < candidates.length; i += 1) {
     const { symbol, count, positions } = candidates[i];
     if (count !== positions.length) continue;
     if (!pathMatchesMatrix(positions, symbol, evalMatrix)) continue;
-
-    const key = positionsKey(symbol, positions);
-    if (seen.has(key)) continue;
-    seen.add(key);
 
     const base = basePayout(symbol, count, betAmount);
     if (base <= 0) continue;
@@ -303,7 +233,12 @@ function calculateWins(matrix, wildMultipliers, betAmount, options = {}) {
       amount,
     };
 
-    if (isBetterPathWin(candidate, bestBySymbol.get(symbol))) {
+    const prev = bestBySymbol.get(symbol);
+    if (
+      !prev ||
+      candidate.amount > prev.amount ||
+      (candidate.amount === prev.amount && candidate.count > prev.count)
+    ) {
       bestBySymbol.set(symbol, candidate);
     }
   }

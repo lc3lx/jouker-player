@@ -2,11 +2,9 @@
  * Golden Tree — core game constants.
  * Matrix: 5 reels (columns) × 3 rows.
  *
- * Win rule (EVERY line symbol — cherry, orange, seven, grapes, … identical):
- * at least MIN_CONSECUTIVE matching symbols/wilds on contiguous left→right
- * reels, starting on reel 0. A connection may move horizontally or diagonally
- * to a touching cell on the next reel; a gap ends the run — no skipping
- * columns, no “count anywhere on the board”.
+ * ONLY win rule for line symbols (cherry, orange, seven, grapes, … identical):
+ * ≥ MIN_CONSECUTIVE matching symbols on the SAME ROW, unbroken left→right,
+ * starting on reel 0. No diagonals. No mid-board starts. No count-anywhere.
  */
 
 /** Minimum run length for any line symbol (orange / seven included). */
@@ -33,8 +31,8 @@ const GAMBLE_MAX_WIN_MULTIPLIER = 35;
 
 const FREE_SPINS_PER_BONUS = 5;
 
-/** Contiguous L→R from reel 0; one best path paid per symbol (not multi-way). */
-const WIN_RULES_VERSION = "contiguous-col0-best-per-symbol-v2";
+/** Same-row ≥3 from reel 0; one best line per symbol. */
+const WIN_RULES_VERSION = "horizontal-col0-min3-v3";
 
 const SYMBOLS = Object.freeze({
   CHERRY: "cherry",
@@ -78,54 +76,14 @@ const WILD_ROW = 1;
 const STAR_REELS = new Set([0, 2, 4]);
 
 /**
- * Legacy 10 fixed paylines (kept for reference / UI diagrams).
- * Each entry is [rowAtCol0, rowAtCol1, … rowAtCol4] on the 5×3 grid.
- * Row 0 = top, row 2 = bottom.
+ * The only payable lines: 3 horizontal rows (UI diagrams).
+ * Each entry is [rowAtCol0 … rowAtCol4]. Row 0 = top, row 2 = bottom.
  */
 const PAYLINES = Object.freeze([
-  [1, 1, 1, 1, 1],
   [0, 0, 0, 0, 0],
+  [1, 1, 1, 1, 1],
   [2, 2, 2, 2, 2],
-  [0, 1, 2, 1, 0],
-  [2, 1, 0, 1, 2],
-  [0, 0, 1, 2, 2],
-  [2, 2, 1, 0, 0],
-  [1, 0, 0, 0, 1],
-  [1, 2, 2, 2, 1],
-  [0, 1, 1, 1, 0],
 ]);
-
-/**
- * All left→right paths of length REEL_COUNT with exactly one cell on every
- * consecutive reel. The next symbol must be in the same row or a directly
- * touching diagonal row (absolute row difference ≤ 1).
- */
-function buildAdjacentPaths() {
-  const paths = [];
-
-  function walk(path) {
-    if (path.length === REEL_COUNT) {
-      paths.push(path.slice());
-      return;
-    }
-    const previousRow = path[path.length - 1];
-    const firstNextRow = Math.max(0, previousRow - 1);
-    const lastNextRow = Math.min(ROW_COUNT - 1, previousRow + 1);
-    for (let nextRow = firstNextRow; nextRow <= lastNextRow; nextRow += 1) {
-      path.push(nextRow);
-      walk(path);
-      path.pop();
-    }
-  }
-
-  for (let row = 0; row < ROW_COUNT; row += 1) {
-    walk([row]);
-  }
-
-  return Object.freeze(paths.map((p) => Object.freeze(p)));
-}
-
-const ADJACENT_PATHS = buildAdjacentPaths();
 
 /**
  * Paytable multipliers at REFERENCE_BET (1 FUN).
@@ -198,7 +156,6 @@ module.exports = {
   WILD_ROW,
   STAR_REELS,
   PAYLINES,
-  ADJACENT_PATHS,
   PAYTABLE,
   STAR_SCATTER_PAY,
   DOLLAR_SCATTER_PAY,
