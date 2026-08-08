@@ -1,8 +1,9 @@
 /**
  * Golden Tree — core game constants.
  * Matrix: 5 reels (columns) × 3 rows.
- * Wins: contiguous left→right from reel 0 (horizontal or |Δrow| ≤ 1).
- * A gap on the next reel ends the run — no skipping columns.
+ * Wins: 3+ matching symbols/wilds on contiguous left→right reels,
+ * starting on reel 0. A connection may use any row on the next reel;
+ * a gap still ends the run — no skipping columns.
  */
 
 const REEL_COUNT = 5;
@@ -86,10 +87,13 @@ const PAYLINES = Object.freeze([
 ]);
 
 /**
- * All left→right paths of length REEL_COUNT where each step stays on the
- * same row or an adjacent row (|Δrow| ≤ 1). Used for win evaluation.
+ * All left→right paths of length REEL_COUNT with exactly one cell on every
+ * consecutive reel. Each next symbol may be in any of the three rows.
+ *
+ * The exported name is retained for compatibility: "adjacent" refers to
+ * adjacent reels, not adjacent rows.
  */
-function buildAdjacentPaths() {
+function buildConnectedPaths() {
   const paths = [];
 
   function walk(path) {
@@ -97,13 +101,10 @@ function buildAdjacentPaths() {
       paths.push(path.slice());
       return;
     }
-    const prev = path[path.length - 1];
     for (let row = 0; row < ROW_COUNT; row += 1) {
-      if (Math.abs(row - prev) <= 1) {
-        path.push(row);
-        walk(path);
-        path.pop();
-      }
+      path.push(row);
+      walk(path);
+      path.pop();
     }
   }
 
@@ -114,14 +115,14 @@ function buildAdjacentPaths() {
   return Object.freeze(paths.map((p) => Object.freeze(p)));
 }
 
-const ADJACENT_PATHS = buildAdjacentPaths();
+const ADJACENT_PATHS = buildConnectedPaths();
 
 /**
  * Paytable multipliers at REFERENCE_BET (1 FUN).
  * Index = matching symbol count (0-based array; index N = count N).
  */
 const PAYTABLE = Object.freeze({
-  [SYMBOLS.SEVEN]: [0, 0, 0.2, 1, 5, 100],
+  [SYMBOLS.SEVEN]: [0, 0, 0, 1, 5, 100],
   [SYMBOLS.GRAPES]: [0, 0, 0, 0.8, 2.4, 14],
   [SYMBOLS.WATERMELON]: [0, 0, 0, 0.8, 2.4, 14],
   [SYMBOLS.BELL]: [0, 0, 0, 0.4, 0.8, 4],
@@ -143,8 +144,8 @@ const BUY_BONUS_TYPE = "Triple";
 const BUY_BONUS_COST = 350;
 const BONUS_GUARANTEED_WILDS = 3;
 
-function minMatchCount(symbol) {
-  return symbol === SYMBOLS.SEVEN ? 2 : 3;
+function minMatchCount() {
+  return 3;
 }
 
 function isScatter(symbol) {

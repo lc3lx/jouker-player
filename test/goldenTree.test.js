@@ -18,17 +18,15 @@ function emptyMatrix(fill = SYMBOLS.CHERRY) {
   return Array.from({ length: 5 }, () => Array(3).fill(fill));
 }
 
-test("adjacent paths are generated with |Δrow| ≤ 1", () => {
-  assert.ok(ADJACENT_PATHS.length > 10);
+test("consecutive-column paths allow every row-to-row connection", () => {
+  assert.equal(ADJACENT_PATHS.length, 243);
   for (const path of ADJACENT_PATHS) {
     assert.equal(path.length, 5);
-    for (let i = 1; i < path.length; i += 1) {
-      assert.ok(Math.abs(path[i] - path[i - 1]) <= 1);
-    }
+    assert.ok(path.every((row) => row >= 0 && row < 3));
   }
   assert.ok(
     ADJACENT_PATHS.some(
-      (p) => p[0] === 0 && p[1] === 1 && p[2] === 2 && p[3] === 1 && p[4] === 0,
+      (p) => p[0] === 0 && p[1] === 2 && p[2] === 0 && p[3] === 2 && p[4] === 0,
     ),
   );
 });
@@ -40,12 +38,12 @@ test("payline parser — left-to-right with wild substitution", () => {
   assert.equal(match.symbol, SYMBOLS.CHERRY);
 });
 
-test("seven pays from 2-of-a-kind", () => {
-  const pay = basePayout(SYMBOLS.SEVEN, 2, 10000);
-  assert.equal(pay, 2000);
+test("every line symbol needs at least 3 matches", () => {
+  assert.equal(basePayout(SYMBOLS.SEVEN, 2, 10000), 0);
+  assert.equal(basePayout(SYMBOLS.SEVEN, 3, 10000), 10000);
 });
 
-test("diagonal adjacent path pays in main (no expand)", () => {
+test("diagonal path pays in main (no expand)", () => {
   const matrix = emptyMatrix(SYMBOLS.BANANA);
   for (let col = 0; col < 5; col += 1) {
     for (let row = 0; row < 3; row += 1) {
@@ -71,7 +69,7 @@ test("diagonal adjacent path pays in main (no expand)", () => {
   assert.equal(result.expandedWilds.length, 0);
 });
 
-test("row jump |Δrow|=2 does not form a path win", () => {
+test("steep zig-zag across consecutive columns forms a path win", () => {
   const matrix = emptyMatrix(SYMBOLS.BANANA);
   for (let col = 0; col < 5; col += 1) {
     for (let row = 0; row < 3; row += 1) {
@@ -81,6 +79,25 @@ test("row jump |Δrow|=2 does not form a path win", () => {
   matrix[0][0] = SYMBOLS.CHERRY;
   matrix[1][2] = SYMBOLS.CHERRY;
   matrix[2][0] = SYMBOLS.CHERRY;
+
+  const result = calculateWins(matrix, {}, 10000, { bonusMode: false });
+  const win = result.lineWins.find(
+    (w) =>
+      w.symbol === SYMBOLS.CHERRY &&
+      w.count === 3 &&
+      w.positions.every(
+        (p, i) => p.col === i && p.row === [0, 2, 0][i],
+      ),
+  );
+  assert.ok(win, "expected a top-bottom-top cherry win");
+  assert.equal(win.amount, 2000);
+});
+
+test("a skipped column never connects a win path", () => {
+  const matrix = emptyMatrix(SYMBOLS.BANANA);
+  matrix[0][0] = SYMBOLS.CHERRY;
+  matrix[1][2] = SYMBOLS.CHERRY;
+  matrix[3][0] = SYMBOLS.CHERRY;
 
   const result = calculateWins(matrix, {}, 10000, { bonusMode: false });
   const cherryWins = result.lineWins.filter((w) => w.symbol === SYMBOLS.CHERRY);
@@ -164,7 +181,7 @@ test("landscape screenshot board — oranges with reel gaps pay nothing", () => 
   assert.equal(result.lineWins.length, 0);
 });
 
-test("gapped sevens do not pay across missing reels", () => {
+test("two sevens do not pay across missing reels", () => {
   const matrix = [
     [SYMBOLS.ORANGE, SYMBOLS.SEVEN, SYMBOLS.SEVEN],
     [SYMBOLS.BELL, SYMBOLS.BELL, SYMBOLS.SEVEN],
@@ -174,9 +191,8 @@ test("gapped sevens do not pay across missing reels", () => {
   ];
   const result = calculateWins(matrix, {}, 10000, { bonusMode: false });
   const sevenWins = result.lineWins.filter((w) => w.symbol === SYMBOLS.SEVEN);
-  assert.ok(sevenWins.every((w) => w.count === 2));
-  assert.ok(sevenWins.every((w) => w.positions.every((p) => p.col <= 1)));
-  assert.equal(result.totalWin, 4000);
+  assert.equal(sevenWins.length, 0);
+  assert.equal(result.totalWin, 0);
 });
 
 test("row-major 3×5 payload is transposed to landscape 5×3", () => {
@@ -211,7 +227,7 @@ test("wild connector in the middle completes a match (main)", () => {
   assert.equal(result.expandedWilds.length, 0);
   assert.equal(result.expandedMatrix[1][0], SYMBOLS.ORANGE);
   const win = result.lineWins.find(
-    (w) => w.symbol === SYMBOLS.SEVEN && w.count >= 2,
+    (w) => w.symbol === SYMBOLS.SEVEN && w.count === 3,
   );
   assert.ok(win);
   assert.equal(win.wildMultiplier, 1);
@@ -310,10 +326,10 @@ test("main mode does not expand wilds", () => {
   assert.equal(result.expandedMatrix[1][2], SYMBOLS.BANANA);
 });
 
-test("expanding wild preserves scatters on the same reel (bonus)", () => {
+test("expanding wild preserves scatters and jackpots on the same reel (bonus)", () => {
   const matrix = [
     [SYMBOLS.BELL, SYMBOLS.PLUM, SYMBOLS.ORANGE],
-    [SYMBOLS.DOLLAR, SYMBOLS.WILD, SYMBOLS.BANANA],
+    [SYMBOLS.DOLLAR, SYMBOLS.WILD, SYMBOLS.JACKPOT],
     [SYMBOLS.BELL, SYMBOLS.GRAPES, SYMBOLS.WATERMELON],
     [SYMBOLS.PLUM, SYMBOLS.ORANGE, SYMBOLS.DOLLAR],
     [SYMBOLS.DOLLAR, SYMBOLS.WATERMELON, SYMBOLS.PLUM],
@@ -322,7 +338,7 @@ test("expanding wild preserves scatters on the same reel (bonus)", () => {
   const result = calculateWins(matrix, { 1: 2 }, 10000, { bonusMode: true });
 
   assert.equal(result.expandedMatrix[1][0], SYMBOLS.DOLLAR);
-  assert.equal(result.expandedMatrix[1][2], SYMBOLS.WILD);
+  assert.equal(result.expandedMatrix[1][2], SYMBOLS.JACKPOT);
   assert.equal(result.scatterWins.length, 1);
   assert.equal(result.scatterWins[0].kind, SYMBOLS.DOLLAR);
   assert.equal(result.scatterWins[0].count, 3);
@@ -434,8 +450,10 @@ test("bet validation rejects out-of-range amounts", async () => {
 });
 
 test("RTP probe — main game simulation (informational)", () => {
-  const rounds = 5000;
-  const bet = 1;
+  // This is a regression guard for the current rule set, not an RTP target.
+  // Economics tuning remains a separate game-design decision.
+  const rounds = 20000;
+  const bet = 10000;
   let totalReturned = 0;
 
   for (let i = 0; i < rounds; i += 1) {
@@ -447,7 +465,10 @@ test("RTP probe — main game simulation (informational)", () => {
   }
 
   const rtp = totalReturned / (rounds * bet);
-  assert.ok(rtp > 0.3 && rtp < 1.5, `RTP sample ${rtp.toFixed(4)} out of sanity band`);
+  assert.ok(
+    rtp > 0.9 && rtp < 1.8,
+    `3+ any-row RTP sample ${rtp.toFixed(4)} out of expected sanity band`,
+  );
 });
 
 test("jackpot roll — miss does not award", () => {
