@@ -1,7 +1,8 @@
 /**
  * Golden Tree — core game constants.
  * Matrix: 5 reels (columns) × 3 rows.
- * Wins: left→right adjacent paths (|Δrow| ≤ 1 between consecutive reels).
+ * Wins: contiguous left→right from reel 0 (horizontal or |Δrow| ≤ 1).
+ * A gap on the next reel ends the run — no skipping columns.
  */
 
 const REEL_COUNT = 5;

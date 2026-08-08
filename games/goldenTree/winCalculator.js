@@ -1,7 +1,6 @@
 const {
   REEL_COUNT,
   ROW_COUNT,
-  ADJACENT_PATHS,
   PAYTABLE,
   STAR_REELS,
   STAR_SCATTER_PAY,
@@ -39,6 +38,7 @@ function applyExpandingWilds(matrix, wildMultipliers) {
 
 /**
  * Left-to-right path match parser (wild substitutes in-cell).
+ * Kept for unit tests / helpers; win eval uses walkFromCol0.
  */
 function matchPayline(symbols) {
   let base = null;
@@ -93,7 +93,74 @@ function positionsKey(symbol, positions) {
 }
 
 /**
- * Evaluate adjacent paths (|Δrow| ≤ 1) and scatter pays.
+ * Can this cell continue a run for [baseSymbol] (null = unresolved, all-wild so far)?
+ */
+function cellContinues(sym, baseSymbol) {
+  if (isLineBreaker(sym)) return { ok: false, base: baseSymbol };
+  if (sym === SYMBOLS.WILD) return { ok: true, base: baseSymbol };
+  if (baseSymbol === null) return { ok: true, base: sym };
+  if (sym === baseSymbol) return { ok: true, base: baseSymbol };
+  return { ok: false, base: baseSymbol };
+}
+
+/**
+ * Walk contiguous adjacent paths starting ONLY at column 0.
+ * Extends to col+1 only when |Δrow| ≤ 1 and symbol/wild matches.
+ * First column with no valid extension ends that path (no skipping).
+ */
+function collectContiguousWins(evalMatrix) {
+  const found = [];
+
+  function record(baseSymbol, positions) {
+    const paySymbol = baseSymbol || SYMBOLS.SEVEN;
+    const count = positions.length;
+    if (count < minMatchCount(paySymbol)) return;
+    // Contiguous from col 0 with no gaps.
+    for (let i = 0; i < positions.length; i += 1) {
+      if (positions[i].col !== i) return;
+      if (i > 0 && Math.abs(positions[i].row - positions[i - 1].row) > 1) {
+        return;
+      }
+    }
+    found.push({ symbol: paySymbol, count, positions: positions.slice() });
+  }
+
+  function dfs(col, row, baseSymbol, positions) {
+    const atEnd = col >= REEL_COUNT - 1;
+    let extended = false;
+
+    if (!atEnd) {
+      for (let nextRow = 0; nextRow < ROW_COUNT; nextRow += 1) {
+        if (Math.abs(nextRow - row) > 1) continue;
+        const sym = evalMatrix[col + 1][nextRow];
+        const step = cellContinues(sym, baseSymbol);
+        if (!step.ok) continue;
+        extended = true;
+        dfs(col + 1, nextRow, step.base, [
+          ...positions,
+          { col: col + 1, row: nextRow },
+        ]);
+      }
+    }
+
+    // Maximal path only: record when we cannot extend further (gap / end).
+    if (atEnd || !extended) {
+      record(baseSymbol, positions);
+    }
+  }
+
+  for (let startRow = 0; startRow < ROW_COUNT; startRow += 1) {
+    const sym = evalMatrix[0][startRow];
+    const step = cellContinues(sym, null);
+    if (!step.ok) continue;
+    dfs(0, startRow, step.base, [{ col: 0, row: startRow }]);
+  }
+
+  return found;
+}
+
+/**
+ * Contiguous adjacent wins from reel 0 (|Δrow| ≤ 1) + scatters.
  * @param {object} [options]
  * @param {boolean} [options.bonusMode] — expanding wilds + multipliers
  */
@@ -116,35 +183,18 @@ function calculateWins(matrix, wildMultipliers, betAmount, options = {}) {
   let lineTotal = 0;
   const seen = new Set();
 
-  for (let lineIndex = 0; lineIndex < ADJACENT_PATHS.length; lineIndex += 1) {
-    const path = ADJACENT_PATHS[lineIndex];
-    const symbols = [];
-    const positions = [];
-
-    for (let col = 0; col < REEL_COUNT; col += 1) {
-      const row = path[col];
-      const raw = evalMatrix[col][row];
-      if (isLineBreaker(raw)) break;
-
-      symbols.push(raw);
-      positions.push({ col, row });
-    }
-
-    if (symbols.length === 0) continue;
-
-    const match = matchPayline(symbols);
-    if (!match) continue;
-
-    const winPositions = positions.slice(0, match.count);
-    const key = positionsKey(match.symbol, winPositions);
+  const candidates = collectContiguousWins(evalMatrix);
+  for (let i = 0; i < candidates.length; i += 1) {
+    const { symbol, count, positions } = candidates[i];
+    const key = positionsKey(symbol, positions);
     if (seen.has(key)) continue;
     seen.add(key);
 
-    const base = basePayout(match.symbol, match.count, betAmount);
+    const base = basePayout(symbol, count, betAmount);
     if (base <= 0) continue;
 
     const mult = wildMultiplierSum(
-      winPositions,
+      positions,
       evalMatrix,
       wildMultipliers,
       bonusMode,
@@ -153,10 +203,10 @@ function calculateWins(matrix, wildMultipliers, betAmount, options = {}) {
 
     lineTotal = roundMoney(lineTotal + amount);
     lineWins.push({
-      lineIndex,
-      symbol: match.symbol,
-      count: match.count,
-      positions: winPositions,
+      lineIndex: i,
+      symbol,
+      count,
+      positions,
       baseAmount: base,
       wildMultiplier: mult,
       amount,
@@ -220,4 +270,5 @@ module.exports = {
   calculateWins,
   matchPayline,
   basePayout,
+  collectContiguousWins,
 };

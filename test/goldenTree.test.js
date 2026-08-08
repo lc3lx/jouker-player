@@ -87,6 +87,68 @@ test("row jump |Δrow|=2 does not form a path win", () => {
   assert.equal(cherryWins.length, 0);
 });
 
+test("gap in the middle stops the run — no skip to later cherries", () => {
+  const matrix = emptyMatrix(SYMBOLS.BANANA);
+  for (let col = 0; col < 5; col += 1) {
+    for (let row = 0; row < 3; row += 1) {
+      matrix[col][row] = SYMBOLS.ORANGE;
+    }
+  }
+  // Middle row: C C X C C — must NOT pay 4/5 cherries by jumping the gap.
+  matrix[0][1] = SYMBOLS.CHERRY;
+  matrix[1][1] = SYMBOLS.CHERRY;
+  matrix[2][1] = SYMBOLS.ORANGE;
+  matrix[3][1] = SYMBOLS.CHERRY;
+  matrix[4][1] = SYMBOLS.CHERRY;
+
+  const result = calculateWins(matrix, {}, 10000, { bonusMode: false });
+  const cherryWins = result.lineWins.filter((w) => w.symbol === SYMBOLS.CHERRY);
+  assert.equal(cherryWins.length, 0);
+  assert.ok(
+    cherryWins.every((w) => w.count < 4),
+    "must not pay across a broken shape",
+  );
+});
+
+test("wins must start on column 0 — mid-board run is not a win", () => {
+  const matrix = emptyMatrix(SYMBOLS.BANANA);
+  for (let col = 0; col < 5; col += 1) {
+    for (let row = 0; row < 3; row += 1) {
+      matrix[col][row] = SYMBOLS.ORANGE;
+    }
+  }
+  matrix[1][1] = SYMBOLS.CHERRY;
+  matrix[2][1] = SYMBOLS.CHERRY;
+  matrix[3][1] = SYMBOLS.CHERRY;
+  matrix[4][1] = SYMBOLS.CHERRY;
+
+  const result = calculateWins(matrix, {}, 10000, { bonusMode: false });
+  const cherryWins = result.lineWins.filter((w) => w.symbol === SYMBOLS.CHERRY);
+  assert.equal(cherryWins.length, 0);
+});
+
+test("horizontal contiguous run from col 0 pays", () => {
+  const matrix = emptyMatrix(SYMBOLS.BANANA);
+  for (let col = 0; col < 5; col += 1) {
+    for (let row = 0; row < 3; row += 1) {
+      matrix[col][row] = SYMBOLS.ORANGE;
+    }
+  }
+  matrix[0][1] = SYMBOLS.CHERRY;
+  matrix[1][1] = SYMBOLS.CHERRY;
+  matrix[2][1] = SYMBOLS.CHERRY;
+
+  const result = calculateWins(matrix, {}, 10000, { bonusMode: false });
+  const win = result.lineWins.find(
+    (w) =>
+      w.symbol === SYMBOLS.CHERRY &&
+      w.count === 3 &&
+      w.positions.every((p, i) => p.col === i && p.row === 1),
+  );
+  assert.ok(win, "expected horizontal cherry win from col 0");
+  assert.equal(win.amount, 2000);
+});
+
 test("wild connector in the middle completes a match (main)", () => {
   const matrix = emptyMatrix(SYMBOLS.BANANA);
   for (let col = 0; col < 5; col += 1) {
