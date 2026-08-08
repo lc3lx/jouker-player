@@ -248,9 +248,11 @@ function calculateWins(matrix, wildMultipliers, betAmount, options = {}) {
     expandedReels = new Set();
   }
 
-  const lineWins = [];
-  let lineTotal = 0;
+  // Collect every valid path, then keep ONE win per symbol (best amount).
+  // Paying every DFS path stacked oranges/sevens into huge multi-way totals
+  // (e.g. 10× 3-orange paths → 80M instead of a single 0.2× bet).
   const seen = new Set();
+  const bestBySymbol = new Map();
 
   const candidates = collectContiguousWins(evalMatrix);
   for (let i = 0; i < candidates.length; i += 1) {
@@ -272,16 +274,32 @@ function calculateWins(matrix, wildMultipliers, betAmount, options = {}) {
       bonusMode,
     );
     const amount = roundMoney(base * mult);
-
-    lineTotal = roundMoney(lineTotal + amount);
-    lineWins.push({
-      lineIndex: lineWins.length,
+    const candidate = {
       symbol,
       count,
       positions,
       baseAmount: base,
       wildMultiplier: mult,
       amount,
+    };
+
+    const prev = bestBySymbol.get(symbol);
+    if (
+      !prev ||
+      candidate.amount > prev.amount ||
+      (candidate.amount === prev.amount && candidate.count > prev.count)
+    ) {
+      bestBySymbol.set(symbol, candidate);
+    }
+  }
+
+  const lineWins = [];
+  let lineTotal = 0;
+  for (const win of bestBySymbol.values()) {
+    lineTotal = roundMoney(lineTotal + win.amount);
+    lineWins.push({
+      lineIndex: lineWins.length,
+      ...win,
     });
   }
 

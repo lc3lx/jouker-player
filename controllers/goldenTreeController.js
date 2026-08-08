@@ -53,7 +53,8 @@ exports.winRules = asyncHandler(async (_req, res) => {
     status: "success",
     data: {
       winRulesVersion: WIN_RULES_VERSION,
-      rules: "contiguous L→R from reel 0; |Δrow|≤1; no mid-board anywhere-count",
+      rules:
+        "contiguous L→R from reel 0; |Δrow|≤1; one best path per symbol (no multi-way stack)",
     },
   });
 });

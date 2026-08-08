@@ -28,8 +28,8 @@ const GAMBLE_MAX_WIN_MULTIPLIER = 35;
 
 const FREE_SPINS_PER_BONUS = 5;
 
-/** Contiguous L→R from reel 0 only — not “count anywhere” on the board. */
-const WIN_RULES_VERSION = "contiguous-col0-v1";
+/** Contiguous L→R from reel 0; one best path paid per symbol (not multi-way). */
+const WIN_RULES_VERSION = "contiguous-col0-best-per-symbol-v2";
 
 const SYMBOLS = Object.freeze({
   CHERRY: "cherry",

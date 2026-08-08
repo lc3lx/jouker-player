@@ -288,6 +288,42 @@ test("screenshot Aug9 — mid-board 3 sevens → 0 (not 1× bet / anywhere-count
   assert.notEqual(result.totalWin, 40000000);
 });
 
+test("orange cluster — one best path only (not 10× multi-way)", () => {
+  // Dense oranges on reels 0–2 used to stack ~10 paths × 0.2× bet → 80M+.
+  const matrix = [
+    [SYMBOLS.ORANGE, SYMBOLS.ORANGE, SYMBOLS.ORANGE],
+    [SYMBOLS.ORANGE, SYMBOLS.ORANGE, SYMBOLS.CHERRY],
+    [SYMBOLS.ORANGE, SYMBOLS.ORANGE, SYMBOLS.SEVEN],
+    [SYMBOLS.PINEAPPLE, SYMBOLS.BANANA, SYMBOLS.BANANA],
+    [SYMBOLS.BELL, SYMBOLS.BELL, SYMBOLS.SEVEN],
+  ];
+  const bet = 40000000;
+  const result = calculateWins(matrix, {}, bet, { bonusMode: false });
+  assert.equal(result.lineWins.length, 1);
+  assert.equal(result.lineWins[0].symbol, SYMBOLS.ORANGE);
+  assert.equal(result.lineWins[0].count, 3);
+  assert.equal(result.totalWin, bet * 0.2); // single 3-orange pay
+  assert.ok(result.totalWin < bet); // never the old multi-way 80M/160M
+});
+
+test("seven cluster — one best path only (not 6× multi-way)", () => {
+  const matrix = [
+    [SYMBOLS.SEVEN, SYMBOLS.SEVEN, SYMBOLS.ORANGE],
+    [SYMBOLS.SEVEN, SYMBOLS.SEVEN, SYMBOLS.ORANGE],
+    [SYMBOLS.ORANGE, SYMBOLS.SEVEN, SYMBOLS.SEVEN],
+    [SYMBOLS.ORANGE, SYMBOLS.ORANGE, SYMBOLS.ORANGE],
+    [SYMBOLS.SEVEN, SYMBOLS.SEVEN, SYMBOLS.ORANGE],
+  ];
+  const bet = 40000000;
+  const result = calculateWins(matrix, {}, bet, { bonusMode: false });
+  assert.equal(result.lineWins.length, 1);
+  assert.equal(result.lineWins[0].symbol, SYMBOLS.SEVEN);
+  assert.equal(result.lineWins[0].count, 3);
+  assert.equal(result.totalWin, bet * 1); // single 3-seven pay
+  assert.notEqual(result.totalWin, bet * 4); // old stacked / remote 160M
+  assert.notEqual(result.totalWin, bet * 6);
+});
+
 test("two sevens do not pay across missing reels", () => {
   const matrix = [
     [SYMBOLS.ORANGE, SYMBOLS.SEVEN, SYMBOLS.SEVEN],
