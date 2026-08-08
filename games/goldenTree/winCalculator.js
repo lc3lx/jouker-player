@@ -93,6 +93,35 @@ function positionsKey(symbol, positions) {
 }
 
 /**
+ * Contiguous L→R from col 0 only: positions[i].col === i and |Δrow| ≤ 1.
+ * Rejects any gap / skip (e.g. sevens on reels 0,1,4).
+ */
+function isContiguousFromCol0(positions) {
+  if (!Array.isArray(positions) || positions.length === 0) return false;
+  for (let i = 0; i < positions.length; i += 1) {
+    const p = positions[i];
+    if (!p || p.col !== i) return false;
+    if (p.row < 0 || p.row >= ROW_COUNT) return false;
+    if (i > 0 && Math.abs(p.row - positions[i - 1].row) > 1) return false;
+  }
+  return true;
+}
+
+/**
+ * Every cell on the path must be [symbol] or wild (no foreign symbols / gaps).
+ */
+function pathMatchesMatrix(positions, symbol, matrix) {
+  if (!isContiguousFromCol0(positions)) return false;
+  for (const { col, row } of positions) {
+    const cell = matrix[col]?.[row];
+    if (cell == null) return false;
+    if (isLineBreaker(cell)) return false;
+    if (cell !== symbol && cell !== SYMBOLS.WILD) return false;
+  }
+  return true;
+}
+
+/**
  * Can this cell continue a run for [baseSymbol] (null = unresolved, all-wild so far)?
  */
 function cellContinues(sym, baseSymbol) {
@@ -115,13 +144,7 @@ function collectContiguousWins(evalMatrix) {
     const paySymbol = baseSymbol || SYMBOLS.SEVEN;
     const count = positions.length;
     if (count < minMatchCount(paySymbol)) return;
-    // Contiguous from col 0 with no gaps.
-    for (let i = 0; i < positions.length; i += 1) {
-      if (positions[i].col !== i) return;
-      if (i > 0 && Math.abs(positions[i].row - positions[i - 1].row) > 1) {
-        return;
-      }
-    }
+    if (!pathMatchesMatrix(positions, paySymbol, evalMatrix)) return;
     found.push({ symbol: paySymbol, count, positions: positions.slice() });
   }
 
@@ -186,6 +209,9 @@ function calculateWins(matrix, wildMultipliers, betAmount, options = {}) {
   const candidates = collectContiguousWins(evalMatrix);
   for (let i = 0; i < candidates.length; i += 1) {
     const { symbol, count, positions } = candidates[i];
+    if (count !== positions.length) continue;
+    if (!pathMatchesMatrix(positions, symbol, evalMatrix)) continue;
+
     const key = positionsKey(symbol, positions);
     if (seen.has(key)) continue;
     seen.add(key);
@@ -203,7 +229,7 @@ function calculateWins(matrix, wildMultipliers, betAmount, options = {}) {
 
     lineTotal = roundMoney(lineTotal + amount);
     lineWins.push({
-      lineIndex: i,
+      lineIndex: lineWins.length,
       symbol,
       count,
       positions,
@@ -271,4 +297,6 @@ module.exports = {
   matchPayline,
   basePayout,
   collectContiguousWins,
+  isContiguousFromCol0,
+  pathMatchesMatrix,
 };

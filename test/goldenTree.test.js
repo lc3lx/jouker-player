@@ -149,6 +149,31 @@ test("horizontal contiguous run from col 0 pays", () => {
   assert.equal(win.amount, 2000);
 });
 
+test("screenshot board — gapped sevens do not pay 4-oak / far reel", () => {
+  // Board from user screenshot (bet 10k showed wrong WIN 50k / all 7s lit).
+  const matrix = [
+    [SYMBOLS.ORANGE, SYMBOLS.SEVEN, SYMBOLS.SEVEN],
+    [SYMBOLS.BELL, SYMBOLS.BELL, SYMBOLS.SEVEN],
+    [SYMBOLS.ORANGE, SYMBOLS.ORANGE, SYMBOLS.ORANGE],
+    [SYMBOLS.CHERRY, SYMBOLS.CHERRY, SYMBOLS.ORANGE],
+    [SYMBOLS.ORANGE, SYMBOLS.ORANGE, SYMBOLS.SEVEN],
+  ];
+  const result = calculateWins(matrix, {}, 10000, { bonusMode: false });
+  const sevenWins = result.lineWins.filter((w) => w.symbol === SYMBOLS.SEVEN);
+
+  assert.ok(sevenWins.length >= 1);
+  assert.ok(
+    sevenWins.every((w) => w.count === 2),
+    "only contiguous 2-oak sevens from col0–1",
+  );
+  assert.ok(
+    sevenWins.every((w) => w.positions.every((p) => p.col <= 1)),
+    "must never include the isolated seven on reel 5",
+  );
+  assert.equal(result.totalWin, 4000);
+  assert.notEqual(result.totalWin, 50000);
+});
+
 test("wild connector in the middle completes a match (main)", () => {
   const matrix = emptyMatrix(SYMBOLS.BANANA);
   for (let col = 0; col < 5; col += 1) {
