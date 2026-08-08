@@ -231,6 +231,51 @@ test("wild connector in the middle completes a match (main)", () => {
   assert.equal(win.wildMultiplier, 1);
 });
 
+test("an unmultiplied tree connects two touching matching symbols", () => {
+  // The normal (main-game) tree is a plain wild. It must still complete a
+  // touching diagonal run even when no multiplier entry was supplied.
+  const matrix = [
+    [SYMBOLS.CHERRY, SYMBOLS.STAR, SYMBOLS.DOLLAR],
+    [SYMBOLS.JACKPOT, SYMBOLS.WILD, SYMBOLS.STAR],
+    [SYMBOLS.DOLLAR, SYMBOLS.JACKPOT, SYMBOLS.CHERRY],
+    [SYMBOLS.STAR, SYMBOLS.DOLLAR, SYMBOLS.JACKPOT],
+    [SYMBOLS.DOLLAR, SYMBOLS.STAR, SYMBOLS.JACKPOT],
+  ];
+
+  const result = calculateWins(matrix, {}, 10000, { bonusMode: false });
+  const win = result.lineWins.find(
+    (w) =>
+      w.symbol === SYMBOLS.CHERRY &&
+      w.count === 3 &&
+      w.positions.every(
+        (position, index) =>
+          position.col === index && position.row === index,
+      ),
+  );
+
+  assert.ok(win, "expected cherry → plain tree → cherry to pay");
+  assert.equal(win.wildMultiplier, 1);
+  assert.equal(win.amount, 2000);
+});
+
+test("the reported screenshot board has no server-side win", () => {
+  // Columns are read left → right; each array is top → bottom.  Two jackpot
+  // symbols neither substitute nor form a line, and no first-column symbol
+  // can reach two matching touching symbols on the next consecutive reels.
+  const matrix = [
+    [SYMBOLS.SEVEN, SYMBOLS.SEVEN, SYMBOLS.ORANGE],
+    [SYMBOLS.CHERRY, SYMBOLS.JACKPOT, SYMBOLS.JACKPOT],
+    [SYMBOLS.ORANGE, SYMBOLS.ORANGE, SYMBOLS.PINEAPPLE],
+    [SYMBOLS.SEVEN, SYMBOLS.ORANGE, SYMBOLS.ORANGE],
+    [SYMBOLS.PINEAPPLE, SYMBOLS.PINEAPPLE, SYMBOLS.BANANA],
+  ];
+
+  const result = calculateWins(matrix, {}, 10000, { bonusMode: false });
+  assert.equal(result.lineWins.length, 0);
+  assert.equal(result.scatterWins.length, 0);
+  assert.equal(result.totalWin, 0);
+});
+
 test("fruit needs 3; longer runs pay more", () => {
   const matrix3 = emptyMatrix(SYMBOLS.BANANA);
   for (let col = 0; col < 5; col += 1) {
