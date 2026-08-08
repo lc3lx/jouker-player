@@ -9,6 +9,13 @@
 
 const { SYMBOLS, WILD_REELS, STAR_REELS } = require("./constants");
 
+// A Golden Tree reel exposes three adjacent cells at once. Keep exactly one
+// physical jackpot stop on each reel so a single reel can never contribute a
+// cluster of jackpot scatters. `spinEngine` then activates those stops only
+// one time in six, which puts the 3+ trigger slightly below Zeus' rate.
+const JACKPOT_REEL_WEIGHT = 1;
+const JACKPOT_WINDOW_ACTIVATION_ODDS = 6;
+
 function buildStrip(entries) {
   const strip = [];
   for (const [symbol, weight] of entries) {
@@ -48,8 +55,7 @@ function stripForReel(reelIndex, mode) {
   }
 
   // Match-3 jackpot scatter (Zeus / Atlantis style) — all reels, low weight.
-  const jackpotWeight = mode === "bonus" ? 3 : 2;
-  mix.push([SYMBOLS.JACKPOT, jackpotWeight]);
+  mix.push([SYMBOLS.JACKPOT, JACKPOT_REEL_WEIGHT]);
 
   return buildStrip(mix);
 }
@@ -66,4 +72,6 @@ module.exports = {
   MAIN_REEL_STRIPS,
   BONUS_REEL_STRIPS,
   buildStrip,
+  JACKPOT_REEL_WEIGHT,
+  JACKPOT_WINDOW_ACTIVATION_ODDS,
 };

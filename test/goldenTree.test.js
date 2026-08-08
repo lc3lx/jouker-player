@@ -9,13 +9,77 @@ const {
   roundMoney,
 } = require("../games/goldenTree/constants");
 const { matchPayline, calculateWins, basePayout } = require("../games/goldenTree/winCalculator");
-const { generateSpin } = require("../games/goldenTree/spinEngine");
+const {
+  generateSpin,
+  pickColumnWindow,
+  windowAtStop,
+} = require("../games/goldenTree/spinEngine");
+const {
+  MAIN_REEL_STRIPS,
+  BONUS_REEL_STRIPS,
+  JACKPOT_REEL_WEIGHT,
+  JACKPOT_WINDOW_ACTIVATION_ODDS,
+} = require("../games/goldenTree/reelStrips");
 const roundManager = require("../games/goldenTree/roundManager");
 const wallet = require("../games/goldenTree/goldenTreeWalletAdapter");
 const goldenTreeService = require("../games/goldenTree/goldenTreeService");
 
 function emptyMatrix(fill = SYMBOLS.CHERRY) {
   return Array.from({ length: 5 }, () => Array(3).fill(fill));
+}
+
+function jackpotTriggerRate(strips) {
+  let distribution = [1];
+
+  for (const strip of strips) {
+    let normalStops = 0;
+    let singleJackpotStops = 0;
+
+    for (let stop = 0; stop < strip.length; stop += 1) {
+      const column = windowAtStop(strip, stop);
+      if (column[0] === column[1] && column[1] === column[2]) continue;
+
+      const jackpots = column.filter(
+        (symbol) => symbol === SYMBOLS.JACKPOT,
+      ).length;
+      if (jackpots === 0) normalStops += 1;
+      if (jackpots === 1) singleJackpotStops += 1;
+    }
+
+    const jackpotChance =
+      (singleJackpotStops / (normalStops + singleJackpotStops)) /
+      JACKPOT_WINDOW_ACTIVATION_ODDS;
+    const next = [];
+
+    for (let count = 0; count < distribution.length; count += 1) {
+      next[count] =
+        (next[count] || 0) + distribution[count] * (1 - jackpotChance);
+      next[count + 1] =
+        (next[count + 1] || 0) + distribution[count] * jackpotChance;
+    }
+    distribution = next;
+  }
+
+  return distribution.reduce(
+    (sum, chance, jackpotCount) =>
+      jackpotCount >= 3 ? sum + chance : sum,
+    0,
+  );
+}
+
+function atLeastThreeIndependentCells(cellCount, cellChance) {
+  let probability = 0;
+  for (let count = 3; count <= cellCount; count += 1) {
+    let combinations = 1;
+    for (let index = 1; index <= count; index += 1) {
+      combinations *= (cellCount - index + 1) / index;
+    }
+    probability +=
+      combinations *
+      cellChance ** count *
+      (1 - cellChance) ** (cellCount - count);
+  }
+  return probability;
 }
 
 test("consecutive-column paths only allow touching row connections", () => {
@@ -207,6 +271,26 @@ test("row-major 3×5 payload is transposed to landscape 5×3", () => {
   assert.equal(m[0][1], SYMBOLS.ORANGE);
   assert.equal(m[2][0], SYMBOLS.ORANGE);
   const result = calculateWins(rowMajor, {}, 10000, { bonusMode: false });
+  assert.equal(result.totalWin, 0);
+});
+
+test("stacked sevens on separated reels never aggregate into a win", () => {
+  // The exact false-win shape reported from the client: two 7s stacked on
+  // the left reel and two more stacked on a distant reel. A vertical pair is
+  // not a path, and reel 1 must contain a touching continuation before a
+  // symbol on any later reel can participate.
+  const matrix = [
+    [SYMBOLS.SEVEN, SYMBOLS.SEVEN, SYMBOLS.BANANA],
+    [SYMBOLS.ORANGE, SYMBOLS.BELL, SYMBOLS.PINEAPPLE],
+    [SYMBOLS.GRAPES, SYMBOLS.WATERMELON, SYMBOLS.BANANA],
+    [SYMBOLS.CHERRY, SYMBOLS.ORANGE, SYMBOLS.PLUM],
+    [SYMBOLS.SEVEN, SYMBOLS.SEVEN, SYMBOLS.BANANA],
+  ];
+
+  const result = calculateWins(matrix, {}, 10000, { bonusMode: false });
+
+  assert.equal(result.lineWins.length, 0);
+  assert.equal(result.scatterWins.length, 0);
   assert.equal(result.totalWin, 0);
 });
 
@@ -479,9 +563,8 @@ test("buy bonus creates 5 free spins session", async () => {
 });
 
 test("bonus spins use random bonus reels instead of injected three trees", () => {
-  // Stop 0 produces [jackpot, cherry, cherry] on every current strip. If
-  // bonus spins injected three trees after the reel stops, this would fail on
-  // reels 1, 2 and 3.
+  // A deterministic selector result contains no tree. If bonus spins injected
+  // trees after the reel stops, this would fail on reels 1, 2 and 3.
   const { matrix, wildMultipliers } = generateSpin({
     bonusMode: true,
     rng: () => 0,
@@ -492,6 +575,64 @@ test("bonus spins use random bonus reels instead of injected three trees", () =>
     0,
   );
   assert.deepEqual(wildMultipliers, {});
+});
+
+test("jackpot strips use isolated symbols at Zeus-scale rarity", () => {
+  assert.equal(JACKPOT_REEL_WEIGHT, 1);
+  assert.equal(JACKPOT_WINDOW_ACTIVATION_ODDS, 6);
+
+  for (const strip of [...MAIN_REEL_STRIPS, ...BONUS_REEL_STRIPS]) {
+    assert.equal(
+      strip.filter((symbol) => symbol === SYMBOLS.JACKPOT).length,
+      1,
+    );
+    for (let stop = 0; stop < strip.length; stop += 1) {
+      assert.ok(
+        windowAtStop(strip, stop).filter(
+          (symbol) => symbol === SYMBOLS.JACKPOT,
+        ).length <= 1,
+      );
+    }
+  }
+
+  const mainRate = jackpotTriggerRate(MAIN_REEL_STRIPS);
+  const bonusRate = jackpotTriggerRate(BONUS_REEL_STRIPS);
+  // Zeus has 30 independent cells: jackpot weight .25 over 76.25 ordinary
+  // weight plus .35 (main) / 1.2 (bonus) multiplier weight.
+  const zeusMainRate = atLeastThreeIndependentCells(
+    30,
+    0.25 / (76.25 + 0.35 + 0.25),
+  );
+  const zeusBonusRate = atLeastThreeIndependentCells(
+    30,
+    0.25 / (76.25 + 1.2 + 0.25),
+  );
+
+  assert.ok(mainRate >= 0.00009 && mainRate <= zeusMainRate);
+  assert.ok(bonusRate >= 0.00009 && bonusRate <= zeusBonusRate);
+});
+
+test("legacy stop-zero jackpot cluster cannot trigger a jackpot", () => {
+  const goldenTreeJackpot = require("../games/goldenTree/goldenTreeJackpot");
+
+  // Before the rare-jackpot selector, stop zero displayed the tail jackpot
+  // together with the opening cherries on every reel and immediately made a
+  // 3+ scatter trigger.
+  const legacyCluster = MAIN_REEL_STRIPS.map(
+    (strip) => pickColumnWindow(strip, () => 0).column,
+  );
+  assert.equal(
+    legacyCluster.flat().filter((symbol) => symbol === SYMBOLS.JACKPOT).length,
+    5,
+  );
+  assert.equal(goldenTreeJackpot.isJackpotTriggered(legacyCluster), true);
+
+  const { matrix } = generateSpin({ rng: () => 0 });
+  assert.equal(
+    matrix.flat().filter((symbol) => symbol === SYMBOLS.JACKPOT).length,
+    0,
+  );
+  assert.equal(goldenTreeJackpot.isJackpotTriggered(matrix), false);
 });
 
 test("bet validation rejects out-of-range amounts", async () => {

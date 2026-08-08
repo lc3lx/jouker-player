@@ -8,7 +8,11 @@ const {
   MAIN_WILD_MULTIPLIERS,
   BONUS_WILD_MULTIPLIERS,
 } = require("./constants");
-const { MAIN_REEL_STRIPS, BONUS_REEL_STRIPS } = require("./reelStrips");
+const {
+  MAIN_REEL_STRIPS,
+  BONUS_REEL_STRIPS,
+  JACKPOT_WINDOW_ACTIVATION_ODDS,
+} = require("./reelStrips");
 
 /**
  * Cryptographically secure RNG — never trust client-side randomness.
@@ -48,6 +52,53 @@ function pickColumnWindow(strip, rng = secureRandomInt) {
   }
 
   return { column, stop };
+}
+
+function isMixedColumn(column) {
+  return column[0] !== column[1] || column[1] !== column[2];
+}
+
+function jackpotCount(column) {
+  return column.filter((symbol) => symbol === SYMBOLS.JACKPOT).length;
+}
+
+/**
+ * Select a Golden Tree reel window while keeping jackpot scatters rare.
+ *
+ * Normal stops retain their existing weights and ordering.  A one-jackpot
+ * stop is available only on a 1-in-N activation roll; windows containing two
+ * or more jackpot cells are never eligible.  This prevents a single reel
+ * from manufacturing most of a 3-symbol jackpot trigger.
+ */
+function pickRareJackpotColumnWindow(strip, rng = secureRandomInt) {
+  const normalStops = [];
+  const singleJackpotStops = [];
+
+  for (let stop = 0; stop < strip.length; stop += 1) {
+    const column = windowAtStop(strip, stop);
+    if (!isMixedColumn(column)) continue;
+
+    const jackpots = jackpotCount(column);
+    if (jackpots === 0) {
+      normalStops.push(stop);
+    } else if (jackpots === 1) {
+      singleJackpotStops.push(stop);
+    }
+  }
+
+  // Golden Tree's configured strips always have normal stops.  Keep the
+  // original generic picker as a defensive fallback for malformed strips.
+  if (normalStops.length === 0) return pickColumnWindow(strip, rng);
+
+  const activateJackpot =
+    singleJackpotStops.length > 0 &&
+    rng(JACKPOT_WINDOW_ACTIVATION_ODDS) === 0;
+  const eligibleStops = activateJackpot
+    ? [...normalStops, ...singleJackpotStops]
+    : normalStops;
+  const stop = eligibleStops[rng(eligibleStops.length)];
+
+  return { column: windowAtStop(strip, stop), stop };
 }
 
 /**
@@ -101,7 +152,7 @@ function generateSpin({ bonusMode = false, rng = secureRandomInt } = {}) {
 
   for (let col = 0; col < REEL_COUNT; col += 1) {
     const strip = strips[col];
-    const { column, stop } = pickColumnWindow(strip, rng);
+    const { column, stop } = pickRareJackpotColumnWindow(strip, rng);
     stopIndices.push(stop);
     for (let row = 0; row < ROW_COUNT; row += 1) {
       matrix[col][row] = column[row];
@@ -120,5 +171,6 @@ module.exports = {
   secureRandomInt,
   pickFromArray,
   pickColumnWindow,
+  pickRareJackpotColumnWindow,
   sanitizeWildPlacements,
 };
