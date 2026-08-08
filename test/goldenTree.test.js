@@ -478,6 +478,22 @@ test("buy bonus creates 5 free spins session", async () => {
   assert.equal(spin1.freeSpinsRemaining, 4);
 });
 
+test("bonus spins use random bonus reels instead of injected three trees", () => {
+  // Stop 0 produces [jackpot, cherry, cherry] on every current strip. If
+  // bonus spins injected three trees after the reel stops, this would fail on
+  // reels 1, 2 and 3.
+  const { matrix, wildMultipliers } = generateSpin({
+    bonusMode: true,
+    rng: () => 0,
+  });
+
+  assert.equal(
+    matrix.flat().filter((symbol) => symbol === SYMBOLS.WILD).length,
+    0,
+  );
+  assert.deepEqual(wildMultipliers, {});
+});
+
 test("bet validation rejects out-of-range amounts", async () => {
   wallet.clearStubForTests();
   roundManager.clearAllForTests();

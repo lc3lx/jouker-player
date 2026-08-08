@@ -41,7 +41,8 @@ function stripForReel(reelIndex, mode) {
   }
 
   if (WILD_REELS.has(reelIndex)) {
-    // Very rare in main game — wilds are primarily from buy-bonus injection.
+    // Bonus spins make trees more frequent, but trees still land randomly;
+    // bought bonuses never inject or guarantee them.
     const wildWeight = mode === "bonus" ? 10 : 1;
     mix.push([SYMBOLS.WILD, wildWeight]);
   }

@@ -5,7 +5,6 @@ const {
   MAX_WIN_MULTIPLIER,
   BUY_BONUS_TYPE,
   BUY_BONUS_COST,
-  BONUS_GUARANTEED_WILDS,
   JACKPOT_ODDS,
   JACKPOT_MULTIPLIER,
   roundMoney,
@@ -118,14 +117,10 @@ async function executeSpin(userId, betAmountInput) {
     throw new ApiError("No bonus spins remaining", 400);
   }
 
-  let guaranteedWilds = 0;
-  if (isBonusSpin) {
-    guaranteedWilds = BONUS_GUARANTEED_WILDS;
-  }
-
+  // Purchased and triggered free spins use the richer bonus strips. A tree
+  // may land and expand, but no trees are injected or guaranteed per spin.
   const { matrix, wildMultipliers } = generateSpin({
     bonusMode: isBonusSpin,
-    guaranteedWilds,
   });
 
   const winResult = calculateWins(matrix, wildMultipliers, betAmount, {

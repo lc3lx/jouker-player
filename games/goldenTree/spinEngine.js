@@ -18,24 +18,24 @@ function secureRandomInt(max) {
   return crypto.randomInt(0, max);
 }
 
-function pickFromArray(arr) {
-  return arr[secureRandomInt(arr.length)];
+function pickFromArray(arr, rng = secureRandomInt) {
+  return arr[rng(arr.length)];
 }
 
 /**
  * Pick a visible 3-row window — resample when all three rows match
  * (plum/plum/plum columns) while keeping strip weights / RTP intact.
  */
-function pickColumnWindow(strip) {
+function pickColumnWindow(strip, rng = secureRandomInt) {
   const len = strip.length;
-  let stop = secureRandomInt(len);
+  let stop = rng(len);
   let column = windowAtStop(strip, stop);
 
   for (let attempt = 0; attempt < 20; attempt += 1) {
     if (column[0] !== column[1] || column[1] !== column[2]) {
       return { column, stop };
     }
-    stop = secureRandomInt(len);
+    stop = rng(len);
     column = windowAtStop(strip, stop);
   }
 
@@ -74,38 +74,23 @@ function sanitizeWildPlacements(matrix) {
   }
 }
 
-function assignWildMultipliers(matrix, multiplierPool) {
+function assignWildMultipliers(matrix, multiplierPool, rng = secureRandomInt) {
   const wildMultipliers = {};
   for (const col of WILD_REELS) {
     if (matrix[col][WILD_ROW] === SYMBOLS.WILD) {
-      wildMultipliers[col] = pickFromArray(multiplierPool);
+      wildMultipliers[col] = pickFromArray(multiplierPool, rng);
     }
   }
   return wildMultipliers;
 }
 
 /**
- * Place guaranteed wilds on the middle row of eligible reels only.
- */
-function injectGuaranteedWilds(matrix, wildMultipliers, guaranteedCount, multiplierPool) {
-  const pool = [...WILD_REELS];
-  for (let i = pool.length - 1; i > 0; i -= 1) {
-    const j = secureRandomInt(i + 1);
-    [pool[i], pool[j]] = [pool[j], pool[i]];
-  }
-
-  const cols = pool.slice(0, Math.min(guaranteedCount, pool.length));
-  for (const col of cols) {
-    matrix[col][WILD_ROW] = SYMBOLS.WILD;
-    wildMultipliers[col] = pickFromArray(multiplierPool);
-  }
-}
-
-/**
  * Generate a 5×3 outcome matrix.
+ * Bonus mode selects the richer bonus reel strip; it never injects or
+ * guarantees wild trees.
  * @returns {{ matrix: string[][], wildMultipliers: Record<number, number>, stopIndices: number[] }}
  */
-function generateSpin({ bonusMode = false, guaranteedWilds = 0 } = {}) {
+function generateSpin({ bonusMode = false, rng = secureRandomInt } = {}) {
   const strips = bonusMode ? BONUS_REEL_STRIPS : MAIN_REEL_STRIPS;
   const multiplierPool = bonusMode ? BONUS_WILD_MULTIPLIERS : MAIN_WILD_MULTIPLIERS;
 
@@ -116,7 +101,7 @@ function generateSpin({ bonusMode = false, guaranteedWilds = 0 } = {}) {
 
   for (let col = 0; col < REEL_COUNT; col += 1) {
     const strip = strips[col];
-    const { column, stop } = pickColumnWindow(strip);
+    const { column, stop } = pickColumnWindow(strip, rng);
     stopIndices.push(stop);
     for (let row = 0; row < ROW_COUNT; row += 1) {
       matrix[col][row] = column[row];
@@ -124,11 +109,7 @@ function generateSpin({ bonusMode = false, guaranteedWilds = 0 } = {}) {
   }
 
   sanitizeWildPlacements(matrix);
-  const wildMultipliers = assignWildMultipliers(matrix, multiplierPool);
-
-  if (guaranteedWilds > 0) {
-    injectGuaranteedWilds(matrix, wildMultipliers, guaranteedWilds, multiplierPool);
-  }
+  const wildMultipliers = assignWildMultipliers(matrix, multiplierPool, rng);
 
   return { matrix, wildMultipliers, stopIndices };
 }

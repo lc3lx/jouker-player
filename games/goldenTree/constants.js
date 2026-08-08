@@ -141,10 +141,13 @@ const DOLLAR_SCATTER_PAY = Object.freeze({ 3: 1, 4: 4, 5: 20 });
 const MAIN_WILD_MULTIPLIERS = [2, 3];
 const BONUS_WILD_MULTIPLIERS = [2, 3, 5];
 
-/** Single buy-bonus: 5 free spins with 3 guaranteed trees each spin. */
+/**
+ * Public buy-bonus identifier retained for API compatibility with existing
+ * clients. It is not a promise of three trees: bonus spins use the bonus
+ * reel strips and trees land randomly.
+ */
 const BUY_BONUS_TYPE = "Triple";
 const BUY_BONUS_COST = 350;
-const BONUS_GUARANTEED_WILDS = 3;
 
 function minMatchCount() {
   return 3;
@@ -193,7 +196,6 @@ module.exports = {
   BONUS_WILD_MULTIPLIERS,
   BUY_BONUS_TYPE,
   BUY_BONUS_COST,
-  BONUS_GUARANTEED_WILDS,
   minMatchCount,
   isScatter,
   isLineBreaker,
