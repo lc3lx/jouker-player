@@ -60,6 +60,14 @@ async function abandonTrixTableIfNoHumans(tableId) {
   }
 
   const cleared = roomManager.clearTrixGame(key, { archiveReason: "abandoned" });
+  // Await durable Mongo reset so a fast rejoin never sees ghost seats / mid-hand
+  // state on a static table (clearTrixGame also kicks archive fire-and-forget).
+  try {
+    const { archiveTableDocument } = require("./tableLifecycleService");
+    await archiveTableDocument(key, { reason: "abandoned" });
+  } catch (_) {
+    /* best-effort */
+  }
   if (cleared.cleared) {
     emitTablesUpdated({
       gameType: "trix",

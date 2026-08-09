@@ -1,4 +1,5 @@
 const express = require("express");
+const authService = require("../services/authService");
 const {
   spin,
   buyBonus,
@@ -10,6 +11,8 @@ const {
 } = require("../controllers/poseidonController");
 
 const router = express.Router();
+
+router.use(authService.protect);
 
 router.get("/session", requireUserId, session);
 router.post("/spin", requireUserId, spin);

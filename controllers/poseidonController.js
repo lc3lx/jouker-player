@@ -1,13 +1,13 @@
 const asyncHandler = require("express-async-handler");
 const poseidonService = require("../games/poseidon/poseidonService");
 
+/** Resolve player id from JWT only (set by authService.protect). */
 function requireUserId(req, res, next) {
-  const userId =
-    req.body?.userId || req.query?.userId || req.user?._id || req.user?.id;
+  const userId = req.user?._id || req.user?.id;
   if (!userId) {
-    return res.status(400).json({
+    return res.status(401).json({
       status: "fail",
-      message: "userId is required",
+      message: "Unauthorized",
     });
   }
   req.poseidonUserId = String(userId);

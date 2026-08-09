@@ -1,13 +1,13 @@
 /**
  * Golden Tree jackpot REST handlers — match-3 scratch (shared with Poseidon / Zeus).
+ * Player identity comes from JWT only (authService.protect on the router).
  */
 
 const asyncHandler = require("express-async-handler");
 const goldenTreeJackpot = require("../games/goldenTree/goldenTreeJackpot");
 
 function requireUser(req, res) {
-  const userId =
-    req.body?.userId || req.query?.userId || req.user?.id || req.user?._id;
+  const userId = req.user?._id || req.user?.id;
   if (!userId) {
     res.status(401).json({ status: "fail", message: "Unauthorized" });
     return null;

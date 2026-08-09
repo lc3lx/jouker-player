@@ -388,7 +388,8 @@ async function finalizeCardTableVacateNow({ gameType, tableId, userId, nsp }) {
 /**
  * Product rule: intentional leave ALWAYS frees the Mongo seat.
  * - Lobby / waiting / between rounds: cash-out chips to balance + splice seat.
- * - Mid-hand: bot takeover + forfeit lock + splice seat (no reconnect hold).
+ * - Mid-hand with other humans: bot takeover + forfeit lock + splice seat.
+ * - Sole human (no other humans at table): full table reset — fresh deal on rejoin.
  * Caller must re-join via REST to sit again.
  */
 async function intentionalLeaveCardTable({ gameType, tableId, userId, nsp }) {
@@ -399,10 +400,93 @@ async function intentionalLeaveCardTable({ gameType, tableId, userId, nsp }) {
   const uid = String(userId);
   const game = getGame(gameType, tid);
   const liveHuman = findHumanPlayer(game, uid);
+  const otherHumans = (game?.players || []).filter(
+    (p) => !p.isBot && p.userId && String(p.userId) !== uid
+  ).length;
   const midHand =
     !!liveHuman &&
     !!game?.state &&
     !["waiting", "countdown", "game_end"].includes(String(game.state));
+
+  // #region agent log
+  try {
+    const { agentDebugLog } = require("../utils/agentDebugLog");
+    agentDebugLog("H-reset1", "cardTableVacateService.js:intentionalLeave:entry", "intentional leave sole-human check", {
+      gameType,
+      tableId: tid,
+      userId: uid,
+      state: game?.state || null,
+      midHand,
+      otherHumans,
+      humanCount: typeof game?.humanCount === "function" ? game.humanCount() : null,
+      hasGameState: !!game?.gameState,
+    });
+  } catch (_) {}
+  // #endregion
+
+  // Sole human leaving → wipe the table (bots must not continue a ghost hand).
+  if (otherHumans === 0 && game) {
+    cancelCardTableVacate({ gameType, tableId: tid, userId: uid });
+    if (liveHuman && typeof game.convertHumanToBot === "function") {
+      try {
+        game.convertHumanToBot(uid);
+      } catch (_) {}
+    }
+    if (gameType === "trix") {
+      roomManager.userToTrixTableId.delete(uid);
+      roomManager.trixUserSocket.delete(uid);
+    } else {
+      roomManager.userToTarneeb41TableId.delete(uid);
+      roomManager.tarneeb41UserSocket.delete(uid);
+    }
+
+    let abandonResult = null;
+    if (gameType === "trix") {
+      abandonResult = await abandonTrixTableIfNoHumans(tid);
+      if (!abandonResult?.abandoned) {
+        roomManager.clearTrixGame(tid, { archiveReason: "abandoned" });
+        try {
+          const { archiveTableDocument } = require("./tableLifecycleService");
+          await archiveTableDocument(tid, { reason: "abandoned" });
+        } catch (_) {}
+        abandonResult = { abandoned: true, forced: true };
+      }
+    } else {
+      abandonResult = await abandonTarneeb41IfNoHumans(tid);
+      if (!abandonResult?.abandoned) {
+        roomManager.clearTarneeb41Game(tid, { archiveReason: "abandoned" });
+        try {
+          const { archiveTableDocument } = require("./tableLifecycleService");
+          await archiveTableDocument(tid, { reason: "abandoned" });
+        } catch (_) {}
+        abandonResult = { abandoned: true, forced: true };
+      }
+    }
+
+    // #region agent log
+    try {
+      const { agentDebugLog } = require("../utils/agentDebugLog");
+      const afterGame = getGame(gameType, tid);
+      agentDebugLog("H-reset1", "cardTableVacateService.js:intentionalLeave:soleReset", "sole human leave reset", {
+        gameType,
+        tableId: tid,
+        userId: uid,
+        midHand,
+        abandonResult,
+        gameGone: !afterGame,
+      });
+    } catch (_) {}
+    // #endregion
+
+    emitTablesUpdated({ gameType, reason: "leave", tableId: tid });
+    return {
+      ok: true,
+      mode: "last_human_reset",
+      seatFreed: true,
+      midHand,
+      abandoned: true,
+    };
+  }
 
   if (midHand) {
     await finalizeCardTableVacateNow({ gameType, tableId: tid, userId: uid, nsp });
@@ -426,6 +510,7 @@ async function intentionalLeaveCardTable({ gameType, tableId, userId, nsp }) {
         stillSeated,
         vacatingActive,
         mode: "mid_hand_bot_takeover",
+        otherHumans,
       });
     } catch (_) {}
     // #endregion
@@ -533,6 +618,7 @@ async function intentionalLeaveCardTable({ gameType, tableId, userId, nsp }) {
       stillSeated,
       vacatingActive,
       midHand: false,
+      otherHumans,
     });
   } catch (_) {}
   // #endregion

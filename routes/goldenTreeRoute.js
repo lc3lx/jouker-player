@@ -1,4 +1,5 @@
 const express = require("express");
+const authService = require("../services/authService");
 const {
   spin,
   gamble,
@@ -14,10 +15,14 @@ const {
 
 const router = express.Router();
 
+// Public: deployed win-rules metadata only
+router.get("/win-rules", winRules);
+
+router.use(authService.protect);
+
 router.post("/spin", requireUserId, spin);
 router.post("/gamble", requireUserId, gamble);
 router.post("/buy-bonus", requireUserId, buyBonus);
-router.get("/win-rules", winRules);
 
 // Match-3 jackpot (same flow as Zeus / Atlantis)
 router.get("/jackpot", jackpotRecover);

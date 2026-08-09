@@ -567,7 +567,31 @@ function registerGameHandlers(nsp, jwtVerify) {
         roomManager.setTrixUserSocket(String(userId), socket.id);
         roomManager.setUserTrixTable(String(userId), String(table._id));
         await socketPresenceService.registerSocket(table._id, userId, socket.id);
-        const game = getOrCreateTrixGameWired(nsp, table._id);
+        let game = getOrCreateTrixGameWired(nsp, table._id);
+
+        // Safety: never reattach a human into a bot-only mid-hand ghost after the
+        // last human left. Wipe and recreate so the joiner gets a fresh deal.
+        if (
+          game &&
+          typeof game.humanCount === "function" &&
+          game.humanCount() === 0 &&
+          game.gameState &&
+          game.state &&
+          !["waiting", "countdown"].includes(String(game.state))
+        ) {
+          // #region agent log
+          try {
+            const { agentDebugLog } = require("../../utils/agentDebugLog");
+            agentDebugLog("H-reset3", "game.handlers.js:join_trix_table", "bot-only mid-hand wipe before join", {
+              tableId: String(table._id),
+              userId: userIdStr,
+              state: game.state,
+            });
+          } catch (_) {}
+          // #endregion
+          await abandonTrixTableIfNoHumans(table._id);
+          game = getOrCreateTrixGameWired(nsp, table._id);
+        }
 
         const liveHuman = game.players.find(
           (p) => !p.isBot && p.userId && String(p.userId) === userIdStr
