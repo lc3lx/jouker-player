@@ -47,9 +47,11 @@ const BET_EPS = 1e-4;
 /** Additive `{ reason, code }` on every invalid_move (clients may ignore code). */
 function emitInvalidMove(socket, reason, extra = {}) {
   const r = reason == null ? "invalid_action" : String(reason);
-  emitInvalidMove(socket, r, { code: codeForReason(r),
+  socket.emit("invalid_move", {
+    reason: r,
+    code: codeForReason(r),
     ...extra,
-   });
+  });
 }
 
 function sanitizeVolatility(raw) {
