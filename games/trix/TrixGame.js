@@ -24,6 +24,30 @@ function clearManagedOrNativeInterval(id) {
 
 const ACTIVE_STATES = new Set(['selecting_game', 'playing', 'round_end', 'game_end']);
 
+/** One دق = 4 kingdoms × 5 contracts. Hard stop — never continue past this. */
+const TRIX_TOTAL_CONTRACTS = 20;
+
+function countContractsPlayed(gameState) {
+  if (!gameState) return 0;
+  const byKing = Array.isArray(gameState.gamesPlayedByKing)
+    ? gameState.gamesPlayedByKing
+    : [];
+  const fromKings = byKing.reduce((sum, row) => sum + (Array.isArray(row) ? row.length : 0), 0);
+  const fromLog = Array.isArray(gameState.scoreLog) ? gameState.scoreLog.length : 0;
+  const fromRound = Number(gameState.roundNumber) || 0;
+  return Math.max(fromKings, fromLog, fromRound);
+}
+
+function isTrixDealComplete(gameState) {
+  if (!gameState) return false;
+  const byKing = Array.isArray(gameState.gamesPlayedByKing)
+    ? gameState.gamesPlayedByKing
+    : [];
+  const allKingsDone =
+    byKing.length >= 4 && byKing.every((row) => Array.isArray(row) && row.length >= 5);
+  return allKingsDone || countContractsPlayed(gameState) >= TRIX_TOTAL_CONTRACTS;
+}
+
 function parseTurnTimeoutSeconds() {
   const n = parseInt(process.env.TURN_TIMEOUT_SECONDS || '30', 10);
   if (!Number.isFinite(n) || n < 5) return 30;
@@ -559,6 +583,11 @@ class TrixGame extends BaseGameEngine {
   }
 
   startRound() {
+    // Safety: never deal another hand once the دق is complete.
+    if (isTrixDealComplete(this.gameState)) {
+      this._finishDeal('startRound_blocked');
+      return;
+    }
     this.state = 'selecting_game';
     this._fsm.transition(TRIX_STATE.SELECTING_GAME);
     this.selectingStartedAt = Date.now();
@@ -571,6 +600,57 @@ class TrixGame extends BaseGameEngine {
       this._assignKingBySevenOfHearts();
     }
     this._restartTurnTimer();
+  }
+
+  /**
+   * End the دق: celebration + settlement. Idempotent.
+   */
+  _finishDeal(reason = 'complete') {
+    if (this.state === 'game_end') return true;
+    this.state = 'game_end';
+    this._fsm.transition(TRIX_STATE.GAME_END);
+    this.clearBotTimer();
+    this.clearTurnTimer();
+    if (!this._finishedAt) this._finishedAt = Date.now();
+    // #region agent log
+    try {
+      const { agentDebugLog } = require('../../utils/agentDebugLog');
+      agentDebugLog('H-20', 'TrixGame.js:_finishDeal', 'trix deal finished', {
+        reason,
+        tableId: String(this.mongoTableId || this.roomId || ''),
+        roundNumber: Number(this.gameState?.roundNumber) || 0,
+        contractsPlayed: countContractsPlayed(this.gameState),
+        scoreLogLen: Array.isArray(this.gameState?.scoreLog)
+          ? this.gameState.scoreLog.length
+          : 0,
+        byKing: (this.gameState?.gamesPlayedByKing || []).map((r) =>
+          Array.isArray(r) ? r.length : 0
+        ),
+        scores: this.gameState?.scores || [],
+        state: this.state,
+      });
+    } catch (_) {}
+    // #endregion
+    try {
+      const scores = this.gameState?.scores || [];
+      const maxScore = Math.max(...scores);
+      botProfileService.recordSeats(
+        this.players.map((p) => ({
+          isBot: !!p.isBot,
+          botUserId: p.botUserId,
+          userId: p.userId,
+          won: scores[p.seatIndex] === maxScore,
+        })),
+        { gameType: 'trix' }
+      );
+    } catch (_) { /* cosmetic only */ }
+    try {
+      const bots = this.players.filter((p) => p.isBot).map((p) => botChatService.botFromSeat(p));
+      const res = botChatService.maybeChat({ bots, tableId: this.roomId, event: 'hand_end' });
+      if (res) setTimeout(() => this._emit('bot_chat', res.message), res.delayMs);
+    } catch (_) { /* best-effort */ }
+    this._notifyAfterMove({ success: true, gameEnded: true });
+    return true;
   }
 
   startBotTimer() {
@@ -591,21 +671,34 @@ class TrixGame extends BaseGameEngine {
     let stateChanged = false;
 
     if (this.state === 'selecting_game') {
-      const kingIndex = this.gameState.currentKingIndex;
-      const king = this.gameState.players[kingIndex];
-      const available = RoundManager.getAvailableGames(this.gameState, kingIndex);
-      if (available.length > 0) {
-        const timedOut = this.selectingStartedAt > 0 &&
-          (Date.now() - this.selectingStartedAt) >= this.selectTimeoutSeconds * 1000;
-        if (king.isBot || timedOut) {
-          const gameType = king.isBot
-            ? BotAI.botChooseGame(this.gameState, kingIndex, available)
-            : available[0];
-          const result = this.applyMove(kingIndex, 'select_game', {
-            gameType,
-            moveId: `bot_select_${Date.now()}_${kingIndex}`,
-          });
-          if (result && result.success && !result.duplicate) stateChanged = true;
+      // No contracts left for anyone → force end (never wrap into a 2nd دق).
+      if (isTrixDealComplete(this.gameState)) {
+        this._finishDeal('bot_select_deal_complete');
+        stateChanged = true;
+      } else {
+        const kingIndex = this.gameState.currentKingIndex;
+        const king = this.gameState.players[kingIndex];
+        const available = RoundManager.getAvailableGames(this.gameState, kingIndex);
+        if (available.length === 0) {
+          // Current king finished their 5 — advance or end.
+          this.state = 'round_end';
+          this._fsm.transition(TRIX_STATE.ROUND_END);
+          this.roundEndAt = Date.now() - 2000;
+          const ok = this.nextRound();
+          if (ok) stateChanged = true;
+        } else {
+          const timedOut = this.selectingStartedAt > 0 &&
+            (Date.now() - this.selectingStartedAt) >= this.selectTimeoutSeconds * 1000;
+          if (king.isBot || timedOut) {
+            const gameType = king.isBot
+              ? BotAI.botChooseGame(this.gameState, kingIndex, available)
+              : available[0];
+            const result = this.applyMove(kingIndex, 'select_game', {
+              gameType,
+              moveId: `bot_select_${Date.now()}_${kingIndex}`,
+            });
+            if (result && result.success && !result.duplicate) stateChanged = true;
+          }
         }
       }
     } else if (this.state === 'playing') {
@@ -764,6 +857,9 @@ class TrixGame extends BaseGameEngine {
   }
 
   applyMove(playerIndex, action, payload) {
+    if (this.state === 'game_end') {
+      return { success: false, reason: 'Game already finished' };
+    }
     const dup = this._checkDuplicateMove(playerIndex, action, payload);
     if (dup) {
       this._notifyAfterMove(dup);
@@ -771,6 +867,10 @@ class TrixGame extends BaseGameEngine {
     }
 
     if (this.state === 'selecting_game' && action === 'select_game') {
+      if (isTrixDealComplete(this.gameState)) {
+        this._finishDeal('select_blocked');
+        return { success: false, reason: 'Deal already complete' };
+      }
       if (this.gameState.currentKingIndex !== playerIndex) {
         return { success: false, reason: 'Not king' };
       }
@@ -832,42 +932,38 @@ class TrixGame extends BaseGameEngine {
   }
 
   nextRound() {
+    if (this.state === 'game_end') return false;
     if (this.state !== 'round_end') return false;
     this.roundEndAt = 0;
 
-    if (this.gameState.roundNumber >= 20) {
-      this.state = 'game_end';
-      this._fsm.transition(TRIX_STATE.GAME_END);
-      this.clearBotTimer();
-      this.clearTurnTimer();
-      if (!this._finishedAt) this._finishedAt = Date.now();
-      // Believable bot profile drift (fire-and-forget; cosmetic, not settlement).
-      try {
-        const scores = this.gameState.scores || [];
-        const maxScore = Math.max(...scores);
-        botProfileService.recordSeats(
-          this.players.map((p) => ({
-            isBot: !!p.isBot,
-            botUserId: p.botUserId,
-            userId: p.userId,
-            won: scores[p.seatIndex] === maxScore,
-          })),
-          { gameType: 'trix' }
-        );
-      } catch (_) { /* cosmetic only */ }
-      // Occasional rate-limited bot chat (bridge forwards `bot_chat` to the room).
-      try {
-        const bots = this.players.filter((p) => p.isBot).map((p) => botChatService.botFromSeat(p));
-        const res = botChatService.maybeChat({ bots, tableId: this.roomId, event: 'hand_end' });
-        if (res) setTimeout(() => this._emit('bot_chat', res.message), res.delayMs);
-      } catch (_) { /* best-effort */ }
-      this._notifyAfterMove({ success: true, gameEnded: true });
-      return true;
+    const contractsPlayed = countContractsPlayed(this.gameState);
+    // #region agent log
+    try {
+      const { agentDebugLog } = require('../../utils/agentDebugLog');
+      agentDebugLog('H-20', 'TrixGame.js:nextRound', 'nextRound decision', {
+        tableId: String(this.mongoTableId || this.roomId || ''),
+        roundNumber: Number(this.gameState?.roundNumber) || 0,
+        contractsPlayed,
+        dealComplete: isTrixDealComplete(this.gameState),
+        byKing: (this.gameState?.gamesPlayedByKing || []).map((r) =>
+          Array.isArray(r) ? r.length : 0
+        ),
+      });
+    } catch (_) {}
+    // #endregion
+
+    if (isTrixDealComplete(this.gameState)) {
+      return this._finishDeal('nextRound_complete');
     }
 
     const kingIndex = this.gameState.currentKingIndex;
-    if (this.gameState.gamesPlayedByKing[kingIndex].length === 5) {
+    if (this.gameState.gamesPlayedByKing[kingIndex].length >= 5) {
       this.gameState.currentKingIndex = (kingIndex + 1) % 4;
+    }
+
+    // After rotating, if every king is done, end — do not startRound again.
+    if (isTrixDealComplete(this.gameState)) {
+      return this._finishDeal('nextRound_after_rotate');
     }
 
     this.gameState.players.forEach((p) => p.resetForRound());

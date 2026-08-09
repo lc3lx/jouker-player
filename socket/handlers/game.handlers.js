@@ -1422,6 +1422,10 @@ function registerGameHandlers(nsp, jwtVerify) {
       if (ctx.type === "tarneeb41" && typeof ctx.game.advanceNextRound === "function") {
         ok = ctx.game.advanceNextRound();
       } else if (ctx.type === "trix" && ctx.game.nextRound) {
+        if (ctx.game.state === "game_end" || ctx.game.isGameFinished?.()) {
+          emitInvalidMove(socket, "game_already_finished", { code: "ERR_GAME_ENDED" });
+          return;
+        }
         ok = ctx.game.nextRound();
       } else if (ctx.game.nextRound) {
         ok = ctx.game.nextRound();
