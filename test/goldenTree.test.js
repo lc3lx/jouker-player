@@ -425,6 +425,56 @@ test("stacked sevens on separated reels never aggregate into a win", () => {
   assert.equal(result.totalWin, 0);
 });
 
+/** Fillers that never form a 3-run from reel 0 on any row. */
+function mixedDeadMatrix() {
+  return [
+    [SYMBOLS.BELL, SYMBOLS.CHERRY, SYMBOLS.GRAPES],
+    [SYMBOLS.ORANGE, SYMBOLS.PLUM, SYMBOLS.WATERMELON],
+    [SYMBOLS.BANANA, SYMBOLS.BELL, SYMBOLS.CHERRY],
+    [SYMBOLS.GRAPES, SYMBOLS.ORANGE, SYMBOLS.PLUM],
+    [SYMBOLS.WATERMELON, SYMBOLS.BANANA, SYMBOLS.BELL],
+  ];
+}
+
+test("seven next to wild tree pays (special pair, mid-board ok)", () => {
+  const matrix = mixedDeadMatrix();
+  // Tree on reel 2 middle, seven on reel 3 middle — not a col0 run of 3.
+  matrix[2][1] = SYMBOLS.WILD;
+  matrix[3][1] = SYMBOLS.SEVEN;
+
+  const result = calculateWins(matrix, {}, 10000, { bonusMode: false });
+  const win = result.lineWins.find((w) => w.symbol === SYMBOLS.SEVEN);
+  assert.ok(win);
+  assert.equal(win.special, "sevenTree");
+  assert.equal(win.count, 2);
+  assert.equal(win.amount, 10000); // 1× bet
+  assert.equal(result.totalWin, 10000);
+
+  const { hardenWinResult } = require("../games/goldenTree/winGuard");
+  const hardened = hardenWinResult(matrix, {}, 10000, { bonusMode: false });
+  assert.equal(hardened.totalWin, 10000);
+  assert.equal(hardened.lineWins[0].special, "sevenTree");
+});
+
+test("orange next to wild tree does NOT get the seven-tree special", () => {
+  const matrix = mixedDeadMatrix();
+  matrix[2][1] = SYMBOLS.WILD;
+  matrix[3][1] = SYMBOLS.ORANGE;
+
+  const result = calculateWins(matrix, {}, 10000, { bonusMode: false });
+  assert.equal(result.totalWin, 0);
+});
+
+test("seven above wild tree pays (vertical neighbour)", () => {
+  const matrix = mixedDeadMatrix();
+  matrix[1][1] = SYMBOLS.WILD;
+  matrix[1][0] = SYMBOLS.SEVEN;
+
+  const result = calculateWins(matrix, {}, 10000, { bonusMode: false });
+  assert.equal(result.totalWin, 10000);
+  assert.equal(result.lineWins[0].special, "sevenTree");
+});
+
 test("wild connector in the middle completes a match (main)", () => {
   const matrix = emptyMatrix(SYMBOLS.BANANA);
   for (let col = 0; col < 5; col += 1) {

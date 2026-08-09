@@ -11,6 +11,9 @@ const {
   normalizeLandscapeMatrix,
   applyExpandingWilds,
   basePayout,
+  isSevenTreePair,
+  sevenTreePayout,
+  SEVEN_TREE_SPECIAL,
 } = require("./winCalculator");
 const logger = require("../../utils/logger");
 
@@ -31,6 +34,26 @@ function hardenWinResult(matrix, wildMultipliers, betAmount, options = {}) {
   let lineTotal = 0;
   for (const w of fresh.lineWins) {
     if (!w || w.count !== w.positions?.length) continue;
+
+    const isSevenTree = w.special === SEVEN_TREE_SPECIAL;
+    if (isSevenTree) {
+      if (!isSevenTreePair(w.positions, evalMatrix)) {
+        logger.warn("golden_tree_win_guard_drop_seven_tree", {
+          winRulesVersion: WIN_RULES_VERSION,
+          positions: w.positions,
+          amount: w.amount,
+        });
+        continue;
+      }
+      const base = sevenTreePayout(betAmount);
+      if (base <= 0) continue;
+      const amount = roundMoney(w.amount);
+      if (amount <= 0) continue;
+      lineTotal = roundMoney(lineTotal + amount);
+      lineWins.push({ ...w, amount, baseAmount: base, special: SEVEN_TREE_SPECIAL });
+      continue;
+    }
+
     // Same bar for orange, seven, cherry, … — never pay under 3-in-a-row.
     if (!Number.isInteger(w.count) || w.count < MIN_CONSECUTIVE) continue;
     // Reject mid-board / right-side clusters that never touch reel 0.
@@ -50,7 +73,6 @@ function hardenWinResult(matrix, wildMultipliers, betAmount, options = {}) {
     }
     const base = basePayout(w.symbol, w.count, betAmount);
     if (base <= 0) continue;
-    // Keep calculator amount (includes wild mult) only if path still valid.
     const amount = roundMoney(w.amount);
     if (amount <= 0) continue;
     lineTotal = roundMoney(lineTotal + amount);

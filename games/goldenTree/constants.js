@@ -31,8 +31,14 @@ const GAMBLE_MAX_WIN_MULTIPLIER = 35;
 
 const FREE_SPINS_PER_BONUS = 5;
 
-/** Same-row ≥3 from reel 0; one best line per symbol. */
-const WIN_RULES_VERSION = "horizontal-col0-min3-v3";
+/** Same-row ≥3 from reel 0; plus seven adjacent to wild tree. */
+const WIN_RULES_VERSION = "horizontal-col0-min3-seven-tree-v4";
+
+/**
+ * Seven touching a wild tree (orthogonal neighbour) pays this × bet.
+ * Same as three sevens on a line.
+ */
+const SEVEN_TREE_ADJACENT_MULT = 1;
 
 const SYMBOLS = Object.freeze({
   CHERRY: "cherry",
@@ -138,6 +144,7 @@ module.exports = {
   FREE_SPINS_PER_BONUS,
   MIN_CONSECUTIVE,
   WIN_RULES_VERSION,
+  SEVEN_TREE_ADJACENT_MULT,
   SYMBOLS,
   SCATTERS,
   LINE_BREAKERS,
