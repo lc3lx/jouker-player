@@ -409,3 +409,98 @@ test("SeatClaim: a NEW human can take over a Trix bot seat (allowTakeover), guar
     cleanup(game);
   }
 });
+
+// ---------------------------------------------------------------------------
+// Trix production — startGame await / single-flight
+// ---------------------------------------------------------------------------
+
+test("Trix P0: concurrent startGame shares one flight and leaves gameState non-null", async () => {
+  const game = new TrixGame("sf_trix", { mongoTableId: "sf_trix" });
+  game.applyCosmeticsToPlayers = async () => {
+    await new Promise((r) => setTimeout(r, 40));
+  };
+  for (let i = 0; i < 4; i += 1) {
+    game.players.push({
+      userId: `u${i}`,
+      socketId: `s${i}`,
+      seatIndex: i,
+      isBot: i >= 2,
+      displayName: `P${i}`,
+      chips: 1000,
+    });
+  }
+  try {
+    const [a, b, c] = await Promise.all([
+      game.startGame(),
+      game.startGame(),
+      game.startGame(),
+    ]);
+    assert.equal(a, true);
+    assert.equal(b, true);
+    assert.equal(c, true);
+    assert.ok(game.gameState, "gameState must exist after awaited start");
+    assert.equal(typeof game.gameState.currentKingIndex, "number");
+    const snap = game.getGameState(0);
+    assert.ok(snap, "getGameState must not be null after start");
+    assert.equal(await game.startGame(), true);
+  } finally {
+    cleanup(game);
+  }
+});
+
+test("Trix P0: startGame is idempotent when gameState already exists", async () => {
+  const game = await mkTrix();
+  try {
+    const kingBefore = game.gameState.currentKingIndex;
+    const sessionBefore = game.sessionId;
+    assert.equal(await game.startGame(), true);
+    assert.equal(game.sessionId, sessionBefore, "does not re-init session");
+    assert.equal(game.gameState.currentKingIndex, kingBefore);
+  } finally {
+    cleanup(game);
+  }
+});
+
+test("P0: Redis NX join lock rejects concurrent holders with JOIN_IN_PROGRESS", async () => {
+  const {
+    withUserJoinLock,
+    setRedisClient,
+    _joinChainsForTest,
+  } = require("../utils/userJoinLock");
+  const store = new Map();
+  const fakeRedis = {
+    async set(key, token, opts) {
+      if (opts && opts.NX && store.has(key)) return null;
+      store.set(key, token);
+      return "OK";
+    },
+    async eval(_script, { keys }) {
+      store.delete(keys[0]);
+      return 1;
+    },
+  };
+  setRedisClient(fakeRedis);
+  try {
+    let releaseFirst;
+    const firstHeld = new Promise((resolve) => {
+      releaseFirst = resolve;
+    });
+    const first = withUserJoinLock("redis-u", async () => {
+      await firstHeld;
+      return "first";
+    });
+    // Let the first acquire the Redis lock.
+    await new Promise((r) => setTimeout(r, 20));
+    // Simulate a second API node (empty in-process chain) racing the same user.
+    _joinChainsForTest.delete("redis-u");
+    await assert.rejects(
+      withUserJoinLock("redis-u", async () => "second"),
+      (err) => err && err.code === "JOIN_IN_PROGRESS"
+    );
+    releaseFirst();
+    assert.equal(await first, "first");
+  } finally {
+    setRedisClient(null);
+    _joinChainsForTest.delete("redis-u");
+  }
+});

@@ -3,7 +3,7 @@ const assert = require('node:assert/strict');
 const TrixGame = require('../games/trix/TrixGame');
 
 // Builds a 4-player Trix game with bot timer disabled.
-function mkGame() {
+async function mkGame() {
   const game = new TrixGame('score_e2e_room', { mongoTableId: 'test' });
   for (let i = 0; i < 4; i += 1) {
     game.players.push({
@@ -15,7 +15,8 @@ function mkGame() {
       chips: 1000,
     });
   }
-  game.startGame();
+  game.applyCosmeticsToPlayers = async () => {};
+  await game.startGame();
   game.clearBotTimer();
   game.clearTurnTimer();
   return game;
@@ -52,8 +53,8 @@ function play(game, rank, suit) {
   return r;
 }
 
-test('Diamonds e2e — winner of a trick with 2 diamonds loses 20', () => {
-  const game = mkGame();
+test('Diamonds e2e — winner of a trick with 2 diamonds loses 20', async () => {
+  const game = await mkGame();
   startContract(game, 'Diamonds');
   game.gameState.turnPlayerIndex = 0;
   game.gameState.leadingSuit = null;
@@ -77,8 +78,8 @@ test('Diamonds e2e — winner of a trick with 2 diamonds loses 20', () => {
   game.destroy();
 });
 
-test('Tricks e2e — winner of one trick loses 15', () => {
-  const game = mkGame();
+test('Tricks e2e — winner of one trick loses 15', async () => {
+  const game = await mkGame();
   startContract(game, 'Tricks');
   game.gameState.turnPlayerIndex = 0;
   game.gameState.leadingSuit = null;
@@ -99,8 +100,8 @@ test('Tricks e2e — winner of one trick loses 15', () => {
   game.destroy();
 });
 
-test('Queens e2e — taking a queen loses 25', () => {
-  const game = mkGame();
+test('Queens e2e — taking a queen loses 25', async () => {
+  const game = await mkGame();
   startContract(game, 'Queens');
   game.gameState.turnPlayerIndex = 0;
   game.gameState.leadingSuit = null;
@@ -120,8 +121,8 @@ test('Queens e2e — taking a queen loses 25', () => {
   game.destroy();
 });
 
-test('KingOfHearts e2e — taking K of hearts loses 75', () => {
-  const game = mkGame();
+test('KingOfHearts e2e — taking K of hearts loses 75', async () => {
+  const game = await mkGame();
   startContract(game, 'KingOfHearts');
   game.gameState.turnPlayerIndex = 0;
   game.gameState.leadingSuit = null;
@@ -141,8 +142,8 @@ test('KingOfHearts e2e — taking K of hearts loses 75', () => {
   game.destroy();
 });
 
-test('Trix e2e — finish order awards 200/150/100/50', () => {
-  const game = mkGame();
+test('Trix e2e — finish order awards 200/150/100/50', async () => {
+  const game = await mkGame();
   startContract(game, 'Trix');
   game.gameState.turnPlayerIndex = 0;
   game.gameState.players[0].hand = [card('J', 'Spades')];

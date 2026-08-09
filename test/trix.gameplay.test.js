@@ -5,7 +5,7 @@ const GameManager = require("../games/trix/managers/GameManager");
 const RoundManager = require("../games/trix/managers/RoundManager");
 const ScoreManager = require("../games/trix/managers/ScoreManager");
 
-function mkGame() {
+async function mkGame() {
   const game = new TrixGame("test_room", { mongoTableId: "test" });
   for (let i = 0; i < 4; i += 1) {
     game.players.push({
@@ -17,7 +17,8 @@ function mkGame() {
       chips: 1000,
     });
   }
-  game.startGame();
+  game.applyCosmeticsToPlayers = async () => {};
+  await game.startGame();
   game.clearBotTimer();
   return game;
 }
@@ -31,8 +32,8 @@ function selectGame(game, gameType) {
   assert.equal(r.success, true, r.reason);
 }
 
-test("Diamonds — penalizes diamond cards taken", () => {
-  const game = mkGame();
+test("Diamonds — penalizes diamond cards taken", async () => {
+  const game = await mkGame();
   selectGame(game, "Diamonds");
   const diamond = { rank: "7", suit: "Diamonds", value: 7 };
   game.gameState.players[0].takenCards = [diamond];
@@ -44,8 +45,8 @@ test("Diamonds — penalizes diamond cards taken", () => {
   game.destroy();
 });
 
-test("Queens — penalizes queens taken", () => {
-  const game = mkGame();
+test("Queens — penalizes queens taken", async () => {
+  const game = await mkGame();
   selectGame(game, "Queens");
   const queen = { rank: "Q", suit: "Spades", value: 12 };
   game.gameState.players[0].takenCards = [queen];
@@ -57,8 +58,8 @@ test("Queens — penalizes queens taken", () => {
   game.destroy();
 });
 
-test("KingOfHearts — penalizes K of hearts", () => {
-  const game = mkGame();
+test("KingOfHearts — penalizes K of hearts", async () => {
+  const game = await mkGame();
   selectGame(game, "KingOfHearts");
   game.gameState.players[1].takenCards = [{ rank: "K", suit: "Hearts", value: 13 }];
   game.gameState.players.forEach((p) => {
@@ -69,8 +70,8 @@ test("KingOfHearts — penalizes K of hearts", () => {
   game.destroy();
 });
 
-test("Tricks — penalizes tricks won", () => {
-  const game = mkGame();
+test("Tricks — penalizes tricks won", async () => {
+  const game = await mkGame();
   selectGame(game, "Tricks");
   game.gameState.players[2].takenCards = Array.from({ length: 8 }, (_, i) => ({
     rank: "2",
@@ -85,8 +86,8 @@ test("Tricks — penalizes tricks won", () => {
   game.destroy();
 });
 
-test("Trix — awards finish order points", () => {
-  const game = mkGame();
+test("Trix — awards finish order points", async () => {
+  const game = await mkGame();
   selectGame(game, "Trix");
   game.gameState.finishedPlayers = [0, 2, 1];
   game.gameState.players.forEach((p) => {
@@ -100,8 +101,8 @@ test("Trix — awards finish order points", () => {
   game.destroy();
 });
 
-test("20-round king rotation — advances king after 5 games", () => {
-  const game = mkGame();
+test("20-round king rotation — advances king after 5 games", async () => {
+  const game = await mkGame();
   const startKing = game.gameState.currentKingIndex;
   for (let round = 0; round < 5; round += 1) {
     const available = RoundManager.getAvailableGames(game.gameState, game.gameState.currentKingIndex);
@@ -117,8 +118,8 @@ test("20-round king rotation — advances king after 5 games", () => {
   game.destroy();
 });
 
-test("bot-timer game_end triggers afterMove gameEnded", () => {
-  const game = mkGame();
+test("bot-timer game_end triggers afterMove gameEnded", async () => {
+  const game = await mkGame();
   let gameEnded = false;
   game.setAfterMoveListener((r) => {
     if (r.gameEnded) gameEnded = true;
@@ -131,8 +132,8 @@ test("bot-timer game_end triggers afterMove gameEnded", () => {
   game.destroy();
 });
 
-test("resolveTrick stores lastTrick before clearing tableCards", () => {
-  const game = mkGame();
+test("resolveTrick stores lastTrick before clearing tableCards", async () => {
+  const game = await mkGame();
   selectGame(game, "Tricks");
   const gs = game.gameState;
   const card = (rank, suit, value) => ({ rank, suit, value });

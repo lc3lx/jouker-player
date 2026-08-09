@@ -2,7 +2,7 @@ const test = require("node:test");
 const assert = require("node:assert/strict");
 const TrixGame = require("../games/trix/TrixGame");
 
-function mkGame() {
+async function mkGame() {
   const game = new TrixGame("conc", { mongoTableId: "conc" });
   for (let i = 0; i < 4; i += 1) {
     game.players.push({
@@ -14,15 +14,16 @@ function mkGame() {
       chips: 1000,
     });
   }
-  game.startGame();
+  game.applyCosmeticsToPlayers = async () => {};
+  await game.startGame();
   game.clearBotTimer();
   const king = game.gameState.currentKingIndex;
   game.applyMove(king, "select_game", { gameType: "Tricks", moveId: "init_sel" });
   return game;
 }
 
-test("duplicate moveId returns duplicate without double-playing", () => {
-  const game = mkGame();
+test("duplicate moveId returns duplicate without double-playing", async () => {
+  const game = await mkGame();
   try {
     const idx = game.gameState.turnPlayerIndex;
     const hand = game.gameState.players[idx].hand;
@@ -45,8 +46,8 @@ test("duplicate moveId returns duplicate without double-playing", () => {
   }
 });
 
-test("stale play_card rejected when not your turn", () => {
-  const game = mkGame();
+test("stale play_card rejected when not your turn", async () => {
+  const game = await mkGame();
   try {
     const turn = game.gameState.turnPlayerIndex;
     const notTurn = (turn + 1) % 4;
@@ -62,8 +63,8 @@ test("stale play_card rejected when not your turn", () => {
   }
 });
 
-test("duplicate select_game moveId is idempotent", () => {
-  const game = mkGame();
+test("duplicate select_game moveId is idempotent", async () => {
+  const game = await mkGame();
   try {
     game.state = "selecting_game";
     game.gameState.currentGameType = null;

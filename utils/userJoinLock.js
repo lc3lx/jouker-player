@@ -9,7 +9,7 @@ function setRedisClient(client) {
 }
 
 function keyFor(userId) {
-  return `poker:join:user:${String(userId)}`;
+  return `table:join:user:${String(userId)}`;
 }
 
 async function releaseDistributedLock(key, token) {

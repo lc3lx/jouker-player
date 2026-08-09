@@ -292,6 +292,30 @@ async function recordVacatedBotSeat({ tableId, userId, seatIndex, chips, playerI
     }
     await table.save({ session });
   });
+  // #region agent log
+  try {
+    const { agentDebugLog } = require("../utils/agentDebugLog");
+    const after = await Table.findById(tid).select("seats.user seats.chips vacatingPlayers");
+    const stillSeated = (after?.seats || []).some(
+      (s) => s.user && String(s.user) === uid
+    );
+    agentDebugLog(
+      "A",
+      "tarneeb41BotSeatService.js:recordVacatedBotSeat",
+      "tarneeb vacate AFTER — seats.user still present?",
+      {
+        tableId: tid,
+        userId: uid,
+        seatIndex,
+        stillSeated,
+        seatCount: after?.seats?.length ?? 0,
+        vacatingCount: after?.vacatingPlayers?.length ?? 0,
+      }
+    );
+  } catch (_) {
+    /* ignore */
+  }
+  // #endregion
 }
 
 async function notifyBotSeatAvailable(nsp, tableId, seatIndex) {

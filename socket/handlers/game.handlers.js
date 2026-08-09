@@ -35,12 +35,21 @@ const kingArthSeedRotation = require("../../games/dice/kingArthSeedRotation");
 const { recordSpin, recordBigWin } = require("../../games/dice/kingArthRtp");
 const { recordSpinAnalytics } = require("../../games/dice/kingArthAnalytics");
 const kingArthJackpot = require("../../games/dice/kingArthJackpot");
+const { codeForReason } = require("../../engine/errors/ErrorCodes");
 
 // King Arth (Zeus) uses the shared app-coin economy, same as the other
 // mini-games (Poseidon/Golden Tree): min bet 10,000 coins.
 const DICE_MIN_BET = 10000;
 const DICE_MAX_BET = 1000000000;
 const BET_EPS = 1e-4;
+
+/** Additive `{ reason, code }` on every invalid_move (clients may ignore code). */
+function emitInvalidMove(socket, reason, extra = {}) {
+  const r = reason == null ? "invalid_action" : String(reason);
+  emitInvalidMove(socket, r, { code: codeForReason(r),
+    ...extra,
+   });
+}
 
 function sanitizeVolatility(raw) {
   const s = String(raw || "medium").toLowerCase();
@@ -497,7 +506,7 @@ function registerGameHandlers(nsp, jwtVerify) {
   nsp.on("connection", (socket) => {
     const userId = socket.user?.id || socket.userId;
     if (!userId) {
-      socket.emit("invalid_move", { reason: "authentication_required" });
+      emitInvalidMove(socket, "authentication_required" );
       return;
     }
 
@@ -527,7 +536,7 @@ function registerGameHandlers(nsp, jwtVerify) {
       try {
         const { tableId } = payload || {};
         if (!tableId) {
-          socket.emit("invalid_move", { reason: "tableId required" });
+          emitInvalidMove(socket, "tableId required" );
           return;
         }
         lifecycleAudit("JOIN", { gameType: "trix", tableId: String(tableId), userId });
@@ -536,17 +545,17 @@ function registerGameHandlers(nsp, jwtVerify) {
           select: "name country profileImg",
         });
         if (!table) {
-          socket.emit("invalid_move", { reason: "table_not_found" });
+          emitInvalidMove(socket, "table_not_found" );
           return;
         }
         if (table.gameType !== "trix") {
-          socket.emit("invalid_move", { reason: "not_trix_table" });
+          emitInvalidMove(socket, "not_trix_table" );
           return;
         }
         const userIdStr = String(userId);
         const seated = table.seats.some((s) => seatUserId(s) === userIdStr);
         if (!seated) {
-          socket.emit("invalid_move", { reason: "not_seated_at_table" });
+          emitInvalidMove(socket, "not_seated_at_table" );
           return;
         }
         matchMaker.dequeue("trix", userId);
@@ -571,14 +580,28 @@ function registerGameHandlers(nsp, jwtVerify) {
             userId,
             nsp,
           });
-          socket.emit("invalid_move", { reason: "reconnect_expired" });
+          emitInvalidMove(socket, "reconnect_expired" );
           return;
         }
 
         await game.syncLobbyFromTable(table, (uid) => roomManager.getTrixUserSocket(String(uid)));
         await game.applyCosmeticsToPlayers();
         if (!game.gameState) {
-          game.startGame();
+          try {
+            await game.startGame();
+          } catch (startErr) {
+            logger.error("trix_start_game_failed", {
+              tableId: String(table._id),
+              userId: userIdStr,
+              err: startErr?.message || String(startErr),
+            });
+            emitInvalidMove(socket, "join_trix_failed");
+            return;
+          }
+        }
+        if (!game.gameState) {
+          emitInvalidMove(socket, "join_trix_failed");
+          return;
         }
         let seatIndex = game.getPlayerIndex(userId);
         if (seatIndex < 0) {
@@ -610,7 +633,7 @@ function registerGameHandlers(nsp, jwtVerify) {
           seatIndex = game.getPlayerIndex(userId);
         }
         if (seatIndex < 0) {
-          socket.emit("invalid_move", { reason: "join_trix_failed" });
+          emitInvalidMove(socket, "join_trix_failed" );
           return;
         }
         socket.join(`trix:${tableId}`);
@@ -635,7 +658,7 @@ function registerGameHandlers(nsp, jwtVerify) {
         }
         broadcastTrixTableState(nsp, String(table._id));
       } catch (err) {
-        socket.emit("invalid_move", { reason: "join_trix_failed" });
+        emitInvalidMove(socket, "join_trix_failed" );
       }
     });
 
@@ -644,7 +667,7 @@ function registerGameHandlers(nsp, jwtVerify) {
       try {
         const { tableId } = payload || {};
         if (!tableId) {
-          socket.emit("invalid_move", { reason: "tableId required" });
+          emitInvalidMove(socket, "tableId required" );
           return;
         }
         lifecycleAudit("JOIN", { gameType: "tarneeb41", tableId: String(tableId), userId });
@@ -653,17 +676,17 @@ function registerGameHandlers(nsp, jwtVerify) {
           select: "name country profileImg",
         });
         if (!table) {
-          socket.emit("invalid_move", { reason: "table_not_found" });
+          emitInvalidMove(socket, "table_not_found" );
           return;
         }
         if (table.gameType !== "tarneeb41") {
-          socket.emit("invalid_move", { reason: "not_tarneeb41_table" });
+          emitInvalidMove(socket, "not_tarneeb41_table" );
           return;
         }
         const userIdStr = String(userId);
         const seated = table.seats.some((s) => seatUserId(s) === userIdStr);
         if (!seated) {
-          socket.emit("invalid_move", { reason: "not_seated_at_table" });
+          emitInvalidMove(socket, "not_seated_at_table" );
           return;
         }
         matchMaker.dequeue("tarneeb41", userId);
@@ -701,7 +724,7 @@ function registerGameHandlers(nsp, jwtVerify) {
         }
         if (seatIndex < 0) {
           if (!game.needsInitialDeal()) {
-            socket.emit("invalid_move", { reason: "join_tarneeb41_failed" });
+            emitInvalidMove(socket, "join_tarneeb41_failed" );
             return;
           }
           // Discard the stale in-memory game and rebuild from Mongo — but
@@ -717,7 +740,7 @@ function registerGameHandlers(nsp, jwtVerify) {
           seatIndex = game.getPlayerIndex(userId);
         }
         if (seatIndex < 0) {
-          socket.emit("invalid_move", { reason: "join_tarneeb41_failed" });
+          emitInvalidMove(socket, "join_tarneeb41_failed" );
           return;
         }
         if (game.isReadyForCountdown() && !game.isCountdownActive()) {
@@ -745,7 +768,7 @@ function registerGameHandlers(nsp, jwtVerify) {
         }
         broadcastTarneeb41TableState(nsp, String(table._id));
       } catch (err) {
-        socket.emit("invalid_move", { reason: "join_tarneeb41_failed" });
+        emitInvalidMove(socket, "join_tarneeb41_failed" );
       }
     });
 
@@ -755,7 +778,7 @@ function registerGameHandlers(nsp, jwtVerify) {
       let result = matchMaker.enqueue(gameType, userId, socket.id);
       if (result && typeof result.then === "function") result = await result;
       if (result.error) {
-        socket.emit("invalid_move", { reason: result.error });
+        emitInvalidMove(socket, result.error );
         return;
       }
       if (result.waiting) {
@@ -1199,18 +1222,18 @@ function registerGameHandlers(nsp, jwtVerify) {
       const { roomId, value } = payload || {};
       const room = roomManager.getRoomByUser(userId);
       if (!room || String(room.roomId) !== String(roomId)) {
-        socket.emit("invalid_move", { reason: "not_in_room" });
+        emitInvalidMove(socket, "not_in_room" );
         return;
       }
       const game = room.gameInstance;
       const guard = ActionPipeline.run({ userId, game, requireRunning: false });
       if (!guard.ok) {
-        socket.emit("invalid_move", { reason: guard.reason, code: guard.code });
+        emitInvalidMove(socket, guard.reason, { code: guard.code });
         return;
       }
       const result = game.applyMove(guard.playerIndex, "bid", { value });
       if (!result.success) {
-        socket.emit("invalid_move", { reason: result.reason });
+        emitInvalidMove(socket, result.reason );
         return;
       }
       broadcastGameState(nsp, roomId);
@@ -1221,19 +1244,19 @@ function registerGameHandlers(nsp, jwtVerify) {
       const { roomId, trump } = payload || {};
       const room = roomManager.getRoomByUser(userId);
       if (!room || String(room.roomId) !== String(roomId)) {
-        socket.emit("invalid_move", { reason: "not_in_room" });
+        emitInvalidMove(socket, "not_in_room" );
         return;
       }
       const game = room.gameInstance;
       if (!game || !game.chooseTrump) return;
       const guard = ActionPipeline.run({ userId, game, requireRunning: false });
       if (!guard.ok) {
-        socket.emit("invalid_move", { reason: guard.reason, code: guard.code });
+        emitInvalidMove(socket, guard.reason, { code: guard.code });
         return;
       }
       const ok = game.chooseTrump(guard.playerIndex, trump);
       if (!ok) {
-        socket.emit("invalid_move", { reason: "invalid_trump" });
+        emitInvalidMove(socket, "invalid_trump" );
         return;
       }
       broadcastGameState(nsp, roomId);
@@ -1244,12 +1267,12 @@ function registerGameHandlers(nsp, jwtVerify) {
       const { roomId, gameType } = payload || {};
       const ctx = resolveGameContext(userId, roomId);
       if (!ctx?.game) {
-        socket.emit("invalid_move", { reason: "not_in_room" });
+        emitInvalidMove(socket, "not_in_room" );
         return;
       }
       const guard = ActionPipeline.run({ userId, game: ctx.game, requireRunning: false });
       if (!guard.ok) {
-        socket.emit("invalid_move", { reason: guard.reason, code: guard.code });
+        emitInvalidMove(socket, guard.reason, { code: guard.code });
         return;
       }
       const result = ctx.game.applyMove(guard.playerIndex, "select_game", {
@@ -1257,7 +1280,7 @@ function registerGameHandlers(nsp, jwtVerify) {
         moveId: payload && payload.moveId,
       });
       if (!result.success) {
-        socket.emit("invalid_move", { reason: result.reason });
+        emitInvalidMove(socket, result.reason );
         return;
       }
       if (ctx.type === "trix") {
@@ -1270,12 +1293,12 @@ function registerGameHandlers(nsp, jwtVerify) {
       const { roomId, value } = payload || {};
       const ctx = resolveGameContext(userId, roomId);
       if (!ctx?.game || ctx.type !== "tarneeb41") {
-        socket.emit("invalid_move", { reason: "not_in_room" });
+        emitInvalidMove(socket, "not_in_room" );
         return;
       }
       const guard = ActionPipeline.run({ userId, game: ctx.game, requireRunning: false });
       if (!guard.ok) {
-        socket.emit("invalid_move", { reason: guard.reason, code: guard.code });
+        emitInvalidMove(socket, guard.reason, { code: guard.code });
         return;
       }
       const result = ctx.game.applyMove(guard.playerIndex, "tarneeb41_declare", {
@@ -1283,7 +1306,7 @@ function registerGameHandlers(nsp, jwtVerify) {
         moveId: payload && payload.moveId,
       });
       if (!result.success) {
-        socket.emit("invalid_move", { reason: result.reason });
+        emitInvalidMove(socket, result.reason );
         return;
       }
     });
@@ -1293,13 +1316,13 @@ function registerGameHandlers(nsp, jwtVerify) {
       const { roomId, card } = payload || {};
       const ctx = resolveGameContext(userId, roomId);
       if (!ctx?.game) {
-        socket.emit("invalid_move", { reason: "not_in_room" });
+        emitInvalidMove(socket, "not_in_room" );
         return;
       }
       const game = ctx.game;
       const guard = ActionPipeline.run({ userId, game, requireRunning: true });
       if (!guard.ok) {
-        socket.emit("invalid_move", { reason: guard.reason, code: guard.code });
+        emitInvalidMove(socket, guard.reason, { code: guard.code });
         return;
       }
       const result = game.applyMove(guard.playerIndex, "play_card", {
@@ -1307,7 +1330,7 @@ function registerGameHandlers(nsp, jwtVerify) {
         moveId: payload && payload.moveId,
       });
       if (!result.success) {
-        socket.emit("invalid_move", { reason: result.reason });
+        emitInvalidMove(socket, result.reason );
         return;
       }
       if (ctx.type === "tarneeb41") {
@@ -1359,12 +1382,12 @@ function registerGameHandlers(nsp, jwtVerify) {
       const { roomId } = payload || {};
       const ctx = resolveGameContext(userId, roomId);
       if (!ctx?.game) {
-        socket.emit("invalid_move", { reason: "not_in_room", code: "ERR_NOT_SEATED" });
+        emitInvalidMove(socket, "not_in_room", { code: "ERR_NOT_SEATED"  });
         return;
       }
       const guard = ActionPipeline.run({ userId, game: ctx.game, requireRunning: false });
       if (!guard.ok) {
-        socket.emit("invalid_move", { reason: guard.reason, code: guard.code });
+        emitInvalidMove(socket, guard.reason, { code: guard.code });
         return;
       }
       let ok = false;
@@ -1385,12 +1408,12 @@ function registerGameHandlers(nsp, jwtVerify) {
       const { roomId } = payload || {};
       const t41 = roomManager.getTarneeb41TableIdForUser(userId);
       if (!t41 || (roomId && String(t41) !== String(roomId))) {
-        socket.emit("invalid_move", { reason: "not_in_tarneeb41_room" });
+        emitInvalidMove(socket, "not_in_tarneeb41_room" );
         return;
       }
       const game = roomManager.getTarneeb41GameForTable(t41);
       if (!game) {
-        socket.emit("invalid_move", { reason: "game_not_found" });
+        emitInvalidMove(socket, "game_not_found" );
         return;
       }
       if (game.state !== "waiting") {
@@ -1416,6 +1439,19 @@ function registerGameHandlers(nsp, jwtVerify) {
           }
         }
       };
+      // #region agent log
+      const { agentDebugLog } = require("../../utils/agentDebugLog");
+      const t41Peek = roomManager.getTarneeb41TableIdForUser(userId);
+      const trixPeek = roomManager.getTrixTableIdForUser(userId);
+      agentDebugLog("B", "game.handlers.js:leave_room:entry", "leave_room received", {
+        userId: String(userId),
+        roomId: roomId ? String(roomId) : null,
+        hasT41Map: !!t41Peek,
+        hasTrixMap: !!trixPeek,
+        t41Peek: t41Peek ? String(t41Peek) : null,
+        trixPeek: trixPeek ? String(trixPeek) : null,
+      });
+      // #endregion
       const t41 = roomManager.getTarneeb41TableIdForUser(userId);
       if (roomId && t41 && String(t41) === String(roomId)) {
         lifecycleAudit("LEAVE", { gameType: "tarneeb41", tableId: String(t41), userId });
@@ -1429,6 +1465,12 @@ function registerGameHandlers(nsp, jwtVerify) {
           nsp,
         });
         const game = roomManager.getTarneeb41GameForTable(t41);
+        // #region agent log
+        agentDebugLog("B", "game.handlers.js:leave_room:t41", "leave_room tarneeb path ack ok", {
+          userId: String(userId),
+          tableId: String(t41),
+        });
+        // #endregion
         respond({ ok: true, tableId: String(t41), stateRevision: game?.stateRevision });
         return;
       }
@@ -1445,6 +1487,12 @@ function registerGameHandlers(nsp, jwtVerify) {
           nsp,
         });
         const game = roomManager.getTrixGameForTable(trixId);
+        // #region agent log
+        agentDebugLog("B", "game.handlers.js:leave_room:trix", "leave_room trix path ack ok", {
+          userId: String(userId),
+          tableId: String(trixId),
+        });
+        // #endregion
         respond({ ok: true, tableId: String(trixId), stateRevision: game?.stateRevision });
         return;
       }
@@ -1454,6 +1502,13 @@ function registerGameHandlers(nsp, jwtVerify) {
         matchMaker.dequeue("tarneeb", userId);
         matchMaker.dequeue("trix", userId);
       }
+      // #region agent log
+      agentDebugLog("B", "game.handlers.js:leave_room:noop", "leave_room FALSE OK — no card-table mapping", {
+        userId: String(userId),
+        roomId: roomId ? String(roomId) : null,
+        removedLegacyRoom: !!r,
+      });
+      // #endregion
       respond({ ok: true });
     });
 

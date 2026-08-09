@@ -58,8 +58,22 @@ async function findUserActiveTableAnywhere(userId, excludeTableId = null) {
   const filter = excludeTableId
     ? { ...baseFilter, _id: { $ne: excludeTableId } }
     : baseFilter;
-  const mongoHit = await Table.findOne(filter).select("gameType tier tableNumber status");
+  const mongoHit = await Table.findOne(filter).select("gameType tier tableNumber status seats.user vacatingPlayers");
   if (mongoHit) {
+    // #region agent log
+    const { agentDebugLog } = require("../utils/agentDebugLog");
+    const seated = (mongoHit.seats || []).some(
+      (s) => s.user && String(s.user) === String(userId)
+    );
+    agentDebugLog("E", "tableAllocationService.js:findUserActiveTableAnywhere", "ACTIVE TABLE HIT blocks join", {
+      userId: String(userId),
+      tableId: String(mongoHit._id),
+      gameType: mongoHit.gameType,
+      status: mongoHit.status,
+      seatedOnSeatsUser: seated,
+      excludeTableId: excludeTableId ? String(excludeTableId) : null,
+    });
+    // #endregion
     return { tableId: String(mongoHit._id), gameType: mongoHit.gameType, tier: mongoHit.tier };
   }
 

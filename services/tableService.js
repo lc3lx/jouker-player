@@ -612,7 +612,9 @@ exports.createTable = asyncHandler(async (req, res) => {
 exports.joinTable = asyncHandler(async (req, res, next) => {
   // Serialize a user's concurrent joins so the one-table gate below and the
   // later seat-write can't both fire for the same user at two tables (TOCTOU).
-  return withUserJoinLock(req.user._id, async () => {
+  // Redis NX (when configured) extends the same guarantee across API nodes.
+  try {
+    return await withUserJoinLock(req.user._id, async () => {
   let { id } = req.params;
   const buyIn = Number(req.body.buyIn || 0);
   const password = req.body.password;
@@ -1090,6 +1092,16 @@ exports.joinTable = asyncHandler(async (req, res, next) => {
     },
   });
   });
+  } catch (e) {
+    if (e && e.code === "JOIN_IN_PROGRESS") {
+      return next(
+        new ApiError("Join already in progress", 429, {
+          code: "JOIN_IN_PROGRESS",
+        })
+      );
+    }
+    throw e;
+  }
 });
 
 // Leave a table (protected)

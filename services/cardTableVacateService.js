@@ -203,6 +203,14 @@ async function releaseTrixMongoSeatOnVacate(tableId, userId) {
     await table.save({ session });
     released = true;
   });
+  // #region agent log
+  const { agentDebugLog } = require("../utils/agentDebugLog");
+  agentDebugLog("A", "cardTableVacateService.js:releaseTrixMongoSeat", "trix seat release result", {
+    tableId: String(tableId),
+    userId: String(userId),
+    released,
+  });
+  // #endregion
   if (!released) return false;
   emitTablesUpdated({
     gameType: "trix",
@@ -215,12 +223,31 @@ async function releaseTrixMongoSeatOnVacate(tableId, userId) {
 async function finalizeCardTableVacate({ gameType, tableId, userId, nsp }) {
   const game = getGame(gameType, tableId);
   const player = findHumanPlayer(game, userId);
+  // #region agent log
+  const { agentDebugLog } = require("../utils/agentDebugLog");
+  agentDebugLog("C", "cardTableVacateService.js:finalize", "finalizeCardTableVacate entry", {
+    gameType,
+    tableId: String(tableId),
+    userId: String(userId),
+    hasGame: !!game,
+    hasHumanPlayer: !!player,
+    withinGrace: !!player && isWithinVacateGrace(player),
+    reconnectDeadline: player?.reconnectDeadline || null,
+  });
+  // #endregion
   if (!player) {
     await abandonCardTableIfNoHumans(nsp, gameType, tableId);
     return;
   }
 
   if (isWithinVacateGrace(player)) {
+    // #region agent log
+    agentDebugLog("C", "cardTableVacateService.js:finalize:grace", "finalize EARLY RETURN within grace", {
+      gameType,
+      tableId: String(tableId),
+      userId: String(userId),
+    });
+    // #endregion
     return;
   }
 

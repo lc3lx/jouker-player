@@ -63,6 +63,8 @@ class TrixGame extends BaseGameEngine {
     this._lastSettlementPayload = null;
     this._finishedAt = null;
     this._settlementCompleted = false;
+    /** @type {Promise<boolean>|null} single-flight guard for concurrent startGame */
+    this._startPromise = null;
   }
 
   setStateChangedListener(listener) {
@@ -484,7 +486,22 @@ class TrixGame extends BaseGameEngine {
     }
   }
 
+  /**
+   * Idempotent + single-flight: concurrent join handlers share one start, and
+   * callers that already have gameState get an immediate success.
+   */
   async startGame() {
+    if (this.gameState) return true;
+    if (this._startPromise) return this._startPromise;
+    this._startPromise = this._startGameInternal().finally(() => {
+      this._startPromise = null;
+    });
+    return this._startPromise;
+  }
+
+  async _startGameInternal() {
+    if (this.gameState) return true;
+
     this.sessionId = crypto.randomUUID();
     this._settlementTriggered = false;
     this._lastSettlementPayload = null;

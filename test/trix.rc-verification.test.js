@@ -3,7 +3,7 @@ const assert = require("node:assert/strict");
 const TrixGame = require("../games/trix/TrixGame");
 const roomManager = require("../rooms/roomManager");
 
-function mkGame({ tableId = "rc_trix" } = {}) {
+async function mkGame({ tableId = "rc_trix" } = {}) {
   const game = new TrixGame(`room_${tableId}`, { mongoTableId: tableId });
   for (let i = 0; i < 4; i += 1) {
     game.players.push({
@@ -15,7 +15,8 @@ function mkGame({ tableId = "rc_trix" } = {}) {
       chips: 1000,
     });
   }
-  game.startGame();
+  game.applyCosmeticsToPlayers = async () => {};
+  await game.startGame();
   game.clearBotTimer();
   return game;
 }
@@ -35,8 +36,8 @@ function simulateReconnect(game, userId, newSocketId) {
   return { seatIndex, state, restarted: game.needsInitialDeal() };
 }
 
-test("reconnect during selecting_game preserves state", () => {
-  const game = mkGame();
+test("reconnect during selecting_game preserves state", async () => {
+  const game = await mkGame();
   try {
     assert.equal(game.state, "selecting_game");
     const beforeKing = game.gameState.currentKingIndex;
@@ -51,8 +52,8 @@ test("reconnect during selecting_game preserves state", () => {
   }
 });
 
-test("reconnect during playing restores hand and trick", () => {
-  const game = mkGame();
+test("reconnect during playing restores hand and trick", async () => {
+  const game = await mkGame();
   try {
     const king = game.gameState.currentKingIndex;
     game.applyMove(king, "select_game", {
@@ -76,8 +77,8 @@ test("reconnect during playing restores hand and trick", () => {
   }
 });
 
-test("reconnect during round_end preserves scores", () => {
-  const game = mkGame();
+test("reconnect during round_end preserves scores", async () => {
+  const game = await mkGame();
   try {
     game.state = "round_end";
     game.gameState.scores = [10, 20, 30, 40];
@@ -89,8 +90,8 @@ test("reconnect during round_end preserves scores", () => {
   }
 });
 
-test("reconnect during game_end preserves final scores", () => {
-  const game = mkGame();
+test("reconnect during game_end preserves final scores", async () => {
+  const game = await mkGame();
   try {
     game.state = "game_end";
     game.gameState.scores = [500, 400, 300, 200];
@@ -103,8 +104,8 @@ test("reconnect during game_end preserves final scores", () => {
   }
 });
 
-test("reconnect does not restart in-progress game", () => {
-  const game = mkGame();
+test("reconnect does not restart in-progress game", async () => {
+  const game = await mkGame();
   try {
     const sessionBefore = game.sessionId;
     game.applyMove(game.gameState.currentKingIndex, "select_game", {

@@ -14,6 +14,8 @@
     "seed:house-wallet": "node scripts/seedHouseWallet.js",
     "seed:bots": "node scripts/seedBots.js",
     "test:unit": "node --test test",
+    "test:trix-gate": "node scripts/chaos/trix-staging-gate.js",
+    "chaos:trix": "node scripts/chaos/lifecycle-chaos.js",
     "test:golden-tree": "node --test test/goldenTree.test.js",
     "test:king-earth": "node --test test/kingEarth.test.js",
     "rtp:king-earth": "node test/kingEarth.rtp.js",

@@ -2,7 +2,7 @@ const test = require("node:test");
 const assert = require("node:assert/strict");
 const TrixGame = require("../games/trix/TrixGame");
 
-function mkGame() {
+async function mkGame() {
   const game = new TrixGame("iso", { mongoTableId: "iso" });
   for (let i = 0; i < 4; i += 1) {
     game.players.push({
@@ -14,7 +14,8 @@ function mkGame() {
       chips: 1000,
     });
   }
-  game.startGame();
+  game.applyCosmeticsToPlayers = async () => {};
+  await game.startGame();
   game.clearBotTimer();
   return game;
 }
@@ -25,8 +26,8 @@ function assertNoRealCards(hand) {
   }
 }
 
-test("getGameState masks opponent hands", () => {
-  const game = mkGame();
+test("getGameState masks opponent hands", async () => {
+  const game = await mkGame();
   try {
     for (let viewer = 0; viewer < 4; viewer += 1) {
       const state = game.getGameState(viewer);
@@ -44,8 +45,8 @@ test("getGameState masks opponent hands", () => {
   }
 });
 
-test("getGameState never exposes deck or takenCards", () => {
-  const game = mkGame();
+test("getGameState never exposes deck or takenCards", async () => {
+  const game = await mkGame();
   try {
     game.gameState.players[0].takenCards = [{ rank: "K", suit: "Hearts", value: 13 }];
     const state = game.getGameState(1);
@@ -57,8 +58,8 @@ test("getGameState never exposes deck or takenCards", () => {
   }
 });
 
-test("validCards only for requesting player", () => {
-  const game = mkGame();
+test("validCards only for requesting player", async () => {
+  const game = await mkGame();
   try {
     const king = game.gameState.currentKingIndex;
     game.applyMove(king, "select_game", { gameType: "Trix", moveId: "iso_trix" });
