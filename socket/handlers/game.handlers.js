@@ -22,6 +22,7 @@ const { emitTablesUpdated } = require("../../utils/lobbyRealtime");
 const {
   scheduleCardTableVacate,
   finalizeCardTableVacateNow,
+  intentionalLeaveCardTable,
   onCardTableRejoin,
 } = require("../../services/cardTableVacateService");
 const logger = require("../../utils/logger");
@@ -1461,7 +1462,7 @@ function registerGameHandlers(nsp, jwtVerify) {
         roomManager.deleteTarneeb41UserSocket(userId);
         socket.leave(`tarneeb41:${roomId}`);
         matchMaker.dequeue("tarneeb41", userId);
-        await finalizeCardTableVacateNow({
+        await intentionalLeaveCardTable({
           gameType: "tarneeb41",
           tableId: t41,
           userId,
@@ -1474,7 +1475,7 @@ function registerGameHandlers(nsp, jwtVerify) {
           tableId: String(t41),
         });
         // #endregion
-        respond({ ok: true, tableId: String(t41), stateRevision: game?.stateRevision });
+        respond({ ok: true, tableId: String(t41), stateRevision: game?.stateRevision, seatFreed: true });
         return;
       }
       const trixId = roomManager.getTrixTableIdForUser(userId);
@@ -1483,7 +1484,7 @@ function registerGameHandlers(nsp, jwtVerify) {
         roomManager.deleteTrixUserSocket(userId);
         if (roomId) socket.leave(`trix:${roomId}`);
         matchMaker.dequeue("trix", userId);
-        await finalizeCardTableVacateNow({
+        await intentionalLeaveCardTable({
           gameType: "trix",
           tableId: trixId,
           userId,
@@ -1496,7 +1497,7 @@ function registerGameHandlers(nsp, jwtVerify) {
           tableId: String(trixId),
         });
         // #endregion
-        respond({ ok: true, tableId: String(trixId), stateRevision: game?.stateRevision });
+        respond({ ok: true, tableId: String(trixId), stateRevision: game?.stateRevision, seatFreed: true });
         return;
       }
       const r = roomManager.removeUserFromRoom(userId);
@@ -1528,13 +1529,13 @@ function registerGameHandlers(nsp, jwtVerify) {
               userId,
               via: "mongo_fallback",
             });
-            await finalizeCardTableVacateNow({
+            await intentionalLeaveCardTable({
               gameType: table.gameType,
               tableId: rid,
               userId,
               nsp,
             });
-            respond({ ok: true, tableId: rid, via: "mongo_fallback" });
+            respond({ ok: true, tableId: rid, via: "mongo_fallback", seatFreed: true });
             return;
           }
         } catch (err) {

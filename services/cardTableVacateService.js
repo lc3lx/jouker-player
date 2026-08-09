@@ -220,7 +220,7 @@ async function releaseTrixMongoSeatOnVacate(tableId, userId) {
   return true;
 }
 
-async function finalizeCardTableVacate({ gameType, tableId, userId, nsp }) {
+async function finalizeCardTableVacate({ gameType, tableId, userId, nsp, intentional = false }) {
   const game = getGame(gameType, tableId);
   const player = findHumanPlayer(game, userId);
   // #region agent log
@@ -282,6 +282,7 @@ async function finalizeCardTableVacate({ gameType, tableId, userId, nsp }) {
         seatIndex,
         chips: mongoSeat?.chips ?? seatChips,
         playerId,
+        skipVacatingGrace: !!intentional,
       });
       await notifyBotSeatAvailable(nsp, tableId, seatIndex);
     } catch (err) {
@@ -358,13 +359,185 @@ async function finalizeCardTableVacate({ gameType, tableId, userId, nsp }) {
  * Idempotent: if the human is already gone, finalize no-ops / abandons.
  */
 async function finalizeCardTableVacateNow({ gameType, tableId, userId, nsp }) {
-  if (gameType !== "tarneeb41" && gameType !== "trix") return;
+  if (gameType !== "tarneeb41" && gameType !== "trix") return { freed: false };
   // cancel* nulls reconnectDeadline, so finalize won't early-return on grace.
   cancelCardTableVacate({ gameType, tableId, userId });
-  await finalizeCardTableVacate({ gameType, tableId, userId, nsp });
+  await finalizeCardTableVacate({ gameType, tableId, userId, nsp, intentional: true });
   // Intentional leave has NO reconnect grace — purge any vacatingPlayers entry
   // so a stale grace record can never lock the player "active elsewhere".
   await purgeVacatingEntry(tableId, userId);
+  // #region agent log
+  try {
+    const { agentDebugLog } = require("../utils/agentDebugLog");
+    const after = await Table.findById(tableId).select("seats.user vacatingPlayers status");
+    const stillSeated = (after?.seats || []).some(
+      (s) => s.user && String(s.user) === String(userId)
+    );
+    agentDebugLog("LEAVE", "cardTableVacateService.js:finalizeNow", "intentional leave seat check", {
+      gameType,
+      tableId: String(tableId),
+      userId: String(userId),
+      stillSeated,
+      status: after?.status || null,
+    });
+  } catch (_) {}
+  // #endregion
+  return { freed: true };
+}
+
+/**
+ * Product rule: intentional leave ALWAYS frees the Mongo seat.
+ * - Lobby / waiting / between rounds: cash-out chips to balance + splice seat.
+ * - Mid-hand: bot takeover + forfeit lock + splice seat (no reconnect hold).
+ * Caller must re-join via REST to sit again.
+ */
+async function intentionalLeaveCardTable({ gameType, tableId, userId, nsp }) {
+  if (gameType !== "tarneeb41" && gameType !== "trix") {
+    return { ok: false, reason: "not_card_game" };
+  }
+  const tid = String(tableId);
+  const uid = String(userId);
+  const game = getGame(gameType, tid);
+  const liveHuman = findHumanPlayer(game, uid);
+  const midHand =
+    !!liveHuman &&
+    !!game?.state &&
+    !["waiting", "countdown", "game_end"].includes(String(game.state));
+
+  if (midHand) {
+    await finalizeCardTableVacateNow({ gameType, tableId: tid, userId: uid, nsp });
+    // #region agent log
+    try {
+      const { agentDebugLog } = require("../utils/agentDebugLog");
+      const after = await Table.findById(tid).select("seats.user vacatingPlayers");
+      const stillSeated = (after?.seats || []).some(
+        (s) => s.user && String(s.user) === uid
+      );
+      const vacatingActive = (after?.vacatingPlayers || []).some(
+        (v) =>
+          String(v.user) === uid &&
+          v.vacateUntil &&
+          new Date(v.vacateUntil).getTime() > Date.now()
+      );
+      agentDebugLog("H1", "cardTableVacateService.js:intentionalLeave", "mid-hand leave seat check", {
+        gameType,
+        tableId: tid,
+        userId: uid,
+        stillSeated,
+        vacatingActive,
+        mode: "mid_hand_bot_takeover",
+      });
+    } catch (_) {}
+    // #endregion
+    return { ok: true, mode: "mid_hand_bot_takeover", seatFreed: true };
+  }
+
+  // Not mid-hand: cash-out + hard-remove Mongo seat. Sync live lobby from Mongo
+  // (do NOT convert to bot — that would keep a ghost seat in waiting).
+  cancelCardTableVacate({ gameType, tableId: tid, userId: uid });
+  const { withMongoTransaction, releaseTableSeatToBalance } = require("./walletLedgerService");
+  let cashedOut = 0;
+  await withMongoTransaction(async (session) => {
+    const table = await Table.findById(tid).session(session);
+    if (!table || table.gameType !== gameType) return;
+    const idx = (table.seats || []).findIndex(
+      (s) => s.user && String(s.user) === uid
+    );
+    if (idx >= 0) {
+      cashedOut = Number(table.seats[idx].chips) || 0;
+      table.seats.splice(idx, 1);
+    }
+    table.vacatingPlayers = (table.vacatingPlayers || []).filter(
+      (v) => String(v.user) !== uid
+    );
+    if (table.seats.length < table.capacity) {
+      table.status = "open";
+    }
+    await table.save({ session });
+    if (cashedOut > 0) {
+      await releaseTableSeatToBalance({
+        session,
+        userId: uid,
+        tableId: tid,
+        seatChips: cashedOut,
+        meta: { reason: "intentional_leave_cashout", gameType },
+      });
+    }
+  });
+
+  if (gameType === "trix") {
+    roomManager.userToTrixTableId.delete(uid);
+    roomManager.trixUserSocket.delete(uid);
+  } else {
+    roomManager.userToTarneeb41TableId.delete(uid);
+    roomManager.tarneeb41UserSocket.delete(uid);
+  }
+
+  try {
+    const tableDoc = await Table.findById(tid).populate({
+      path: "seats.user",
+      select: "name country profileImg",
+    });
+    if (tableDoc && game) {
+      if (gameType === "tarneeb41") {
+        if (game.state === "countdown" && typeof game.cancelGameCountdown === "function") {
+          game.cancelGameCountdown("seats_changed");
+        }
+        if (
+          (game.state === "waiting" || game.state === "countdown") &&
+          typeof game.syncLobbyFromTable === "function"
+        ) {
+          await game.syncLobbyFromTable(tableDoc, (id) =>
+            roomManager.getTarneeb41UserSocket(String(id))
+          );
+        }
+      } else if (
+        game.state === "waiting" &&
+        typeof game.syncLobbyFromTable === "function"
+      ) {
+        await game.syncLobbyFromTable(tableDoc, (id) =>
+          roomManager.getTrixUserSocket(String(id))
+        );
+      }
+    }
+  } catch (_) {
+    // Fallback: drop human from live roster if refresh unavailable.
+    if (liveHuman && typeof game?.convertHumanToBot === "function") {
+      try {
+        game.convertHumanToBot(uid);
+      } catch (_) {}
+    }
+  }
+
+  emitTablesUpdated({ gameType, reason: "leave", tableId: tid });
+  await abandonCardTableIfNoHumans(nsp, gameType, tid);
+
+  // #region agent log
+  try {
+    const { agentDebugLog } = require("../utils/agentDebugLog");
+    const after = await Table.findById(tid).select("seats.user vacatingPlayers");
+    const stillSeated = (after?.seats || []).some(
+      (s) => s.user && String(s.user) === uid
+    );
+    const vacatingActive = (after?.vacatingPlayers || []).some(
+      (v) =>
+        String(v.user) === uid &&
+        v.vacateUntil &&
+        new Date(v.vacateUntil).getTime() > Date.now()
+    );
+    agentDebugLog("H3", "cardTableVacateService.js:intentionalLeave", "cashout leave done", {
+      gameType,
+      tableId: tid,
+      userId: uid,
+      cashedOut,
+      stillSeated,
+      vacatingActive,
+      midHand: false,
+    });
+  } catch (_) {}
+  // #endregion
+
+  return { ok: true, mode: "cashout", cashedOut, seatFreed: true, chipsReturned: cashedOut };
 }
 
 /**
@@ -412,6 +585,7 @@ module.exports = {
   cancelCardTableVacate,
   finalizeCardTableVacate,
   finalizeCardTableVacateNow,
+  intentionalLeaveCardTable,
   onCardTableRejoin,
   abandonCardTableIfNoHumans,
   isTrixVacateGraceReconnect,

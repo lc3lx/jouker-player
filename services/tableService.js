@@ -9,7 +9,7 @@ const { getTableGameDebugSnapshot, requestLivePokerLeave } = require("../sockets
 const { assertNotTrustRestricted, trackJoinLeaveEvent } = require("./fraudService");
 const { trackEventServerFireAndForget } = require("./analyticsService");
 const { emitTablesUpdated, getMainIo } = require("../utils/lobbyRealtime");
-const { finalizeCardTableVacate } = require("./cardTableVacateService");
+const { finalizeCardTableVacate, intentionalLeaveCardTable } = require("./cardTableVacateService");
 const roomManager = require("../rooms/roomManager");
 const {
   buildPokerLobbyFields,
@@ -1307,85 +1307,48 @@ exports.leaveTable = asyncHandler(async (req, res, next) => {
     });
   }
 
-  // Mid-hand voluntary leave: route through the same vacate pipeline used
-  // for disconnect/leave_room (bot takes over in place, wallet lock
-  // forfeited) instead of directly splicing the Mongo seat here. A raw
-  // splice mid-hand desyncs Mongo (seat gone) from the live engine (which
-  // keeps dealing to a player it doesn't know left) — see cardTableVacateService.
-  const liveGame =
-    table.gameType === "tarneeb41"
-      ? roomManager.getTarneeb41GameForTable(String(id))
-      : roomManager.getTrixGameForTable(String(id));
-  const liveHuman = liveGame?.players?.find(
-    (p) => !p.isBot && p.userId && String(p.userId) === String(req.user._id)
-  );
-  const handInProgress =
-    liveHuman && liveGame.state && !["waiting", "countdown", "game_end"].includes(liveGame.state);
-
-  if (handInProgress) {
+  // Intentional leave frees the Mongo seat completely (cash-out waiting /
+  // forfeit mid-hand). Player must rejoin from lobby — no soft hold.
+  if (table.gameType === "tarneeb41" || table.gameType === "trix") {
     const io = getMainIo();
     const nsp = io ? io.of("/game") : null;
-    await finalizeCardTableVacate({
+    const result = await intentionalLeaveCardTable({
       gameType: table.gameType,
       tableId: String(id),
       userId: req.user._id,
       nsp,
     });
+    // #region agent log
+    try {
+      const { agentDebugLog } = require("../utils/agentDebugLog");
+      const after = await Table.findById(id).select("seats.user vacatingPlayers");
+      const stillSeated = (after?.seats || []).some(
+        (s) => s.user && String(s.user) === String(req.user._id)
+      );
+      const vacatingActive = (after?.vacatingPlayers || []).some(
+        (v) =>
+          String(v.user) === String(req.user._id) &&
+          v.vacateUntil &&
+          new Date(v.vacateUntil).getTime() > Date.now()
+      );
+      agentDebugLog("H1", "tableService.leaveTable:card_intentional", "REST leave freed seat?", {
+        gameType: table.gameType,
+        tableId: String(id),
+        userId: String(req.user._id),
+        mode: result?.mode || null,
+        seatFreed: result?.seatFreed === true,
+        stillSeated,
+        vacatingActive,
+      });
+    } catch (_) {}
+    // #endregion
     void trackJoinLeaveEvent(req.user._id, "leave_table");
     emitTablesUpdated({ gameType: table.gameType, reason: "leave", tableId: String(id) });
-    return res.status(200).json({
-      status: "success",
-      message: "Left table — a bot took over your seat for this hand",
-      data: { midHandLeave: true, rtcRoom: { roomId: table._id, type: "table" } },
-    });
-  }
-
-  const chips = table.seats[idx].chips || 0;
-  // Atomic: remove seat + unlock funds to balance
-  await withMongoTransaction(async (session) => {
-    const tableTx = await Table.findById(id).session(session);
-    if (!tableTx) throw new Error("TABLE_NOT_FOUND");
-
-    const idxTx = tableTx.seats.findIndex((s) => String(s.user) === String(req.user._id));
-    if (idxTx === -1) throw new Error("NOT_SEATED");
-    const chipsTx = tableTx.seats[idxTx].chips || 0;
-
-    tableTx.seats.splice(idxTx, 1);
-    if (tableTx.gameType === "tarneeb41" && tableTx.seats.length < tableTx.capacity) {
-      tableTx.status = "open";
+    if (table.gameType === "tarneeb41") {
+      void refreshTarneeb41GameSeats(String(id));
+    } else {
+      void refreshTrixGameSeats(String(id));
     }
-    await tableTx.save({ session });
-
-    if (chipsTx > 0) {
-      await releaseTableSeatToBalance({
-        session,
-        userId: req.user._id,
-        seatChips: chipsTx,
-        tableId: tableTx._id,
-        meta: { reason: "leave_table_cashout", tableNumber: tableTx.tableNumber },
-      });
-    }
-  }).catch((e) => {
-    if (e.message === "TABLE_NOT_FOUND") throw new ApiError("Table not found", 404);
-    if (e.message === "NOT_SEATED") throw new ApiError("You are not seated at this table", 400);
-    if (e.message === "INSUFFICIENT_LOCKED_BALANCE") {
-      throw new ApiError("Wallet locked balance inconsistency", 400);
-    }
-    if (e.message === "INSUFFICIENT_TABLE_LOCKED_BALANCE") {
-      throw new ApiError("Table locked balance inconsistency", 400);
-    }
-    throw e;
-  });
-
-  void trackJoinLeaveEvent(req.user._id, "leave_table");
-  emitTablesUpdated({ gameType: table.gameType || "poker", reason: "leave", tableId: String(id) });
-
-  if (table.gameType === "tarneeb41") {
-    void refreshTarneeb41GameSeats(String(id));
-  }
-
-  // Notify next queued player (card games only; poker queue handled inside the transaction).
-  if (table.gameType === "trix" || table.gameType === "tarneeb41") {
     void (async () => {
       try {
         const dequeued = await waitingQueueService.dequeueNext(String(id), table.gameType);
@@ -1398,14 +1361,19 @@ exports.leaveTable = asyncHandler(async (req, res, next) => {
             sock.emit("queue_seat_available", { tableId: String(id), position: 0 });
           }
         }
-      } catch (_) {
-        // non-fatal — player will timeout and re-poll
-      }
+      } catch (_) {}
     })();
+    return res.status(200).json({
+      status: "success",
+      message: "Left table — seat freed; rejoin required",
+      data: {
+        seatFreed: true,
+        midHandLeave: result?.mode === "mid_hand_bot_takeover",
+        chipsReturned: result?.chipsReturned || result?.cashedOut || 0,
+        rtcRoom: { roomId: table._id, type: "table" },
+      },
+    });
   }
 
-  res.status(200).json({
-    status: "success",
-    data: { cashedOut: chips, rtcRoom: { roomId: table._id, type: "table" } },
-  });
+  return next(new ApiError("Leave not supported for this game type", 400));
 });

@@ -256,7 +256,14 @@ async function tryClaimTarneeb41BotSeat({
   };
 }
 
-async function recordVacatedBotSeat({ tableId, userId, seatIndex, chips, playerId }) {
+async function recordVacatedBotSeat({
+  tableId,
+  userId,
+  seatIndex,
+  chips,
+  playerId,
+  skipVacatingGrace = false,
+}) {
   const tid = String(tableId);
   const uid = String(userId);
   const seatChips = Number(chips) || 0;
@@ -267,14 +274,17 @@ async function recordVacatedBotSeat({ tableId, userId, seatIndex, chips, playerI
     table.vacatingPlayers = (table.vacatingPlayers || []).filter(
       (v) => String(v.user) !== uid
     );
-    table.vacatingPlayers.push({
-      user: userId,
-      player: playerId || undefined,
-      chips: seatChips,
-      vacatedAt: new Date(),
-      vacateUntil: vacateUntilDate(),
-      seatIndex,
-    });
+    // Intentional leave frees the seat with no reconnect hold.
+    if (!skipVacatingGrace) {
+      table.vacatingPlayers.push({
+        user: userId,
+        player: playerId || undefined,
+        chips: seatChips,
+        vacatedAt: new Date(),
+        vacateUntil: vacateUntilDate(),
+        seatIndex,
+      });
+    }
     // Forfeit now, mirroring Trix's releaseTrixMongoSeatOnVacate — a bot
     // takes over play immediately, so the lock must not stay attributed to
     // the vacated player until a future claimant or final settlement (which
