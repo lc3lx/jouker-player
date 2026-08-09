@@ -101,6 +101,55 @@ test("Trix — awards finish order points", async () => {
   game.destroy();
 });
 
+test("calculateRoundScore is idempotent within one contract", async () => {
+  const game = await mkGame();
+  selectGame(game, "Tricks");
+  game.gameState.players[0].takenCards = Array.from({ length: 4 }, () => ({
+    rank: "2",
+    suit: "Clubs",
+    value: 2,
+  }));
+  game.gameState.players.forEach((p) => {
+    p.hand = [];
+  });
+  ScoreManager.calculateRoundScore(game.gameState);
+  ScoreManager.calculateRoundScore(game.gameState); // must not double-apply
+  assert.equal(game.gameState.scores[0], -15);
+  assert.deepEqual(game.gameState.lastRoundDelta, [-15, 0, 0, 0]);
+  game.destroy();
+});
+
+test("cumulative scores stay multiples of 5 across mixed contracts", async () => {
+  const game = await mkGame();
+  // Diamonds: P0 takes 2 diamonds → -20
+  selectGame(game, "Diamonds");
+  game.gameState.players[0].takenCards = [
+    { rank: "A", suit: "Diamonds", value: 14 },
+    { rank: "5", suit: "Diamonds", value: 5 },
+  ];
+  game.gameState.players.forEach((p) => {
+    p.hand = [];
+  });
+  ScoreManager.calculateRoundScore(game.gameState);
+  game.state = "round_end";
+  game.nextRound();
+
+  // Queens: P1 takes 1 queen → -25
+  selectGame(game, "Queens");
+  game.gameState.players[1].takenCards = [{ rank: "Q", suit: "Spades", value: 12 }];
+  game.gameState.players.forEach((p) => {
+    p.hand = [];
+  });
+  ScoreManager.calculateRoundScore(game.gameState);
+
+  for (const s of game.gameState.scores) {
+    assert.equal(Math.abs(s) % 5, 0, `score ${s} must be multiple of 5`);
+  }
+  assert.equal(game.gameState.scores[0], -20);
+  assert.equal(game.gameState.scores[1], -25);
+  game.destroy();
+});
+
 test("20-round king rotation — advances king after 5 games", async () => {
   const game = await mkGame();
   const startKing = game.gameState.currentKingIndex;

@@ -25,6 +25,8 @@ class RoundManager {
       Diamonds: { min: null, max: null },
       Clubs: { min: null, max: null }
     };
+    gameState.roundScoreApplied = false;
+    gameState.lastRoundDelta = [0, 0, 0, 0];
     gameState.roundNumber++;
     return true;
   }

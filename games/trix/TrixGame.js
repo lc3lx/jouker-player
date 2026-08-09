@@ -723,11 +723,15 @@ class TrixGame extends BaseGameEngine {
           : 0,
       // Provisional score for the CURRENT contract per seat (public).
       // Resets each contract; added to cumulative `scores` at round end.
+      // During round_end use the committed snapshot so we never double-count.
       roundScores:
-        this.gameState.currentGameType &&
-        (this.state === 'playing' || this.state === 'round_end')
-          ? ScoreManager.computeRoundScore(this.gameState)
-          : [0, 0, 0, 0],
+        this.state === 'round_end'
+          ? Array.isArray(this.gameState.lastRoundDelta)
+            ? [...this.gameState.lastRoundDelta]
+            : [0, 0, 0, 0]
+          : this.gameState.currentGameType && this.state === 'playing'
+            ? ScoreManager.computeRoundScore(this.gameState)
+            : [0, 0, 0, 0],
       validCards:
         this.state === 'playing' &&
         forPlayerIndex === this.gameState.turnPlayerIndex

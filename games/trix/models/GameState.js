@@ -25,6 +25,9 @@ class GameState {
     ];
     this.roundPlayedCards = []; // public trick cards played this contract
     this.scores = players.map(() => 0);
+    // Gate so calculateRoundScore cannot double-apply within one contract.
+    this.roundScoreApplied = false;
+    this.lastRoundDelta = [0, 0, 0, 0];
   }
 
   isRoundOver() {
