@@ -407,6 +407,25 @@ class SocketSecurityGuard {
     }
     return { blocked: false };
   }
+
+  /**
+   * Per-event rate limit used by join/watch/resync/action handlers.
+   * Must live on SocketSecurityGuard — callers use `security.onEvent(...)`.
+   */
+  async onEvent(userId, ip, type, limit, windowSec) {
+    if (!this.redis) return this._take(`event_${type}`, userId, limit, windowSec * 1000);
+    const bucket = Math.floor(Date.now() / (windowSec * 1000));
+    const key = `poker:socket-rate:${type}:${String(userId)}:${bucket}`;
+    try {
+      const count = Number(await this.redis.incr(key));
+      if (count === 1) await this.redis.expire(key, windowSec + 5);
+      return count <= limit;
+    } catch (_) {
+      // Clustered production must not accept unmetered socket traffic when the
+      // shared limiter is unavailable.
+      return false;
+    }
+  }
 }
 
 class PokerTable {
@@ -1081,21 +1100,6 @@ class PokerTable {
         tableId: this.tableId,
         reason: err?.message || "unknown",
       });
-      return false;
-    }
-  }
-
-  async onEvent(userId, ip, type, limit, windowSec) {
-    if (!this.redis) return this._take(`event_${type}`, userId, limit, windowSec * 1000);
-    const bucket = Math.floor(Date.now() / (windowSec * 1000));
-    const key = `poker:socket-rate:${type}:${String(userId)}:${bucket}`;
-    try {
-      const count = Number(await this.redis.incr(key));
-      if (count === 1) await this.redis.expire(key, windowSec + 5);
-      return count <= limit;
-    } catch (_) {
-      // Clustered production must not accept unmetered socket traffic when the
-      // shared limiter is unavailable.
       return false;
     }
   }

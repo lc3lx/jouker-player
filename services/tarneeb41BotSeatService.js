@@ -290,6 +290,18 @@ async function recordVacatedBotSeat({ tableId, userId, seatIndex, chips, playerI
         meta: { reason: "tarneeb41_vacate_bot_takeover", seatIndex },
       });
     }
+    // Remove the human from Mongo seats (engine already converted to bot).
+    // Leaving seats.user set makes findUserActiveTableAnywhere + lobby
+    // "return to seat" treat the player as still seated forever after leave.
+    const seatIdx = table.seats.findIndex(
+      (s) => s.user && String(s.user) === uid
+    );
+    if (seatIdx >= 0) {
+      table.seats.splice(seatIdx, 1);
+      if (table.seats.length < table.capacity) {
+        table.status = table.status === "playing" ? table.status : "open";
+      }
+    }
     await table.save({ session });
   });
   // #region agent log

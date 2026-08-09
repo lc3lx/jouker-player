@@ -100,6 +100,17 @@ async function checkOrphanWalletLocks({ walletLockOrphanGraceMs, autoRepairEnabl
           finding.repairAction = lock.amount > 0 ? "releaseTableSeatToBalance" : "delete_zero_amount_lock";
           finding.repairResult = "failed";
           finding.meta.repairError = e?.message || "unknown";
+          // #region agent log
+          try {
+            const { agentDebugLog } = require("../../utils/agentDebugLog");
+            agentDebugLog("F", "economyHealthChecks.js:orphanRepair", "orphan lock repair failed", {
+              userId: uid,
+              tableId: String(group._id),
+              amount: lock.amount,
+              error: e?.message || "unknown",
+            });
+          } catch (_) {}
+          // #endregion
         }
       }
       findings.push(finding);

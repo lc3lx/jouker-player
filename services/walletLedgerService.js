@@ -251,7 +251,26 @@ async function releaseTableSeatToBalance({
   // attribution has drifted. Money IS in global lock; it's just not attributed correctly.
   const toRelease = Math.min(seatAmt, globalLocked);
   if (toRelease <= 0) {
-    throw new Error("INSUFFICIENT_TABLE_LOCKED_BALANCE");
+    // #region agent log
+    try {
+      const { agentDebugLog } = require("../utils/agentDebugLog");
+      agentDebugLog("F", "walletLedgerService.js:releaseTableSeatToBalance", "ghost lock clear — globalLocked=0", {
+        userId: String(userId),
+        tableId: String(tableId),
+        seatAmt,
+        tableLocked,
+        globalLocked,
+      });
+    } catch (_) {}
+    // #endregion
+    // Ghost WalletTableLock attribution: row has amount but wallet.lockedBalance
+    // has nothing left to refund. Clear the orphan row instead of throwing —
+    // otherwise monitors loop forever on INSUFFICIENT_TABLE_LOCKED_BALANCE.
+    if (tableLocked > 0) {
+      row.amount = 0;
+      await row.save(sessionOptions(session));
+    }
+    return;
   }
 
   const attributionShortfall = seatAmt - Math.min(seatAmt, tableLocked);
@@ -296,7 +315,14 @@ async function forfeitTableSeatLock({
   const globalLocked = toSafeInt(wallet.lockedBalance, 0);
 
   const toForfeit = Math.min(seatAmt, tableLocked, globalLocked);
-  if (toForfeit <= 0) return 0;
+  if (toForfeit <= 0) {
+    // Attribution-only ghost: clear table lock row when wallet has no locked funds.
+    if (tableLocked > 0 && globalLocked <= 0) {
+      row.amount = 0;
+      await row.save(sessionOptions(session));
+    }
+    return 0;
+  }
 
   row.amount = Math.max(0, tableLocked - toForfeit);
   await row.save(sessionOptions(session));

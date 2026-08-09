@@ -12,6 +12,7 @@ const {
 const Table = require("../../models/tableModel");
 const User = require("../../models/userModel");
 const Wallet = require("../../models/walletModel");
+const mongoose = require("mongoose");
 const MiniGamePlay = require("../../models/miniGamePlayModel");
 const { trackTrixWin } = require("../../services/taskService");
 const { settleGameOnFinish } = require("../../services/gameSettlementService");
@@ -1501,6 +1502,46 @@ function registerGameHandlers(nsp, jwtVerify) {
         socket.leave(`room:${r.room.roomId}`);
         matchMaker.dequeue("tarneeb", userId);
         matchMaker.dequeue("trix", userId);
+      }
+      // Durable fallback: REST may have seated the user but roomManager lost the
+      // mapping (restart / never joined socket). Resolve from Mongo and vacate.
+      const rid = roomId ? String(roomId) : null;
+      if (rid && mongoose.Types.ObjectId.isValid(rid)) {
+        try {
+          const table = await Table.findById(rid).select("gameType seats");
+          const seated = table?.seats?.some(
+            (s) => s.user && String(s.user) === String(userId)
+          );
+          if (seated && (table.gameType === "trix" || table.gameType === "tarneeb41")) {
+            // #region agent log
+            agentDebugLog("B", "game.handlers.js:leave_room:mongoFallback", "leave via Mongo seat fallback", {
+              userId: String(userId),
+              tableId: rid,
+              gameType: table.gameType,
+            });
+            // #endregion
+            lifecycleAudit("LEAVE", {
+              gameType: table.gameType,
+              tableId: rid,
+              userId,
+              via: "mongo_fallback",
+            });
+            await finalizeCardTableVacateNow({
+              gameType: table.gameType,
+              tableId: rid,
+              userId,
+              nsp,
+            });
+            respond({ ok: true, tableId: rid, via: "mongo_fallback" });
+            return;
+          }
+        } catch (err) {
+          logger.warn("leave_room_mongo_fallback_failed", {
+            userId: String(userId),
+            roomId: rid,
+            reason: err?.message,
+          });
+        }
       }
       // #region agent log
       agentDebugLog("B", "game.handlers.js:leave_room:noop", "leave_room FALSE OK — no card-table mapping", {

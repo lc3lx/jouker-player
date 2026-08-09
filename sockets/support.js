@@ -115,7 +115,7 @@ function initSupport(io) {
     });
 
     socket.on("disconnect", () => {
-      logger.debug("support_socket_disconnect", { userId: uid });
+      logger.info("support_socket_disconnect", { userId: uid });
     });
   });
 
