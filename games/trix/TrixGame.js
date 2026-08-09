@@ -551,6 +551,10 @@ class TrixGame extends BaseGameEngine {
 
     await this.applyCosmeticsToPlayers();
 
+    if (typeof this._beforeDealStart === "function") {
+      await this._beforeDealStart();
+    }
+
     const gamePlayers = this.players.map(
       (p) =>
         new Player(

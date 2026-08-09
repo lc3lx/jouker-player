@@ -24,3 +24,14 @@ test("isBootZombieCardTable treats playing tables as zombies", () => {
 
   assert.equal(isBootZombieCardTable(table), true);
 });
+
+test("isBootZombieCardTable treats ready tables as zombies", () => {
+  const table = {
+    gameType: "trix",
+    status: "ready",
+    seats: [{ user: "u1", chips: 100 }],
+    activeSettlementId: null,
+  };
+
+  assert.equal(isBootZombieCardTable(table), true);
+});

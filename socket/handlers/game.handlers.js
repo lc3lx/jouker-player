@@ -17,7 +17,7 @@ const MiniGamePlay = require("../../models/miniGamePlayModel");
 const { trackTrixWin } = require("../../services/taskService");
 const { settleGameOnFinish } = require("../../services/gameSettlementService");
 const { archiveCardGameMatch } = require("../../services/cardGameHistoryService");
-const { markTrixTablePlaying } = require("../../services/tableService");
+const { markTrixTablePlaying, markTarneeb41TablePlaying } = require("../../services/tableService");
 const { emitTablesUpdated } = require("../../utils/lobbyRealtime");
 const {
   scheduleCardTableVacate,
@@ -155,6 +155,26 @@ function wireTrixGame(nsp, tableId, game) {
   if (!game || game._trixWired) return;
   game._trixWired = true;
   const tid = String(tableId);
+  // Persist "playing" BEFORE the deal mutates memory so a crash mid-deal cannot
+  // leave Mongo as "open" (boot sanitizer would then preserve seats → fake redeal).
+  game._beforeDealStart = async () => {
+    try {
+      await markTrixTablePlaying(tid);
+      // #region agent log
+      try {
+        const { agentDebugLog } = require("../../utils/agentDebugLog");
+        agentDebugLog("H-restartA", "game.handlers.js:wireTrixGame", "marked trix playing before deal", {
+          tableId: tid,
+        });
+      } catch (_) {}
+      // #endregion
+    } catch (err) {
+      logger.error("trix_mark_playing_failed", {
+        tableId: tid,
+        reason: err?.message,
+      });
+    }
+  };
   game.setAfterMoveListener((result) => {
     void handleTrixAfterMove(nsp, { type: "trix", tableId: tid, game }, result);
   });
@@ -175,6 +195,42 @@ function wireTrixGame(nsp, tableId, game) {
       nsp.to(`spec:${tid}`).emit("table_chat", payload);
     }
   });
+}
+
+/**
+ * After a process restart the in-memory card engine is gone. If Mongo still
+ * says playing/ready, refund+reopen instead of starting a brand-new دق.
+ */
+async function abortCardTableRestartZombie({ gameType, table, game, socket }) {
+  const status = String(table?.status || "");
+  if (status !== "playing" && status !== "ready") return false;
+
+  const looksFresh =
+    gameType === "trix"
+      ? !game?.gameState
+      : gameType === "tarneeb41"
+        ? !game ||
+          ["waiting", "countdown", "open"].includes(String(game.state || ""))
+        : false;
+  if (!looksFresh) return false;
+
+  // #region agent log
+  try {
+    const { agentDebugLog } = require("../../utils/agentDebugLog");
+    agentDebugLog("H-restartB", "game.handlers.js:abortCardTableRestartZombie", "abort redeal after restart", {
+      gameType,
+      tableId: String(table._id),
+      status,
+      engineState: game?.state || null,
+      hasGameState: !!game?.gameState,
+    });
+  } catch (_) {}
+  // #endregion
+
+  const { sanitizeCardTableOnBoot } = require("../../services/tableGcService");
+  await sanitizeCardTableOnBoot(table);
+  emitInvalidMove(socket, "table_reset_after_restart");
+  return true;
 }
 
 function getOrCreateTrixGameWired(nsp, tableId) {
@@ -237,6 +293,25 @@ function wireTarneeb41Game(nsp, tableId, game) {
   if (!game || game._tarneeb41Wired) return;
   game._tarneeb41Wired = true;
   const tid = String(tableId);
+  // Persist "playing" BEFORE dealRound so reboot cannot leave open+seats mid-hand.
+  game._beforeDealStart = async () => {
+    try {
+      await markTarneeb41TablePlaying(tid);
+      // #region agent log
+      try {
+        const { agentDebugLog } = require("../../utils/agentDebugLog");
+        agentDebugLog("H-restartA", "game.handlers.js:wireTarneeb41Game", "marked tarneeb41 playing before deal", {
+          tableId: tid,
+        });
+      } catch (_) {}
+      // #endregion
+    } catch (err) {
+      logger.error("tarneeb41_mark_playing_failed", {
+        tableId: tid,
+        reason: err?.message,
+      });
+    }
+  };
   game.setCountdownStartGate(async () => {
     const { validateTarneeb41StartEligibility } = require("../../services/tableService");
     const result = await validateTarneeb41StartEligibility(tid, game);
@@ -272,6 +347,14 @@ async function handleTarneeb41AfterMove(nsp, ctx, result) {
   }
 
   if (result?.gameStarted) {
+    try {
+      await markTarneeb41TablePlaying(tableId);
+    } catch (err) {
+      logger.error("tarneeb41_mark_playing_failed", {
+        tableId: String(tableId),
+        reason: err?.message,
+      });
+    }
     emitTablesUpdated({ gameType: "tarneeb41", reason: "game_start", tableId: String(tableId) });
   }
 
@@ -570,6 +653,17 @@ function registerGameHandlers(nsp, jwtVerify) {
         await socketPresenceService.registerSocket(table._id, userId, socket.id);
         let game = getOrCreateTrixGameWired(nsp, table._id);
 
+        if (
+          await abortCardTableRestartZombie({
+            gameType: "trix",
+            table,
+            game,
+            socket,
+          })
+        ) {
+          return;
+        }
+
         // Safety: never reattach a human into a bot-only mid-hand ghost after the
         // last human left. Wipe and recreate so the joiner gets a fresh deal.
         if (
@@ -724,6 +818,17 @@ function registerGameHandlers(nsp, jwtVerify) {
         roomManager.setUserTarneeb41Table(String(userId), String(table._id));
         await socketPresenceService.registerSocket(table._id, userId, socket.id);
         let game = getOrCreateTarneeb41GameWired(nsp, table._id);
+
+        if (
+          await abortCardTableRestartZombie({
+            gameType: "tarneeb41",
+            table,
+            game,
+            socket,
+          })
+        ) {
+          return;
+        }
 
         // Safety: never reattach into a bot-only mid-hand ghost after last human left.
         if (

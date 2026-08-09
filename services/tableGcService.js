@@ -379,6 +379,20 @@ async function runBootSanitizer({ redis = null } = {}) {
   for (const table of cardCandidates) {
     try {
       const result = await sanitizeCardTableOnBoot(table);
+      // #region agent log
+      try {
+        const { agentDebugLog } = require("../utils/agentDebugLog");
+        agentDebugLog("H-restartC", "tableGcService.js:runBootSanitizer", "card boot sanitize result", {
+          tableId: result?.tableId,
+          gameType: table.gameType,
+          status: table.status,
+          action: result?.action,
+          reason: result?.reason || null,
+          seatCount: result?.seatCount ?? (Array.isArray(table.seats) ? table.seats.length : 0),
+          refunded: result?.refunded ?? null,
+        });
+      } catch (_) {}
+      // #endregion
       summary.card.push(result);
     } catch (err) {
       logger.error("boot_card_sanitize_failed", {

@@ -389,6 +389,10 @@ class Tarneeb41Game extends BaseGameEngine {
     if (this.players.length !== 4) return false;
     this.clearCountdown();
     await this.applyCosmeticsToPlayers();
+    // Mark Mongo playing before mutating deal state (crash-safe for boot sanitizer).
+    if (typeof this._beforeDealStart === "function") {
+      await this._beforeDealStart();
+    }
     this.sessionId = crypto.randomUUID();
     this.dealRound(true);
     this.startBotTimer();

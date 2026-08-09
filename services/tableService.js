@@ -304,6 +304,17 @@ async function markTrixTablePlaying(tableId) {
   );
 }
 
+/** Mark Mongo tarneeb41 table as actively playing so boot sanitizer can refund
+ *  mid-hand seats after a crash/restart (engine state is memory-only). */
+async function markTarneeb41TablePlaying(tableId) {
+  if (!tableId) return null;
+  return Table.findByIdAndUpdate(
+    tableId,
+    { $set: { status: "playing" } },
+    { new: true }
+  );
+}
+
 exports.ensureFixedTierTables = ensureFixedTierTables;
 exports.FIXED_TIER_TABLES = FIXED_TIER_TABLES;
 exports.findAvailableTarneeb41Table = findAvailableTarneeb41Table;
@@ -319,6 +330,7 @@ exports.joinTrixWithRetry = (opts) =>
 exports.refreshTarneeb41GameSeats = refreshTarneeb41GameSeats;
 exports.refreshTrixGameSeats = refreshTrixGameSeats;
 exports.markTrixTablePlaying = markTrixTablePlaying;
+exports.markTarneeb41TablePlaying = markTarneeb41TablePlaying;
 
 function enrichPokerTableRow(tableObj, live) {
   const seatedCount = countMongoSeats(tableObj.seats);
