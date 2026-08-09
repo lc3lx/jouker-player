@@ -129,20 +129,23 @@ function applyRoundScores(declaredBids, tricksThisRound, playerScores) {
   }
 }
 
-/** Game over (Syrian 41): one partner reaches 41+ AND the other partner on the same team has score > 0. */
+/** Game over (Syrian 41): team total (partners sum) reaches 41+. */
 function checkGameEnd(playerScores) {
   const s = (i) => playerScores[i] || 0;
+  const team0 = s(0) + s(2);
+  const team1 = s(1) + s(3);
 
-  if (s(0) >= WIN_SCORE && s(2) > 0) {
+  if (team0 >= WIN_SCORE && team1 >= WIN_SCORE) {
+    return {
+      ended: true,
+      winnerTeam: team0 >= team1 ? 0 : 1,
+      playerScores,
+    };
+  }
+  if (team0 >= WIN_SCORE) {
     return { ended: true, winnerTeam: 0, playerScores };
   }
-  if (s(2) >= WIN_SCORE && s(0) > 0) {
-    return { ended: true, winnerTeam: 0, playerScores };
-  }
-  if (s(1) >= WIN_SCORE && s(3) > 0) {
-    return { ended: true, winnerTeam: 1, playerScores };
-  }
-  if (s(3) >= WIN_SCORE && s(1) > 0) {
+  if (team1 >= WIN_SCORE) {
     return { ended: true, winnerTeam: 1, playerScores };
   }
   return { ended: false };

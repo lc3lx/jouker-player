@@ -371,9 +371,13 @@ async function handleTarneeb41AfterMove(nsp, ctx, result) {
   }
 
   if (result?.roundEnded || game.state === "round_end") {
-    const roundResult = game.getRoundResult ? game.getRoundResult() : null;
-    if (roundResult) {
-      emitToTarneeb41Humans(nsp, tableId, "round_result", roundResult);
+    // Never emit round_result once the دق is over — client auto-nextRound would
+    // briefly treat it as round_end and fight the celebration overlay.
+    if (!(game.isGameFinished && game.isGameFinished()) && game.state !== "game_end") {
+      const roundResult = game.getRoundResult ? game.getRoundResult() : null;
+      if (roundResult) {
+        emitToTarneeb41Humans(nsp, tableId, "round_result", roundResult);
+      }
     }
   }
 
@@ -383,6 +387,16 @@ async function handleTarneeb41AfterMove(nsp, ctx, result) {
       roomManager.markTarneeb41GameFinished(tableId);
       const gameResult = game.getGameResult ? game.getGameResult() : null;
       if (gameResult) {
+        // #region agent log
+        try {
+          const { agentDebugLog } = require("../../utils/agentDebugLog");
+          agentDebugLog("H-endB", "game.handlers.js:handleTarneeb41AfterMove", "emit game_finished", {
+            tableId: String(tableId),
+            winnerTeam: gameResult.winnerTeam ?? null,
+            scores: gameResult.playerScores || null,
+          });
+        } catch (_) {}
+        // #endregion
         emitToTarneeb41Humans(nsp, tableId, "game_finished", gameResult);
         emitTablesUpdated({ gameType: "tarneeb41", reason: "game_end", tableId: String(tableId) });
         await runGameSettlement(nsp, ctx, gameResult);

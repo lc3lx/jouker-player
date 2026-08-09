@@ -825,6 +825,20 @@ class Tarneeb41Game extends BaseGameEngine {
     this.roundNumber += 1;
     const end = rules.checkGameEnd(this.playerScores);
     this.clearTurnTimer();
+    // #region agent log
+    try {
+      const { agentDebugLog } = require("../../utils/agentDebugLog");
+      const s = this.playerScores || [];
+      agentDebugLog("H-endA", "Tarneeb41Game.js:endRound", "round scored; win check", {
+        tableId: String(this.roomId),
+        scores: [...s],
+        team0: (s[0] || 0) + (s[2] || 0),
+        team1: (s[1] || 0) + (s[3] || 0),
+        ended: !!end.ended,
+        winnerTeam: end.winnerTeam ?? null,
+      });
+    } catch (_) {}
+    // #endregion
     if (end.ended) {
       this.state = "game_end";
       this._fsm.transition(T41_STATE.GAME_END);

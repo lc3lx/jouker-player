@@ -85,16 +85,17 @@ test("countdown completion deals and enters bidding", () => {
   }
 });
 
-test("win condition: partner must be > 0 when one seat reaches 41", () => {
-  assert.equal(rules.checkGameEnd([41, 10, 5, 8]).ended, true);
-  assert.equal(rules.checkGameEnd([41, 0, 0, 0]).ended, false);
-  assert.equal(rules.checkGameEnd([41, 0, 0, 10]).ended, false);
-  assert.equal(rules.checkGameEnd([41, 0, 1, 10]).ended, true);
-  assert.equal(rules.checkGameEnd([40, 10, 5, 8]).ended, false);
-  assert.equal(rules.checkGameEnd([10, 41, 8, 5]).ended, true);
-  assert.equal(rules.checkGameEnd([0, 41, 0, 0]).ended, false);
-  assert.equal(rules.checkGameEnd([5, 41, 0, 3]).ended, true);
+test("win condition: team total reaches 41", () => {
+  assert.equal(rules.checkGameEnd([20, 10, 21, 8]).ended, true);
+  assert.equal(rules.checkGameEnd([20, 10, 21, 8]).winnerTeam, 0);
+  assert.equal(rules.checkGameEnd([41, 10, 0, 8]).ended, true);
+  assert.equal(rules.checkGameEnd([41, 10, 0, 8]).winnerTeam, 0);
+  assert.equal(rules.checkGameEnd([41, 0, 0, 0]).ended, true);
+  assert.equal(rules.checkGameEnd([20, 10, 20, 8]).ended, false);
+  assert.equal(rules.checkGameEnd([10, 20, 8, 21]).ended, true);
+  assert.equal(rules.checkGameEnd([10, 20, 8, 21]).winnerTeam, 1);
   assert.equal(rules.checkGameEnd([25, 10, 41, 8]).ended, true);
+  assert.equal(rules.checkGameEnd([25, 10, 41, 8]).winnerTeam, 0);
 });
 
 test("last trick stays visible until finalize", () => {
