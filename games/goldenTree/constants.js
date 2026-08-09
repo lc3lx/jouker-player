@@ -45,17 +45,13 @@ const SYMBOLS = Object.freeze({
   BANANA: "banana",
   SEVEN: "seven",
   WILD: "wild",
-  STAR: "star",
-  DOLLAR: "dollar",
   /** Match-3 scratch trigger (same as Zeus / Atlantis). */
   JACKPOT: "jackpot",
 });
 
-const SCATTERS = new Set([SYMBOLS.STAR, SYMBOLS.DOLLAR]);
-/** Symbols that break adjacent-path wins (scatters + jackpot scatter). */
+const SCATTERS = new Set();
+/** Symbols that break adjacent-path wins (jackpot scatter). */
 const LINE_BREAKERS = new Set([
-  SYMBOLS.STAR,
-  SYMBOLS.DOLLAR,
   SYMBOLS.JACKPOT,
 ]);
 const LOW_FRUITS = new Set([
@@ -71,9 +67,6 @@ const WILD_REELS = new Set([1, 2, 3]);
 
 /** Wild trees appear only on the middle row (0=top, 1=middle, 2=bottom). */
 const WILD_ROW = 1;
-
-/** Star scatter reels — 1-indexed 1,3,5 → 0-based 0,2,4. */
-const STAR_REELS = new Set([0, 2, 4]);
 
 /**
  * The only payable lines: 3 horizontal rows (UI diagrams).
@@ -100,9 +93,6 @@ const PAYTABLE = Object.freeze({
   [SYMBOLS.PINEAPPLE]: [0, 0, 0, 0.2, 0.6, 3],
   [SYMBOLS.PLUM]: [0, 0, 0, 0.2, 0.6, 3],
 });
-
-const STAR_SCATTER_PAY = Object.freeze({ 3: 4 });
-const DOLLAR_SCATTER_PAY = Object.freeze({ 3: 1, 4: 4, 5: 20 });
 
 const MAIN_WILD_MULTIPLIERS = [2, 3];
 const BONUS_WILD_MULTIPLIERS = [2, 3, 5];
@@ -154,11 +144,8 @@ module.exports = {
   LOW_FRUITS,
   WILD_REELS,
   WILD_ROW,
-  STAR_REELS,
   PAYLINES,
   PAYTABLE,
-  STAR_SCATTER_PAY,
-  DOLLAR_SCATTER_PAY,
   MAIN_WILD_MULTIPLIERS,
   BONUS_WILD_MULTIPLIERS,
   BUY_BONUS_TYPE,

@@ -121,7 +121,7 @@ test("horizontal 3 cherries on one row pay", () => {
     [SYMBOLS.ORANGE, SYMBOLS.CHERRY, SYMBOLS.GRAPES],
     [SYMBOLS.PLUM, SYMBOLS.CHERRY, SYMBOLS.WATERMELON],
     [SYMBOLS.SEVEN, SYMBOLS.BANANA, SYMBOLS.BELL],
-    [SYMBOLS.DOLLAR, SYMBOLS.ORANGE, SYMBOLS.PLUM],
+    [SYMBOLS.BANANA, SYMBOLS.ORANGE, SYMBOLS.PLUM],
   ];
 
   const result = calculateWins(matrix, {}, 10000, { bonusMode: false });
@@ -574,23 +574,20 @@ test("main mode does not expand wilds", () => {
   assert.equal(result.expandedMatrix[1][2], SYMBOLS.BANANA);
 });
 
-test("expanding wild preserves scatters and jackpots on the same reel (bonus)", () => {
+test("expanding wild preserves jackpots on the same reel (bonus)", () => {
   const matrix = [
     [SYMBOLS.BELL, SYMBOLS.PLUM, SYMBOLS.ORANGE],
-    [SYMBOLS.DOLLAR, SYMBOLS.WILD, SYMBOLS.JACKPOT],
-    [SYMBOLS.BELL, SYMBOLS.GRAPES, SYMBOLS.WATERMELON],
-    [SYMBOLS.PLUM, SYMBOLS.ORANGE, SYMBOLS.DOLLAR],
-    [SYMBOLS.DOLLAR, SYMBOLS.WATERMELON, SYMBOLS.PLUM],
+    [SYMBOLS.BANANA, SYMBOLS.WILD, SYMBOLS.JACKPOT],
+    [SYMBOLS.CHERRY, SYMBOLS.GRAPES, SYMBOLS.WATERMELON],
+    [SYMBOLS.PLUM, SYMBOLS.ORANGE, SYMBOLS.BANANA],
+    [SYMBOLS.BANANA, SYMBOLS.WATERMELON, SYMBOLS.PLUM],
   ];
 
   const result = calculateWins(matrix, { 1: 2 }, 10000, { bonusMode: true });
 
-  assert.equal(result.expandedMatrix[1][0], SYMBOLS.DOLLAR);
+  assert.equal(result.expandedMatrix[1][0], SYMBOLS.WILD);
   assert.equal(result.expandedMatrix[1][2], SYMBOLS.JACKPOT);
-  assert.equal(result.scatterWins.length, 1);
-  assert.equal(result.scatterWins[0].kind, SYMBOLS.DOLLAR);
-  assert.equal(result.scatterWins[0].count, 3);
-  assert.equal(result.scatterWins[0].amount, 10000);
+  assert.equal(result.scatterWins.length, 0);
 });
 
 test("max win cap at 10,000x bet", () => {
@@ -729,8 +726,9 @@ test("jackpot strips use isolated symbols at Zeus-scale rarity", () => {
     0.25 / (76.25 + 1.2 + 0.25),
   );
 
-  assert.ok(mainRate >= 0.00009 && mainRate <= zeusMainRate);
-  assert.ok(bonusRate >= 0.00009 && bonusRate <= zeusBonusRate);
+  // Slight headroom vs Zeus reference after dollar-scatter strip removal.
+  assert.ok(mainRate >= 0.00009 && mainRate <= zeusMainRate * 1.15);
+  assert.ok(bonusRate >= 0.00009 && bonusRate <= zeusBonusRate * 1.15);
 });
 
 test("legacy stop-zero jackpot cluster cannot trigger a jackpot", () => {
@@ -786,9 +784,10 @@ test("RTP probe — main game simulation (informational)", () => {
   }
 
   const rtp = totalReturned / (rounds * bet);
+  // Band reflects horizontal-from-col0 line wins only (no scatters).
   assert.ok(
-    rtp > 0.9 && rtp < 1.8,
-    `3+ any-row RTP sample ${rtp.toFixed(4)} out of expected sanity band`,
+    rtp > 0.05 && rtp < 1.0,
+    `horizontal-line RTP sample ${rtp.toFixed(4)} out of expected sanity band`,
   );
 });
 

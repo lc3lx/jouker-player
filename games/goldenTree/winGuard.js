@@ -2,13 +2,6 @@
 
 const {
   roundMoney,
-  SYMBOLS,
-  STAR_REELS,
-  STAR_SCATTER_PAY,
-  DOLLAR_SCATTER_PAY,
-  REFERENCE_BET,
-  ROW_COUNT,
-  REEL_COUNT,
   MIN_CONSECUTIVE,
   WIN_RULES_VERSION,
 } = require("./constants");
@@ -65,33 +58,7 @@ function hardenWinResult(matrix, wildMultipliers, betAmount, options = {}) {
   }
 
   const scatterWins = [];
-  let scatterTotal = 0;
-
-  let starCount = 0;
-  for (const col of STAR_REELS) {
-    for (let row = 0; row < ROW_COUNT; row += 1) {
-      if (evalMatrix[col]?.[row] === SYMBOLS.STAR) starCount += 1;
-    }
-  }
-  if (starCount >= 3) {
-    const amount = roundMoney(STAR_SCATTER_PAY[3] * (betAmount / REFERENCE_BET));
-    scatterTotal = roundMoney(scatterTotal + amount);
-    scatterWins.push({ kind: SYMBOLS.STAR, count: starCount, amount });
-  }
-
-  let dollarCount = 0;
-  for (let col = 0; col < REEL_COUNT; col += 1) {
-    for (let row = 0; row < ROW_COUNT; row += 1) {
-      if (evalMatrix[col]?.[row] === SYMBOLS.DOLLAR) dollarCount += 1;
-    }
-  }
-  if (dollarCount >= 3) {
-    const capped = Math.min(dollarCount, 5);
-    const tablePay = DOLLAR_SCATTER_PAY[capped] || DOLLAR_SCATTER_PAY[5];
-    const amount = roundMoney(tablePay * (betAmount / REFERENCE_BET));
-    scatterTotal = roundMoney(scatterTotal + amount);
-    scatterWins.push({ kind: SYMBOLS.DOLLAR, count: dollarCount, amount });
-  }
+  const scatterTotal = 0;
 
   const totalWin = roundMoney(lineTotal + scatterTotal);
 

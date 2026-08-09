@@ -7,7 +7,7 @@
  * Tune symbol frequencies here and re-run `node --test test/goldenTree.test.js` RTP probe.
  */
 
-const { SYMBOLS, WILD_REELS, STAR_REELS } = require("./constants");
+const { SYMBOLS, WILD_REELS } = require("./constants");
 
 // A Golden Tree reel exposes three adjacent cells at once. Keep exactly one
 // physical jackpot stop on each reel so a single reel can never contribute a
@@ -32,20 +32,16 @@ const BASE_MIX = [
   [SYMBOLS.ORANGE, 12],
   [SYMBOLS.PINEAPPLE, 12],
   [SYMBOLS.PLUM, 12],
-  [SYMBOLS.BANANA, 14],
+  // Extra low-fruit weight replaces removed dollar/star scatter stops.
+  [SYMBOLS.BANANA, 20],
   [SYMBOLS.GRAPES, 9],
   [SYMBOLS.WATERMELON, 9],
   [SYMBOLS.BELL, 7],
   [SYMBOLS.SEVEN, 4],
-  [SYMBOLS.DOLLAR, 3],
 ];
 
 function stripForReel(reelIndex, mode) {
   const mix = BASE_MIX.map(([sym, w]) => [sym, w]);
-
-  if (STAR_REELS.has(reelIndex)) {
-    mix.push([SYMBOLS.STAR, 4]);
-  }
 
   if (WILD_REELS.has(reelIndex)) {
     // Bonus spins make trees more frequent, but trees still land randomly;
