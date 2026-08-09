@@ -34,7 +34,11 @@ const {
 
 const CARD_GAME_TYPES = ["tarneeb41", "trix"];
 const ZOMBIE_CARD_STATUSES = ["playing", "ready"];
+// `waiting` is included when Redis table-state is unavailable: reconnect deadlines
+// live only in memory/Redis, so a waiting table with Mongo seats survives forever
+// across restarts otherwise (week-old ghost humans on the felt).
 const ZOMBIE_POKER_STATUSES = ["playing", "ready", "full"];
+const ZOMBIE_POKER_STATUSES_NO_REDIS = ["playing", "ready", "full", "waiting"];
 
 const TABLE_IDLE_TIMEOUT_MS = Math.max(
   60_000,
@@ -389,9 +393,30 @@ async function runBootSanitizer({ redis = null } = {}) {
     }
   }
 
+  const pokerStatuses = (() => {
+    try {
+      const stateStore = new RedisTableStateStore(redis);
+      return stateStore.isEnabled()
+        ? ZOMBIE_POKER_STATUSES
+        : ZOMBIE_POKER_STATUSES_NO_REDIS;
+    } catch (_) {
+      return ZOMBIE_POKER_STATUSES_NO_REDIS;
+    }
+  })();
+
+  // #region agent log
+  try {
+    const { agentDebugLog } = require("../utils/agentDebugLog");
+    agentDebugLog("H", "tableGcService.js:runBootSanitizer", "poker boot candidate statuses", {
+      redisPassed: !!redis,
+      pokerStatuses,
+    });
+  } catch (_) {}
+  // #endregion
+
   const pokerCandidates = await Table.find({
     gameType: "poker",
-    status: { $in: ZOMBIE_POKER_STATUSES },
+    status: { $in: pokerStatuses },
   })
     .limit(500)
     .lean();
@@ -399,6 +424,20 @@ async function runBootSanitizer({ redis = null } = {}) {
   for (const table of pokerCandidates) {
     try {
       const result = await sanitizePokerTableOnBoot(table, redis);
+      // #region agent log
+      try {
+        const { agentDebugLog } = require("../utils/agentDebugLog");
+        if (result?.action && result.action !== "skipped") {
+          agentDebugLog("H", "tableGcService.js:sanitizePoker", "poker boot sanitize action", {
+            tableId: result.tableId,
+            action: result.action,
+            seatCount: result.seatCount ?? null,
+            refunded: result.refunded ?? null,
+            status: table.status,
+          });
+        }
+      } catch (_) {}
+      // #endregion
       summary.poker.push(result);
     } catch (err) {
       logger.error("boot_poker_sanitize_failed", {
