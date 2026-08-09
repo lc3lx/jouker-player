@@ -86,6 +86,14 @@ class ScoreManager {
 
     gameState.lastRoundDelta = [...scores];
     gameState.roundScoreApplied = true;
+    if (!Array.isArray(gameState.scoreLog)) gameState.scoreLog = [];
+    gameState.scoreLog.push({
+      gameType: gameState.currentGameType,
+      kingIndex: gameState.currentKingIndex,
+      roundNumber: gameState.roundNumber,
+      deltas: [...scores],
+      totals: [...gameState.scores],
+    });
     return scores;
   }
 

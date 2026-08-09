@@ -28,6 +28,9 @@ class GameState {
     // Gate so calculateRoundScore cannot double-apply within one contract.
     this.roundScoreApplied = false;
     this.lastRoundDelta = [0, 0, 0, 0];
+    // Per-contract score sheet for the whole game (الدق).
+    // { gameType, kingIndex, roundNumber, deltas: number[4], totals: number[4] }
+    this.scoreLog = [];
   }
 
   isRoundOver() {

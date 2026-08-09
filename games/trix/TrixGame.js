@@ -704,6 +704,15 @@ class TrixGame extends BaseGameEngine {
         card: { rank: entry.card.rank, suit: entry.card.suit },
       })),
       scores: [...this.gameState.scores],
+      scoreLog: Array.isArray(this.gameState.scoreLog)
+        ? this.gameState.scoreLog.map((row) => ({
+            gameType: row.gameType,
+            kingIndex: row.kingIndex,
+            roundNumber: row.roundNumber,
+            deltas: Array.isArray(row.deltas) ? [...row.deltas] : [0, 0, 0, 0],
+            totals: Array.isArray(row.totals) ? [...row.totals] : [0, 0, 0, 0],
+          }))
+        : [],
       turnPlayerIndex: this.gameState.turnPlayerIndex,
       currentKingIndex: this.gameState.currentKingIndex,
       currentGameType: this.gameState.currentGameType,

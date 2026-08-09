@@ -101,6 +101,30 @@ test("Trix — awards finish order points", async () => {
   game.destroy();
 });
 
+test("scoreLog records each finished contract", async () => {
+  const game = await mkGame();
+  selectGame(game, "Diamonds");
+  game.gameState.players[0].takenCards = [
+    { rank: "A", suit: "Diamonds", value: 14 },
+  ];
+  game.gameState.players.forEach((p) => {
+    p.hand = [];
+  });
+  ScoreManager.calculateRoundScore(game.gameState);
+  assert.equal(game.gameState.scoreLog.length, 1);
+  assert.equal(game.gameState.scoreLog[0].gameType, "Diamonds");
+  assert.deepEqual(game.gameState.scoreLog[0].deltas, [-10, 0, 0, 0]);
+
+  // Second call must not duplicate the log entry.
+  ScoreManager.calculateRoundScore(game.gameState);
+  assert.equal(game.gameState.scoreLog.length, 1);
+
+  const state = game.getGameState(0);
+  assert.equal(state.scoreLog.length, 1);
+  assert.equal(state.scoreLog[0].deltas[0], -10);
+  game.destroy();
+});
+
 test("calculateRoundScore is idempotent within one contract", async () => {
   const game = await mkGame();
   selectGame(game, "Tricks");
