@@ -149,6 +149,12 @@ async function abandonTarneeb41IfNoHumans(tableId) {
   }
 
   const cleared = roomManager.clearTarneeb41Game(key, { archiveReason: "abandoned" });
+  try {
+    const { archiveTableDocument } = require("./tableLifecycleService");
+    await archiveTableDocument(key, { reason: "abandoned" });
+  } catch (_) {
+    /* best-effort */
+  }
   if (cleared.cleared) {
     emitTablesUpdated({
       gameType: "tarneeb41",

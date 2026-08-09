@@ -24,6 +24,7 @@ const {
   finalizeCardTableVacateNow,
   intentionalLeaveCardTable,
   onCardTableRejoin,
+  abandonCardTableIfNoHumans,
 } = require("../../services/cardTableVacateService");
 const logger = require("../../utils/logger");
 const { lifecycleAudit } = require("../../utils/lifecycleAudit");
@@ -723,6 +724,29 @@ function registerGameHandlers(nsp, jwtVerify) {
         roomManager.setUserTarneeb41Table(String(userId), String(table._id));
         await socketPresenceService.registerSocket(table._id, userId, socket.id);
         let game = getOrCreateTarneeb41GameWired(nsp, table._id);
+
+        // Safety: never reattach into a bot-only mid-hand ghost after last human left.
+        if (
+          game &&
+          typeof game.humanCount === "function" &&
+          game.humanCount() === 0 &&
+          game.state &&
+          !["waiting", "countdown", "open"].includes(String(game.state))
+        ) {
+          // #region agent log
+          try {
+            const { agentDebugLog } = require("../../utils/agentDebugLog");
+            agentDebugLog("H-reset3", "game.handlers.js:join_tarneeb41_table", "bot-only mid-hand wipe before join", {
+              tableId: String(table._id),
+              userId: userIdStr,
+              state: game.state,
+            });
+          } catch (_) {}
+          // #endregion
+          await abandonCardTableIfNoHumans(nsp, "tarneeb41", table._id);
+          game = getOrCreateTarneeb41GameWired(nsp, table._id);
+        }
+
         await game.syncLobbyFromTable(table, (uid) => roomManager.getTarneeb41UserSocket(String(uid)));
         await game.applyCosmeticsToPlayers();
         let seatIndex = game.getPlayerIndex(userId);
@@ -1420,6 +1444,10 @@ function registerGameHandlers(nsp, jwtVerify) {
       }
       let ok = false;
       if (ctx.type === "tarneeb41" && typeof ctx.game.advanceNextRound === "function") {
+        if (ctx.game.state === "game_end" || ctx.game.isGameFinished?.()) {
+          emitInvalidMove(socket, "game_already_finished", { code: "ERR_GAME_ENDED" });
+          return;
+        }
         ok = ctx.game.advanceNextRound();
       } else if (ctx.type === "trix" && ctx.game.nextRound) {
         if (ctx.game.state === "game_end" || ctx.game.isGameFinished?.()) {
