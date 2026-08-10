@@ -11,6 +11,28 @@ const { withMongoTransaction, ledgerDeposit } = require("./walletLedgerService")
 const playerProgressService = require("../modules/playerProgress/services/playerProgressService");
 
 const XP_PER_LEVEL = 2500;
+const WIN_TX_TYPES = ["win", "game_win", "island_jackpot_win"];
+const fs = require("fs");
+const path = require("path");
+
+// #region agent log
+function agentTaskLog(hypothesisId, message, data) {
+  try {
+    fs.appendFileSync(
+      path.join("D:", "work", "play", "debug-9f6022.log"),
+      `${JSON.stringify({
+        sessionId: "9f6022",
+        hypothesisId,
+        location: "taskService.js",
+        message,
+        data,
+        timestamp: Date.now(),
+        runId: "tasks-verify",
+      })}\n`
+    );
+  } catch (_) {}
+}
+// #endregion
 
 const TASK_DEFINITIONS = {
   daily: [
@@ -158,6 +180,14 @@ function isoWeekKey(d) {
   return `${date.getUTCFullYear()}-W${String(week).padStart(2, "0")}`;
 }
 
+/** Monday 00:00 UTC of the ISO week containing `d` (aligned with isoWeekKey). */
+function startOfIsoWeek(d) {
+  const date = new Date(Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), d.getUTCDate()));
+  const day = date.getUTCDay() || 7;
+  date.setUTCDate(date.getUTCDate() - day + 1);
+  return date;
+}
+
 function seasonKey(d) {
   const month = d.getUTCMonth();
   const quarter = Math.floor(month / 3) + 1;
@@ -166,7 +196,7 @@ function seasonKey(d) {
 
 function periodMeta(period, now = new Date()) {
   if (period === "weekly") {
-    return { period, periodKey: isoWeekKey(now), since: new Date(now.getTime() - 7 * 86400000) };
+    return { period, periodKey: isoWeekKey(now), since: startOfIsoWeek(now) };
   }
   if (period === "seasonal") {
     const qStartMonth = Math.floor(now.getUTCMonth() / 3) * 3;
@@ -176,6 +206,11 @@ function periodMeta(period, now = new Date()) {
   const dayStart = startOfUtcDay(now);
   return { period: "daily", periodKey: utcDayStr(now), since: dayStart };
 }
+
+/** Exported for unit tests / contract checks. */
+exports._periodMeta = periodMeta;
+exports._mapTaskRow = mapTaskRow;
+exports._TASK_DEFINITIONS = TASK_DEFINITIONS;
 
 async function resolveMetric(userId, metric, since, user) {
   switch (metric) {
@@ -212,7 +247,7 @@ async function resolveMetric(userId, metric, since, user) {
         {
           $match: {
             userId,
-            type: "win",
+            type: { $in: WIN_TX_TYPES },
             createdAt: { $gte: since },
           },
         },
@@ -326,10 +361,20 @@ async function claimSingleTask(userId, taskId, period) {
     xpGranted: def.xpReward,
   });
 
-  await grantTaskRewards(userId, def.chipsReward, def.xpReward, {
-    taskId,
-    periodKey: meta.periodKey,
-  });
+  try {
+    await grantTaskRewards(userId, def.chipsReward, def.xpReward, {
+      taskId,
+      periodKey: meta.periodKey,
+    });
+  } catch (err) {
+    await UserTaskClaim.deleteOne({
+      userId,
+      taskId,
+      period: meta.period,
+      periodKey: meta.periodKey,
+    });
+    throw err;
+  }
 
   const { recordActivity } = require("./activityService");
   await recordActivity({
@@ -347,6 +392,17 @@ async function claimSingleTask(userId, taskId, period) {
 
   const wallet = await Wallet.findOne({ user: userId }).lean();
   const player = await Player.findOne({ user: userId }).lean();
+
+  // #region agent log
+  agentTaskLog("H-T2", "task claimed", {
+    taskId,
+    period: meta.period,
+    periodKey: meta.periodKey,
+    chips: def.chipsReward,
+    xp: def.xpReward,
+    balance: wallet?.balance || 0,
+  });
+  // #endregion
 
   return {
     taskId,
@@ -369,6 +425,20 @@ exports.getTasks = asyncHandler(async (req, res) => {
   const data = await buildTasksForUser(req.user._id, period);
   const player = await Player.findOne({ user: req.user._id }).lean();
   const wallet = await Wallet.findOne({ user: req.user._id }).lean();
+
+  // #region agent log
+  agentTaskLog("H-T1", "tasks list computed", {
+    period: data.period,
+    periodKey: data.periodKey,
+    total: data.total,
+    completed: data.completed,
+    claimable: data.claimable,
+    taskIds: (data.tasks || []).map((t) => t.id),
+    claimed: (data.tasks || []).filter((t) => t.isClaimed).length,
+    balance: wallet?.balance || 0,
+    level: player?.stats?.level || 1,
+  });
+  // #endregion
 
   res.status(200).json({
     status: "success",
