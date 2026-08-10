@@ -56,6 +56,7 @@ class Tarneeb41Game extends BaseGameEngine {
     this.declaredBids = [null, null, null, null];
     this.tricksThisRound = [0, 0, 0, 0];
     this.playerScores = [0, 0, 0, 0];
+    this.scoreLog = [];
     this.trick = [];
     this.lastTrick = [];
     this.ledSuit = null;
@@ -396,6 +397,7 @@ class Tarneeb41Game extends BaseGameEngine {
     this.sessionId = crypto.randomUUID();
     // New دق only — cumulative scores reset here, NEVER in dealRound/next_round.
     this.playerScores = [0, 0, 0, 0];
+    this.scoreLog = [];
     this.roundNumber = 0;
     this.dealRound(true);
     this.startBotTimer();
@@ -839,8 +841,22 @@ class Tarneeb41Game extends BaseGameEngine {
   }
 
   endRound() {
+    const before = [...this.playerScores];
     rules.applyRoundScores(this.declaredBids, this.tricksThisRound, this.playerScores);
+    const deltas = this.playerScores.map((s, i) => s - (before[i] || 0));
     this.roundNumber += 1;
+    if (!Array.isArray(this.scoreLog)) this.scoreLog = [];
+    this.scoreLog.push({
+      roundNumber: this.roundNumber,
+      declaredBids: this.declaredBids.map((b) => (b == null ? 0 : b)),
+      tricksThisRound: [...this.tricksThisRound],
+      deltas,
+      totals: [...this.playerScores],
+      teamADelta: (deltas[0] || 0) + (deltas[2] || 0),
+      teamBDelta: (deltas[1] || 0) + (deltas[3] || 0),
+      teamATotal: (this.playerScores[0] || 0) + (this.playerScores[2] || 0),
+      teamBTotal: (this.playerScores[1] || 0) + (this.playerScores[3] || 0),
+    });
     const end = rules.checkGameEnd(this.playerScores);
     this.clearTurnTimer();
     // #region agent log
@@ -1004,6 +1020,19 @@ class Tarneeb41Game extends BaseGameEngine {
       declaredBids: [...this.declaredBids],
       tricksThisRound: [...this.tricksThisRound],
       playerScores: [...this.playerScores],
+      scoreLog: Array.isArray(this.scoreLog)
+        ? this.scoreLog.map((row) => ({
+            roundNumber: row.roundNumber,
+            declaredBids: [...(row.declaredBids || [0, 0, 0, 0])],
+            tricksThisRound: [...(row.tricksThisRound || [0, 0, 0, 0])],
+            deltas: [...(row.deltas || [0, 0, 0, 0])],
+            totals: [...(row.totals || [0, 0, 0, 0])],
+            teamADelta: row.teamADelta ?? 0,
+            teamBDelta: row.teamBDelta ?? 0,
+            teamATotal: row.teamATotal ?? 0,
+            teamBTotal: row.teamBTotal ?? 0,
+          }))
+        : [],
       dealerIndex: this.dealerIndex,
       currentPlayerIndex: this.currentPlayerIndex,
       trickLeader: this.trickLeader,

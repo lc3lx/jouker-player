@@ -1,16 +1,45 @@
 const asyncHandler = require("express-async-handler");
+const fs = require("fs");
+const path = require("path");
 const Activity = require("../models/activityModel");
 const Player = require("../models/playerModel");
 const User = require("../models/userModel");
 const Wallet = require("../models/walletModel");
 const WalletTransaction = require("../models/walletTransactionModel");
 const Table = require("../models/tableModel");
+const {
+  XP_PER_LEVEL,
+} = require("../modules/playerProgress/config/playerProgressConfig");
 
 const FEED_CATEGORIES = {
   all: null,
   win: ["win"],
+  loss: ["loss"],
   task: ["task", "bonus"],
 };
+
+/** Aligned with playerProfileService — systematic win/loss for stats & charts. */
+const WIN_TX_TYPES = ["win", "game_win", "island_jackpot_win"];
+const LOSS_TX_TYPES = ["game_loss", "bet", "game_buyin"];
+
+// #region agent log
+function agentActLog(hypothesisId, message, data) {
+  try {
+    fs.appendFileSync(
+      path.join("D:", "work", "play", "debug-9f6022.log"),
+      `${JSON.stringify({
+        sessionId: "9f6022",
+        hypothesisId,
+        location: "activityService.js",
+        message,
+        data,
+        timestamp: Date.now(),
+        runId: "activities-fix",
+      })}\n`
+    );
+  } catch (_) {}
+}
+// #endregion
 
 function startOfUtcDay(d) {
   return new Date(Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), d.getUTCDate()));
@@ -39,13 +68,21 @@ function relativeAgeLabel(date, now = new Date()) {
 
 function formatTableLabel(table) {
   if (!table) return "طاولة";
+  const gameLabels = {
+    poker: "بوكر",
+    trix: "تركس",
+    tarneeb41: "طرنيب",
+  };
   const tierLabels = {
     beginner: "المبتدئين",
     intermediate: "المتوسط",
     beast: "المحترفين",
     private: "خاصة",
   };
+  const game = gameLabels[table.gameType] || "";
   const tier = tierLabels[table.tier] || table.tier || "";
+  if (game && tier) return `${game} · ${tier}`;
+  if (game) return game;
   return tier ? `طاولة ${tier}` : "طاولة";
 }
 
@@ -53,26 +90,52 @@ function mapTxToActivity(tx, tableName) {
   const amount = Math.floor(Number(tx.amount) || 0);
   const meta = tx.meta || {};
   const tableLabel = tableName || meta.tableName || "طاولة";
+  const age = relativeAgeLabel(tx.createdAt);
 
-  if (tx.type === "win") {
+  if (tx.type === "win" || tx.type === "game_win" || tx.type === "island_jackpot_win") {
     return {
       category: "win",
       label: `فزت في ${tableLabel}`,
-      subLabel: `${tableLabel} · ${relativeAgeLabel(tx.createdAt)}`,
+      subLabel: `${tableLabel} · ${age}`,
       amountDisplay: formatAmountSigned(amount),
       amountValue: amount,
       icon: "trophy",
     };
   }
 
-  if (tx.type === "bet") {
+  // Real loss (mini-games / settlement loss) — NOT a table buy-in/bet.
+  if (tx.type === "game_loss") {
     return {
       category: "loss",
       label: `خسرت في ${tableLabel}`,
-      subLabel: `${tableLabel} · ${relativeAgeLabel(tx.createdAt)}`,
+      subLabel: `${tableLabel} · ${age}`,
       amountDisplay: formatAmountSigned(-amount),
       amountValue: -amount,
       icon: "loss",
+    };
+  }
+
+  // Poker/card buy-in or ante — spending chips to play, not a "loss" result.
+  if (tx.type === "bet" || tx.type === "game_buyin") {
+    const isBuyIn = tx.type === "game_buyin";
+    return {
+      category: "other",
+      label: isBuyIn ? `دخول ${tableLabel}` : `رهان في ${tableLabel}`,
+      subLabel: `${tableLabel} · ${age}`,
+      amountDisplay: formatAmountSigned(-amount),
+      amountValue: -amount,
+      icon: "coins",
+    };
+  }
+
+  if (tx.type === "refund") {
+    return {
+      category: "bonus",
+      label: `استرداد من ${tableLabel}`,
+      subLabel: `${tableLabel} · ${age}`,
+      amountDisplay: formatAmountSigned(amount),
+      amountValue: amount,
+      icon: "gift",
     };
   }
 
@@ -80,7 +143,7 @@ function mapTxToActivity(tx, tableName) {
     return {
       category: "bonus",
       label: "حصلت على مكافأة الحضور اليومي",
-      subLabel: `المكافآت اليومية · ${relativeAgeLabel(tx.createdAt)}`,
+      subLabel: `المكافآت اليومية · ${age}`,
       amountDisplay: formatAmountSigned(amount),
       amountValue: amount,
       icon: "gift",
@@ -91,18 +154,18 @@ function mapTxToActivity(tx, tableName) {
     return {
       category: "bonus",
       label: "تم شحن الرصيد",
-      subLabel: `المحفظة · ${relativeAgeLabel(tx.createdAt)}`,
+      subLabel: `المحفظة · ${age}`,
       amountDisplay: formatAmountSigned(amount),
       amountValue: amount,
       icon: "gift",
     };
   }
 
-  if (tx.type === "cosmetic_purchase") {
+  if (tx.type === "cosmetic_purchase" || tx.type === "interaction_purchase") {
     return {
       category: "other",
       label: meta.itemName ? `اشتريت ${meta.itemName}` : "شراء من المتجر",
-      subLabel: `المتجر · ${relativeAgeLabel(tx.createdAt)}`,
+      subLabel: `المتجر · ${age}`,
       amountDisplay: formatAmountSigned(-amount),
       amountValue: -amount,
       icon: "star",
@@ -113,14 +176,48 @@ function mapTxToActivity(tx, tableName) {
     return {
       category: "other",
       label: "سحب من المحفظة",
-      subLabel: `المحفظة · ${relativeAgeLabel(tx.createdAt)}`,
+      subLabel: `المحفظة · ${age}`,
       amountDisplay: formatAmountSigned(-amount),
       amountValue: -amount,
       icon: "default",
     };
   }
 
+  if (tx.type === "referral_reward" || tx.type === "gift_received") {
+    return {
+      category: "bonus",
+      label: tx.type === "referral_reward" ? "مكافأة إحالة" : "هدية مستلمة",
+      subLabel: `المكافآت · ${age}`,
+      amountDisplay: formatAmountSigned(amount),
+      amountValue: amount,
+      icon: "gift",
+    };
+  }
+
   return null;
+}
+
+/** Fix historical rows that wrongly marked bets as losses. */
+async function repairMislabelledBetActivities(userId) {
+  const bad = await Activity.find({
+    userId,
+    category: "loss",
+    "meta.txType": { $in: ["bet", "game_buyin"] },
+  })
+    .limit(200)
+    .exec();
+
+  let fixed = 0;
+  for (const row of bad) {
+    const isBuyIn = row.meta?.txType === "game_buyin";
+    const nextLabel = String(row.label || "").replace(/^خسرت في/, isBuyIn ? "دخول" : "رهان في");
+    row.category = "other";
+    row.label = nextLabel;
+    row.icon = "coins";
+    await row.save();
+    fixed += 1;
+  }
+  return fixed;
 }
 
 async function resolveTableNames(tableIds) {
@@ -172,6 +269,8 @@ async function recordActivityFromTransaction(tx) {
 }
 
 async function backfillActivities(userId, limit = 50) {
+  await repairMislabelledBetActivities(userId);
+
   const txs = await WalletTransaction.find({ userId })
     .sort({ createdAt: -1 })
     .limit(limit)
@@ -236,7 +335,7 @@ async function buildWeeklyPnL(userId) {
     {
       $match: {
         userId,
-        type: { $in: ["win", "bet"] },
+        type: { $in: [...WIN_TX_TYPES, ...LOSS_TX_TYPES] },
         createdAt: { $gte: dayStart },
       },
     },
@@ -245,8 +344,16 @@ async function buildWeeklyPnL(userId) {
         _id: {
           $dateToString: { format: "%Y-%m-%d", date: "$createdAt", timezone: "UTC" },
         },
-        wins: { $sum: { $cond: [{ $eq: ["$type", "win"] }, "$amount", 0] } },
-        losses: { $sum: { $cond: [{ $eq: ["$type", "bet"] }, "$amount", 0] } },
+        wins: {
+          $sum: {
+            $cond: [{ $in: ["$type", WIN_TX_TYPES] }, "$amount", 0],
+          },
+        },
+        losses: {
+          $sum: {
+            $cond: [{ $in: ["$type", LOSS_TX_TYPES] }, "$amount", 0],
+          },
+        },
       },
     },
   ]);
@@ -259,22 +366,33 @@ async function buildWeeklyPnL(userId) {
   const arabicDays = ["أحد", "اثنين", "ثلاثاء", "أربعاء", "خميس", "جمعة", "سبت"];
   const days = [];
   let maxAbs = 1;
+  let weekNet = 0;
 
   for (let i = 6; i >= 0; i -= 1) {
     const d = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate() - i));
     const key = d.toISOString().slice(0, 10);
     const net = byDay[key] || 0;
+    weekNet += net;
     maxAbs = Math.max(maxAbs, Math.abs(net));
     const label = i === 0 ? "اليوم" : arabicDays[d.getUTCDay()];
-    days.push({ date: key, label, net, wins: net > 0 ? net : 0, losses: net < 0 ? Math.abs(net) : 0 });
+    days.push({
+      date: key,
+      label,
+      net,
+      wins: net > 0 ? net : 0,
+      losses: net < 0 ? Math.abs(net) : 0,
+    });
   }
 
   const barMaxHeight = 42;
-  return days.map((day) => ({
-    ...day,
-    barHeight: Math.max(4, Math.round((Math.abs(day.net) / maxAbs) * barMaxHeight)),
-    positive: day.net >= 0,
-  }));
+  return {
+    weekNet,
+    days: days.map((day) => ({
+      ...day,
+      barHeight: Math.max(4, Math.round((Math.abs(day.net) / maxAbs) * barMaxHeight)),
+      positive: day.net >= 0,
+    })),
+  };
 }
 
 exports.recordActivityFromTransaction = recordActivityFromTransaction;
@@ -347,29 +465,36 @@ exports.getActivitiesSummary = asyncHandler(async (req, res) => {
 
   const [user, player, wallet] = await Promise.all([
     User.findById(userId).select(
-      "name pokerHandsPlayed pokerHandsWon pokerWinStreak lastDailyBonusAt dailyBonusStreak"
+      "name profileImg pokerHandsPlayed pokerHandsWon pokerWinStreak lastDailyBonusAt dailyBonusStreak"
     ),
     Player.getOrCreateByUser(userId),
     Wallet.findOne({ user: userId }).lean(),
   ]);
 
   const s = player.stats || {};
-  const gamesPlayed = s.gamesPlayed || user?.pokerHandsPlayed || 0;
-  const wins = s.wins || user?.pokerHandsWon || 0;
+  // Prefer the higher of Player.stats vs User poker counters (same as profile).
+  const gamesPlayed = Math.max(
+    Math.floor(Number(s.gamesPlayed) || 0),
+    Math.floor(Number(user?.pokerHandsPlayed) || 0)
+  );
+  const wins = Math.max(
+    Math.floor(Number(s.wins) || 0),
+    Math.floor(Number(user?.pokerHandsWon) || 0)
+  );
   const winRate = gamesPlayed > 0 ? wins / gamesPlayed : 0;
 
   const since = new Date(Date.now() - 7 * 24 * 60 * 60 * 1000);
   const bestWinRow = await WalletTransaction.findOne({
     userId,
-    type: "win",
+    type: { $in: WIN_TX_TYPES },
     createdAt: { $gte: since },
   })
     .sort({ amount: -1 })
     .lean();
-  const bestProfit = bestWinRow?.amount || s.bestScore || 0;
+  const bestProfit = Math.floor(Number(bestWinRow?.amount) || Number(s.bestScore) || 0);
 
   const leaderboardRows = await WalletTransaction.aggregate([
-    { $match: { type: "win", createdAt: { $gte: since } } },
+    { $match: { type: { $in: WIN_TX_TYPES }, createdAt: { $gte: since } } },
     { $group: { _id: "$userId", totalWon: { $sum: "$amount" } } },
     { $sort: { totalWon: -1 } },
     { $limit: 5 },
@@ -394,12 +519,27 @@ exports.getActivitiesSummary = asyncHandler(async (req, res) => {
 
   const myRankIndex = leaderboardRows.findIndex((r) => String(r.userId) === String(userId));
   const dailyTasks = await buildDailyTasks(user);
-  const weeklyPnL = await buildWeeklyPnL(userId);
-  const level = s.level || 1;
-  const experience = s.experience || 0;
-  const xpPerLevel = 2500;
+  const weekly = await buildWeeklyPnL(userId);
+  const experience = Math.floor(Number(s.experience) || 0);
+  const level = Math.max(1, Math.floor(Number(s.level) || 1));
+  const xpPerLevel = XP_PER_LEVEL;
   const xpInLevel = experience % xpPerLevel;
-  const xpProgress = xpInLevel / xpPerLevel;
+  const xpProgress = xpPerLevel > 0 ? xpInLevel / xpPerLevel : 0;
+
+  // #region agent log
+  agentActLog("H-ACT-1", "activities summary computed", {
+    gamesPlayed,
+    wins,
+    winRate: Math.round(winRate * 1000) / 1000,
+    bestProfit,
+    level,
+    experience,
+    xpInLevel,
+    xpPerLevel,
+    weekNet: weekly.weekNet,
+    leaders: leaderboardRows.length,
+  });
+  // #endregion
 
   res.status(200).json({
     status: "success",
@@ -427,7 +567,8 @@ exports.getActivitiesSummary = asyncHandler(async (req, res) => {
       })),
       myLeaderboardRank: myRankIndex >= 0 ? myRankIndex + 1 : null,
       dailyTasks,
-      weeklyPnL,
+      weeklyPnL: weekly.days,
+      weekNet: weekly.weekNet,
     },
   });
 });
