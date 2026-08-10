@@ -435,9 +435,35 @@ exports.getActivitiesFeed = asyncHandler(async (req, res) => {
   ]);
 
   const now = new Date();
+  const data = rows.map((row) => ({
+    id: row._id,
+    category: row.category,
+    label: row.label,
+    subLabel: row.subLabel,
+    amountDisplay: row.amountDisplay,
+    amountValue: row.amountValue,
+    icon: row.icon,
+    ageLabel: relativeAgeLabel(row.createdAt, now),
+    createdAt: row.createdAt,
+  }));
+
+  // #region agent log
+  const catCounts = {};
+  for (const row of data) {
+    catCounts[row.category] = (catCounts[row.category] || 0) + 1;
+  }
+  agentActLog("H-F1", "activities feed filtered", {
+    filter,
+    total,
+    returned: data.length,
+    catCounts,
+    queryCats: cats || "all",
+  });
+  // #endregion
+
   res.status(200).json({
     status: "success",
-    results: rows.length,
+    results: data.length,
     pagination: {
       currentPage: page,
       limit,
@@ -445,17 +471,7 @@ exports.getActivitiesFeed = asyncHandler(async (req, res) => {
       numberOfPages: Math.ceil(total / limit) || 1,
       next: page * limit < total ? page + 1 : null,
     },
-    data: rows.map((row) => ({
-      id: row._id,
-      category: row.category,
-      label: row.label,
-      subLabel: row.subLabel,
-      amountDisplay: row.amountDisplay,
-      amountValue: row.amountValue,
-      icon: row.icon,
-      ageLabel: relativeAgeLabel(row.createdAt, now),
-      createdAt: row.createdAt,
-    })),
+    data,
   });
 });
 
@@ -538,6 +554,10 @@ exports.getActivitiesSummary = asyncHandler(async (req, res) => {
     xpPerLevel,
     weekNet: weekly.weekNet,
     leaders: leaderboardRows.length,
+    dailyTasksCompleted: dailyTasks.completed,
+    dailyTasksTotal: dailyTasks.total,
+    dailyTaskIds: (dailyTasks.tasks || []).map((t) => t.id),
+    weeklyDays: (weekly.days || []).map((d) => ({ label: d.label, net: d.net })),
   });
   // #endregion
 
