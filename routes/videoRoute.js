@@ -8,7 +8,7 @@ const router = express.Router();
 
 /**
  * @route   GET /api/v1/video/token?tableId=
- * @access  Private — must be seated at the poker table (Mongo seats)
+ * @access  Private — must be seated at poker / trix / tarneeb41 table (Mongo seats)
  */
 router.get(
   "/token",

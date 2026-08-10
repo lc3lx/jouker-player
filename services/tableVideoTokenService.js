@@ -18,7 +18,9 @@ function liveKitRoomNameForTable(tableId) {
   return id;
 }
 
-async function assertUserSeatedAtPokerTable(userId, tableId) {
+const VIDEO_CHAT_GAME_TYPES = new Set(["poker", "trix", "tarneeb41"]);
+
+async function assertUserSeatedAtVideoTable(userId, tableId) {
   const room = liveKitRoomNameForTable(tableId);
   if (!room) {
     throw new ApiError("Invalid tableId", 400);
@@ -30,8 +32,8 @@ async function assertUserSeatedAtPokerTable(userId, tableId) {
   }
 
   const gt = String(table.gameType || "poker");
-  if (gt !== "poker") {
-    throw new ApiError("Video is only available on poker tables", 403);
+  if (!VIDEO_CHAT_GAME_TYPES.has(gt)) {
+    throw new ApiError("Video is not available for this game type", 403);
   }
 
   const uid = String(userId);
@@ -41,7 +43,12 @@ async function assertUserSeatedAtPokerTable(userId, tableId) {
     throw new ApiError("You must be seated at this table to use video chat", 403);
   }
 
-  return { roomName: room };
+  return { roomName: room, gameType: gt };
+}
+
+/** @deprecated Use assertUserSeatedAtVideoTable */
+async function assertUserSeatedAtPokerTable(userId, tableId) {
+  return assertUserSeatedAtVideoTable(userId, tableId);
 }
 
 /**
@@ -54,7 +61,7 @@ async function createPokerTableVideoToken({ userId, tableId, displayName }) {
     throw new ApiError("LiveKit is not configured (LIVEKIT_URL)", 503);
   }
 
-  const { roomName } = await assertUserSeatedAtPokerTable(userId, tableId);
+  const { roomName } = await assertUserSeatedAtVideoTable(userId, tableId);
 
   const ttlSec = Math.max(
     120,
@@ -92,6 +99,8 @@ async function createPokerTableVideoToken({ userId, tableId, displayName }) {
 
 module.exports = {
   liveKitRoomNameForTable,
+  VIDEO_CHAT_GAME_TYPES,
+  assertUserSeatedAtVideoTable,
   assertUserSeatedAtPokerTable,
   createPokerTableVideoToken,
 };

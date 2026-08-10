@@ -394,6 +394,9 @@ class Tarneeb41Game extends BaseGameEngine {
       await this._beforeDealStart();
     }
     this.sessionId = crypto.randomUUID();
+    // New دق only — cumulative scores reset here, NEVER in dealRound/next_round.
+    this.playerScores = [0, 0, 0, 0];
+    this.roundNumber = 0;
     this.dealRound(true);
     this.startBotTimer();
     return true;
@@ -465,6 +468,21 @@ class Tarneeb41Game extends BaseGameEngine {
     this.trick = [];
     this.lastTrick = [];
     this.ledSuit = null;
+    // Keep this.playerScores — cumulative across جولات until game_end / next startGame.
+    // #region agent log
+    try {
+      const { agentDebugLog } = require("../../utils/agentDebugLog");
+      const s = this.playerScores || [];
+      agentDebugLog("H-scoreKeep", "Tarneeb41Game.js:dealRound", "dealRound preserves cumulative scores", {
+        tableId: String(this.roomId),
+        scores: [...s],
+        team0: (s[0] || 0) + (s[2] || 0),
+        team1: (s[1] || 0) + (s[3] || 0),
+        roundNumber: this.roundNumber,
+        rotateDealer: !!rotateDealer,
+      });
+    } catch (_) {}
+    // #endregion
     this.state = "bidding_syrian";
     this._fsm.transition(T41_STATE.BIDDING_SYRIAN);
     this.currentPlayerIndex = (this.dealerIndex + 1) % 4;

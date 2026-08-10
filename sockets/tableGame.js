@@ -2210,7 +2210,44 @@ class PokerTable {
     for (let i = 0; i < toAdd; i++) {
       this.seats.push(this.createBotSeat());
     }
+    this.reindexSeatsByPosition();
     return toAdd;
+  }
+
+  /**
+   * Keep seats[] sorted by physical chair and remap role indices by userId.
+   * Safe after bot fills / joins that push out of chair order.
+   */
+  reindexSeatsByPosition() {
+    if (!Array.isArray(this.seats) || this.seats.length <= 1) return;
+    const dealerId = this.seats[this.dealerIndex]?.userId;
+    const currentId = this.seats[this.currentIndex]?.userId;
+    const sbId =
+      this.sbSeatIndex != null && this.sbSeatIndex >= 0
+        ? this.seats[this.sbSeatIndex]?.userId
+        : null;
+    const bbId =
+      this.bbSeatIndex != null && this.bbSeatIndex >= 0
+        ? this.seats[this.bbSeatIndex]?.userId
+        : null;
+    this.seats = sortSeatsByPosition(this.seats);
+    const find = (uid) => {
+      if (uid == null) return -1;
+      return this.seats.findIndex((s) => String(s?.userId) === String(uid));
+    };
+    const di = find(dealerId);
+    if (di >= 0) this.dealerIndex = di;
+    else if (this.seats.length > 0) {
+      this.dealerIndex =
+        ((this.dealerIndex % this.seats.length) + this.seats.length) %
+        this.seats.length;
+    }
+    const ci = find(currentId);
+    if (ci >= 0) this.currentIndex = ci;
+    const sbi = find(sbId);
+    if (sbi >= 0) this.sbSeatIndex = sbi;
+    const bbi = find(bbId);
+    if (bbi >= 0) this.bbSeatIndex = bbi;
   }
 
   scheduleBotFillIfNeeded() {
@@ -2454,12 +2491,29 @@ class PokerTable {
   }
 
   seatOrderFrom(dealerIndex) {
-    const n = this.seats.length;
+    // Clockwise by physical chair (seatPosition), not engine array index.
+    // Array order can be [0,4,1,2] after bot fills — that must not drive blinds/turn.
+    const cap = Math.max(2, toSafeInt(this.capacity, POKER_CAPACITY) || POKER_CAPACITY);
+    const dealerPos = this._seatPositionOf(dealerIndex);
     const order = [];
-    for (let i = 1; i <= n; i++) {
-      order.push((dealerIndex + i) % n);
+    for (let k = 1; k <= cap; k++) {
+      const pos = (dealerPos + k) % cap;
+      const i = this._indexAtSeatPosition(pos);
+      if (i >= 0) order.push(i);
     }
     return order;
+  }
+
+  _seatPositionOf(index) {
+    const s = this.seats[index];
+    if (!s) return 0;
+    return toSafeInt(s.seatPosition, index);
+  }
+
+  _indexAtSeatPosition(pos) {
+    const target = toSafeInt(pos, -1);
+    if (target < 0) return -1;
+    return this.seats.findIndex((s) => toSafeInt(s?.seatPosition, -1) === target);
   }
 
   dealHoleCards(deck) {
@@ -2497,13 +2551,37 @@ class PokerTable {
   }
 
   nextToActIndex(startIdx) {
-    const n = this.seats.length;
-    for (let k = 0; k < n; k++) {
-      const i = (startIdx + k) % n;
+    // Inclusive clockwise search by seatPosition starting at startIdx's chair.
+    const cap = Math.max(2, toSafeInt(this.capacity, POKER_CAPACITY) || POKER_CAPACITY);
+    if (!this.seats.length) return -1;
+    const startPos =
+      startIdx >= 0 && startIdx < this.seats.length
+        ? this._seatPositionOf(startIdx)
+        : this._seatPositionOf(0);
+    for (let k = 0; k < cap; k++) {
+      const pos = (startPos + k) % cap;
+      const i = this._indexAtSeatPosition(pos);
+      if (i < 0) continue;
       const s = this.seats[i];
-      if (s.inHand && !s.folded && !s.allIn) {
-        return i;
-      }
+      if (s && s.inHand && !s.folded && !s.allIn) return i;
+    }
+    return -1;
+  }
+
+  /** Next eligible actor strictly after [fromIdx]'s physical chair. */
+  nextToActAfter(fromIdx) {
+    const cap = Math.max(2, toSafeInt(this.capacity, POKER_CAPACITY) || POKER_CAPACITY);
+    if (!this.seats.length) return -1;
+    const fromPos =
+      fromIdx >= 0 && fromIdx < this.seats.length
+        ? this._seatPositionOf(fromIdx)
+        : this._seatPositionOf(0);
+    for (let k = 1; k <= cap; k++) {
+      const pos = (fromPos + k) % cap;
+      const i = this._indexAtSeatPosition(pos);
+      if (i < 0) continue;
+      const s = this.seats[i];
+      if (s && s.inHand && !s.folded && !s.allIn) return i;
     }
     return -1;
   }
@@ -3229,8 +3307,29 @@ class PokerTable {
       return;
     }
 
-    // Otherwise move to next player
-    this.currentIndex = this.nextToActIndex(this.currentIndex + 1);
+    // Otherwise move to next player (clockwise by seatPosition, not array index).
+    const prevIndex = this.currentIndex;
+    this.currentIndex = this.nextToActAfter(this.currentIndex);
+    // #region agent log
+    try {
+      const { agentDebugLog } = require("../utils/agentDebugLog");
+      agentDebugLog("H-pokerTurn", "tableGame.js:advance", "next actor by seatPosition", {
+        tableId: String(this.tableId),
+        prevIndex,
+        prevChair: this._seatPositionOf(prevIndex),
+        nextIndex: this.currentIndex,
+        nextChair:
+          this.currentIndex >= 0 ? this._seatPositionOf(this.currentIndex) : null,
+        chairs: this.seats.map((s, i) => ({
+          i,
+          chair: toSafeInt(s?.seatPosition, i),
+          inHand: !!s?.inHand,
+          folded: !!s?.folded,
+          allIn: !!s?.allIn,
+        })),
+      });
+    } catch (_) {}
+    // #endregion
     await this.broadcastState();
     this.scheduleCurrentTurn();
   }
