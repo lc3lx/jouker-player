@@ -5,6 +5,7 @@ const Wallet = require("../models/walletModel");
 const WalletTransaction = require("../models/walletTransactionModel");
 const Achievement = require("../models/achievementModel");
 const Table = require("../models/tableModel");
+const vipService = require("./vipService");
 
 const XP_PER_LEVEL = 2500;
 
@@ -82,7 +83,7 @@ async function resolveTableLabels(tableIds) {
 exports.getProfileSummary = asyncHandler(async (req, res) => {
   const userId = req.user._id;
 
-  const [user, player, wallet, txs, bestWinRow, dbAchievements] = await Promise.all([
+  const [user, player, wallet, txs, bestWinRow, dbAchievements, vipLevel] = await Promise.all([
     User.findById(userId).select(
       "name email country profileImg pokerHandsPlayed pokerHandsWon pokerWinStreak dailyBonusStreak createdAt"
     ),
@@ -94,6 +95,7 @@ exports.getProfileSummary = asyncHandler(async (req, res) => {
       .lean(),
     WalletTransaction.findOne({ userId, type: "win" }).sort({ amount: -1 }).lean(),
     Achievement.find({ isActive: { $ne: false } }).limit(12).lean(),
+    vipService.getVipLevel(userId),
   ]);
 
   if (!user) {
@@ -189,7 +191,9 @@ exports.getProfileSummary = asyncHandler(async (req, res) => {
       badges,
       matchHistory,
       achievementsCatalogCount: dbAchievements.length,
-      isVip: dailyBonusStreak >= 7 || level >= 10,
+      // Real VIP subscription only — never infer from streak/level.
+      isVip: !!vipLevel,
+      vipLevel: vipLevel || null,
     },
   });
 });
