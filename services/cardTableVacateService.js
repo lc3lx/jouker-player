@@ -36,8 +36,48 @@ function vacateMsFor(gameType) {
 /** @type {Map<string, NodeJS.Timeout>} */
 const vacateTimers = new Map();
 
+/** Delayed wipe when a table is bot-only after the last human vacated. */
+/** @type {Map<string, NodeJS.Timeout>} */
+const botOnlyAbandonTimers = new Map();
+
 function timerKey(gameType, tableId, userId) {
   return `${gameType}:${String(tableId)}:${String(userId)}`;
+}
+
+function botOnlyAbandonKey(gameType, tableId) {
+  return `${gameType}:${String(tableId)}`;
+}
+
+function cancelBotOnlyAbandon({ gameType, tableId }) {
+  const key = botOnlyAbandonKey(gameType, tableId);
+  const t = botOnlyAbandonTimers.get(key);
+  if (t) {
+    clearTimeout(t);
+    botOnlyAbandonTimers.delete(key);
+  }
+}
+
+/**
+ * After the last human is converted to a bot, keep the in-memory hand alive
+ * briefly so a reconnect can reclaim via vacatedFromUserId / Mongo seat.
+ * Intentional leave still abandons immediately elsewhere.
+ */
+function scheduleBotOnlyAbandon({ gameType, tableId, nsp }) {
+  if (gameType !== "tarneeb41" && gameType !== "trix") return;
+  cancelBotOnlyAbandon({ gameType, tableId });
+  const delayMs = vacateMsFor(gameType);
+  const key = botOnlyAbandonKey(gameType, tableId);
+  const timer = setTimeout(() => {
+    botOnlyAbandonTimers.delete(key);
+    void abandonCardTableIfNoHumans(nsp, gameType, tableId);
+  }, delayMs);
+  if (typeof timer.unref === "function") timer.unref();
+  botOnlyAbandonTimers.set(key, timer);
+  logger.info("card_table_bot_only_abandon_scheduled", {
+    gameType,
+    tableId: String(tableId),
+    delayMs,
+  });
 }
 
 function getGame(gameType, tableId) {
@@ -305,26 +345,33 @@ async function finalizeCardTableVacate({ gameType, tableId, userId, nsp, intenti
     roomManager.trixUserSocket.delete(String(userId));
 
     if (wasLastTrixHuman) {
-      if (typeof game.clearBotTimer === "function") game.clearBotTimer();
-      if (typeof game.clearTurnTimer === "function") game.clearTurnTimer();
-      logger.info("trix_last_human_vacate_reset", {
+      // Keep Mongo seat + in-memory vacated bot so reconnect can reclaim.
+      // Wipe only after an extra bot-only window (see scheduleBotOnlyAbandon).
+      logger.info("trix_last_human_vacate_bot_hold", {
         tableId: String(tableId),
         userId: String(userId),
       });
-      await abandonTrixTableIfNoHumans(tableId);
-      return;
+      try {
+        if (typeof game.checkBotTurn === "function") game.checkBotTurn();
+      } catch (_) {
+        /* stub / mid-teardown gameState */
+      }
+    } else {
+      try {
+        await releaseTrixMongoSeatOnVacate(tableId, userId);
+      } catch (err) {
+        logger.warn("trix_vacate_mongo_seat_release_failed", {
+          tableId: String(tableId),
+          userId: String(userId),
+          reason: err?.message,
+        });
+      }
+      try {
+        if (typeof game.checkBotTurn === "function") game.checkBotTurn();
+      } catch (_) {
+        /* stub / mid-teardown gameState */
+      }
     }
-
-    try {
-      await releaseTrixMongoSeatOnVacate(tableId, userId);
-    } catch (err) {
-      logger.warn("trix_vacate_mongo_seat_release_failed", {
-        tableId: String(tableId),
-        userId: String(userId),
-        reason: err?.message,
-      });
-    }
-    if (typeof game.checkBotTurn === "function") game.checkBotTurn();
   }
 
   logger.info("card_table_vacate_bot_replaced", {
@@ -354,7 +401,13 @@ async function finalizeCardTableVacate({ gameType, tableId, userId, nsp, intenti
     }
   }
 
-  await abandonCardTableIfNoHumans(nsp, gameType, tableId);
+  const humansLeft =
+    typeof game?.humanCount === "function"
+      ? game.humanCount()
+      : (game?.players || []).filter((p) => !p.isBot).length;
+  if (humansLeft === 0) {
+    scheduleBotOnlyAbandon({ gameType, tableId, nsp });
+  }
 }
 
 /**
@@ -652,12 +705,10 @@ async function purgeVacatingEntry(tableId, userId) {
 }
 
 function onCardTableRejoin({ gameType, tableId, userId }) {
-  const game = getGame(gameType, tableId);
-  const player = findHumanPlayer(game, userId);
-  if (!isWithinVacateGrace(player)) {
-    return;
-  }
+  // Always clear pending timers — a race at the exact grace boundary used to
+  // skip cancel and then finalize while join was in flight (ghost seatLost UI).
   cancelCardTableVacate({ gameType, tableId, userId });
+  cancelBotOnlyAbandon({ gameType, tableId });
 }
 
 /**
@@ -675,6 +726,8 @@ module.exports = {
   vacateMsFor,
   scheduleCardTableVacate,
   cancelCardTableVacate,
+  cancelBotOnlyAbandon,
+  scheduleBotOnlyAbandon,
   finalizeCardTableVacate,
   finalizeCardTableVacateNow,
   intentionalLeaveCardTable,

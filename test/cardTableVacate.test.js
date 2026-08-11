@@ -205,7 +205,7 @@ test("Trix checkBotTurn Trix skip notifies state listener", () => {
   game.destroy();
 });
 
-test("onCardTableRejoin does not cancel vacate after grace expired", () => {
+test("onCardTableRejoin always clears vacate timer and deadline", () => {
   const { onCardTableRejoin } = require("../services/cardTableVacateService");
   const tableId = `no_cancel_${Date.now()}`;
   const game = new TrixGame("r1", { mongoTableId: tableId });
@@ -221,13 +221,14 @@ test("onCardTableRejoin does not cancel vacate after grace expired", () => {
   roomManager.trixGamesByTableId.set(tableId, game);
 
   onCardTableRejoin({ gameType: "trix", tableId, userId: "u1" });
-  assert.ok(game.players[0].reconnectDeadline < Date.now());
+  // Even past the grace boundary, a successful join path must cancel finalize.
+  assert.equal(game.players[0].reconnectDeadline, null);
 
   game.destroy();
   roomManager.trixGamesByTableId.delete(tableId);
 });
 
-test("finalizeCardTableVacate clears trix game when last human times out", async () => {
+test("finalizeCardTableVacate holds trix game for reclaim when last human times out", async () => {
   const tableId = `last_human_${Date.now()}`;
   const game = new TrixGame("r1", { mongoTableId: tableId });
   game.state = "playing";
@@ -253,17 +254,24 @@ test("finalizeCardTableVacate clears trix game when last human times out", async
   }
   roomManager.trixGamesByTableId.set(String(tableId), game);
 
+  const nsp = { sockets: new Map() };
   await finalizeCardTableVacate({
     gameType: "trix",
     tableId,
     userId: "u1",
-    nsp: { sockets: new Map() },
+    nsp,
   });
 
-  assert.equal(roomManager.getTrixGameForTable(String(tableId)), null);
+  // Keep vacated bot mid-hand so reconnect can reclaim; wipe is delayed.
+  assert.ok(roomManager.getTrixGameForTable(String(tableId)));
   assert.equal(game.players[0].isBot, true);
   assert.equal(game.humanCount(), 0);
+  assert.equal(String(game.players[0].vacatedFromUserId), "u1");
 
+  const { cancelBotOnlyAbandon } = require("../services/cardTableVacateService");
+  cancelBotOnlyAbandon({ gameType: "trix", tableId });
+  game.destroy();
+  roomManager.trixGamesByTableId.delete(String(tableId));
   roomManager.userToTrixTableId.delete("u1");
 });
 

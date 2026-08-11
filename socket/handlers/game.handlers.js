@@ -655,8 +655,22 @@ function registerGameHandlers(nsp, jwtVerify) {
           return;
         }
         const userIdStr = String(userId);
+        let game = roomManager.getTrixGameForTable(table._id);
+        const stillInEngine =
+          !!game &&
+          typeof game.getPlayerIndex === "function" &&
+          game.getPlayerIndex(userId) >= 0;
+        const vacatedBotSeat = Array.isArray(game?.players)
+          ? game.players.find(
+              (p) =>
+                p &&
+                p.isBot &&
+                p.vacatedFromUserId &&
+                String(p.vacatedFromUserId) === userIdStr
+            )
+          : null;
         const seated = table.seats.some((s) => seatUserId(s) === userIdStr);
-        if (!seated) {
+        if (!seated && !stillInEngine && !vacatedBotSeat) {
           emitInvalidMove(socket, "not_seated_at_table" );
           return;
         }
@@ -665,7 +679,7 @@ function registerGameHandlers(nsp, jwtVerify) {
         roomManager.setTrixUserSocket(String(userId), socket.id);
         roomManager.setUserTrixTable(String(userId), String(table._id));
         await socketPresenceService.registerSocket(table._id, userId, socket.id);
-        let game = getOrCreateTrixGameWired(nsp, table._id);
+        game = getOrCreateTrixGameWired(nsp, table._id);
 
         if (
           await abortCardTableRestartZombie({
@@ -676,6 +690,25 @@ function registerGameHandlers(nsp, jwtVerify) {
           })
         ) {
           return;
+        }
+
+        // Reclaim this user's vacated bot seat BEFORE the bot-only wipe.
+        if (game && typeof game.getPlayerIndex === "function" && game.getPlayerIndex(userId) < 0) {
+          const bot = (game.players || []).find(
+            (p) =>
+              p &&
+              p.isBot &&
+              p.vacatedFromUserId &&
+              String(p.vacatedFromUserId) === userIdStr
+          );
+          if (bot && typeof game.restoreHumanAtSeat === "function") {
+            let nm = `لاعب ${(bot.seatIndex ?? 0) + 1}`;
+            try {
+              const u = await require("../../models/userModel").findById(userId).select("name");
+              if (u?.name) nm = String(u.name);
+            } catch (_) {}
+            await game.restoreHumanAtSeat(bot.seatIndex, userId, socket.id, nm);
+          }
         }
 
         // Safety: never reattach a human into a bot-only mid-hand ghost after the
@@ -821,8 +854,22 @@ function registerGameHandlers(nsp, jwtVerify) {
           return;
         }
         const userIdStr = String(userId);
+        let game = roomManager.getTarneeb41GameForTable(table._id);
+        const stillInEngine =
+          !!game &&
+          typeof game.getPlayerIndex === "function" &&
+          game.getPlayerIndex(userId) >= 0;
+        const vacatedBotSeat = Array.isArray(game?.players)
+          ? game.players.find(
+              (p) =>
+                p &&
+                p.isBot &&
+                p.vacatedFromUserId &&
+                String(p.vacatedFromUserId) === userIdStr
+            )
+          : null;
         const seated = table.seats.some((s) => seatUserId(s) === userIdStr);
-        if (!seated) {
+        if (!seated && !stillInEngine && !vacatedBotSeat) {
           emitInvalidMove(socket, "not_seated_at_table" );
           return;
         }
@@ -831,7 +878,7 @@ function registerGameHandlers(nsp, jwtVerify) {
         roomManager.setTarneeb41UserSocket(String(userId), socket.id);
         roomManager.setUserTarneeb41Table(String(userId), String(table._id));
         await socketPresenceService.registerSocket(table._id, userId, socket.id);
-        let game = getOrCreateTarneeb41GameWired(nsp, table._id);
+        game = getOrCreateTarneeb41GameWired(nsp, table._id);
 
         if (
           await abortCardTableRestartZombie({
@@ -842,6 +889,25 @@ function registerGameHandlers(nsp, jwtVerify) {
           })
         ) {
           return;
+        }
+
+        // Reclaim this user's vacated bot seat BEFORE the bot-only wipe.
+        if (game && typeof game.getPlayerIndex === "function" && game.getPlayerIndex(userId) < 0) {
+          const bot = (game.players || []).find(
+            (p) =>
+              p &&
+              p.isBot &&
+              p.vacatedFromUserId &&
+              String(p.vacatedFromUserId) === userIdStr
+          );
+          if (bot && typeof game.restoreHumanAtSeat === "function") {
+            let nm = `لاعب ${(bot.seatIndex ?? 0) + 1}`;
+            try {
+              const u = await require("../../models/userModel").findById(userId).select("name");
+              if (u?.name) nm = String(u.name);
+            } catch (_) {}
+            await game.restoreHumanAtSeat(bot.seatIndex, userId, socket.id, nm);
+          }
         }
 
         // Safety: never reattach into a bot-only mid-hand ghost after last human left.
