@@ -432,10 +432,18 @@ exports.getTables = asyncHandler(async (req, res) => {
       filter.minBuyIn = buyIn;
       filter.maxBuyIn = buyIn;
     }
-  } else if (gameType === "tarneeb41" && !req.query.status) {
-    filter.status = "open";
+  } else if (
+    gameType === "tarneeb41" &&
+    (!req.query.status || req.query.status === "open")
+  ) {
+    // "open" in the lobby means joinable: waiting tables OR mid-hand tables
+    // that still have bot seats (Mongo human seats < capacity).
+    filter.status = { $in: ["open", "playing"] };
     filter.$expr = { $lt: [{ $size: "$seats" }, "$capacity"] };
-  } else if (gameType === "trix" && !req.query.status) {
+  } else if (
+    gameType === "trix" &&
+    (!req.query.status || req.query.status === "open")
+  ) {
     filter.status = "open";
     filter.$expr = { $lt: [{ $size: "$seats" }, "$capacity"] };
   } else if (req.query.status) {

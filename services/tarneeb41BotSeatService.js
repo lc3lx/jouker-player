@@ -98,33 +98,30 @@ async function tryClaimTarneeb41BotSeat({
       const table = await Table.findById(tid).session(session);
       if (!table || table.gameType !== "tarneeb41") throw new Error("NOT_TARNEEB41");
 
-      const seatedElsewhere = table.seats.findIndex((s) => String(s.user) === uid);
-      if (seatedElsewhere >= 0 && seatedElsewhere !== seatIndex) {
-        throw new Error("ALREADY_SEATED_OTHER_SEAT");
-      }
-
-      if (isRestore && seatedElsewhere === seatIndex) {
+      const seatedIdx = table.seats.findIndex((s) => String(s.user) === uid);
+      if (seatedIdx >= 0) {
+        // Already on this table in Mongo — engine replace below is enough.
         claimed = true;
         return;
       }
 
+      // Active humans still in the engine must never be overwritten. Mongo
+      // seats are a dense list of humans (not engine seatIndex slots), so
+      // always upsert the claimant by userId instead of seats[engineIndex].
+      const activeHumanIds = new Set(
+        (game.players || [])
+          .filter((p) => p && !p.isBot && p.userId)
+          .map((p) => String(p.userId))
+      );
+
       if (isRestore) {
         const vac = findVacatingEntry(table, uid);
         const chips = vac ? Number(vac.chips) || buyIn : buyIn;
-        while (table.seats.length < seatIndex) {
-          throw new Error("SEAT_INDEX_GAP");
-        }
-        if (table.seats.length === seatIndex) {
-          table.seats.push({
-            user: userId,
-            player: playerId,
-            chips,
-          });
-        } else {
-          table.seats[seatIndex].user = userId;
-          table.seats[seatIndex].player = playerId;
-          table.seats[seatIndex].chips = chips;
-        }
+        table.seats.push({
+          user: userId,
+          player: playerId,
+          chips,
+        });
         table.vacatingPlayers = (table.vacatingPlayers || []).filter(
           (v) => String(v.user) !== uid
         );
@@ -133,37 +130,19 @@ async function tryClaimTarneeb41BotSeat({
         return;
       }
 
-      const existingAtSeat =
-        table.seats.length > seatIndex ? table.seats[seatIndex] : null;
-      if (existingAtSeat && String(existingAtSeat.user) === uid) {
-        claimed = true;
-        return;
-      }
-
       if (buyIn < table.minBuyIn || buyIn > table.maxBuyIn) {
         throw new Error("INVALID_BUYIN");
       }
 
-      if (existingAtSeat) {
-        const oldUid = existingAtSeat.user;
-        const oldChips = Number(existingAtSeat.chips) || 0;
-        if (oldChips > 0) {
-          await forfeitTableSeatLock({
-            session,
-            userId: oldUid,
-            tableId: tid,
-            seatChips: oldChips,
-            meta: { reason: "tarneeb41_bot_seat_takeover", seatIndex },
-          });
-        }
-        table.vacatingPlayers = (table.vacatingPlayers || []).filter(
-          (v) =>
-            !(
-              Number(v.seatIndex) === seatIndex &&
-              String(v.user) === String(oldUid)
-            )
-        );
-      }
+      // Optional: clear a stale vacatingPlayers row for this engine seat's
+      // previous human (already spliced from seats on vacate).
+      table.vacatingPlayers = (table.vacatingPlayers || []).filter((v) => {
+        if (Number(v.seatIndex) !== seatIndex) return true;
+        const vacUid = String(v.user);
+        // Keep other seats' grace entries; drop the one for this bot slot
+        // only when that user is no longer an active human.
+        return activeHumanIds.has(vacUid);
+      });
 
       await transferToLocked({
         session,
@@ -173,16 +152,7 @@ async function tryClaimTarneeb41BotSeat({
         meta: { reason: "tarneeb41_bot_seat_claim", seatIndex },
       });
 
-      while (table.seats.length < seatIndex) {
-        throw new Error("SEAT_INDEX_GAP");
-      }
-      if (table.seats.length === seatIndex) {
-        table.seats.push({ user: userId, player: playerId, chips: buyIn });
-      } else {
-        table.seats[seatIndex].user = userId;
-        table.seats[seatIndex].player = playerId;
-        table.seats[seatIndex].chips = buyIn;
-      }
+      table.seats.push({ user: userId, player: playerId, chips: buyIn });
 
       if (table.seats.length >= table.capacity) {
         table.status = "playing";

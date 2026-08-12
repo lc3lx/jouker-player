@@ -3,8 +3,13 @@ const assert = require("node:assert/strict");
 const Tarneeb41Game = require("../games/tarneeb41/Tarneeb41Game");
 const { listReplaceableBotSeats } = require("../services/tarneeb41BotSeatService");
 
-test("replaceBotWithHuman allows takeover when allowTakeover is true", () => {
+function stubCosmetics(game) {
+  game.applyCosmeticsToPlayers = async () => {};
+}
+
+test("replaceBotWithHuman allows takeover when allowTakeover is true", async () => {
   const game = new Tarneeb41Game("r1", { mongoTableId: "t1" });
+  stubCosmetics(game);
   game.state = "bidding_syrian";
   game.players.push({
     userId: "bot_vacate_1",
@@ -16,20 +21,21 @@ test("replaceBotWithHuman allows takeover when allowTakeover is true", () => {
     vacatedFromUserId: "u_original",
   });
   assert.equal(
-    game.replaceBotWithHuman(1, "u_new", "sock", "New Player", {
+    await game.replaceBotWithHuman(1, "u_new", "sock", "New Player", {
       allowTakeover: true,
       chips: 1000,
     }),
     true
   );
   assert.equal(game.players[0].isBot, false);
-  assert.equal(game.players[0].userId, "u_new");
+  assert.equal(String(game.players[0].userId), "u_new");
   assert.equal(game.players[0].vacatedFromUserId, undefined);
   game.destroy();
 });
 
-test("replaceBotWithHuman blocks takeover for vacated seat without allowTakeover", () => {
+test("replaceBotWithHuman blocks takeover for vacated seat without allowTakeover", async () => {
   const game = new Tarneeb41Game("r1", { mongoTableId: "t1" });
+  stubCosmetics(game);
   game.players.push({
     userId: "bot_vacate_1",
     socketId: null,
@@ -38,11 +44,35 @@ test("replaceBotWithHuman blocks takeover for vacated seat without allowTakeover
     displayName: "بوت",
     vacatedFromUserId: "u_original",
   });
-  assert.equal(game.replaceBotWithHuman(0, "u_other", "s", "X"), false);
+  assert.equal(await game.replaceBotWithHuman(0, "u_other", "s", "X"), false);
   assert.equal(
-    game.replaceBotWithHuman(0, "u_original", "s", "Original"),
+    await game.replaceBotWithHuman(0, "u_original", "s", "Original"),
     true
   );
+  game.destroy();
+});
+
+test("native bot seat can be taken over mid-hand", async () => {
+  const game = new Tarneeb41Game("r1", { mongoTableId: "t1" });
+  stubCosmetics(game);
+  game.state = "playing";
+  game.players = [
+    { seatIndex: 0, isBot: false, userId: "u0", displayName: "Host" },
+    { seatIndex: 1, isBot: true, userId: "bot_1", displayName: "بوت" },
+    { seatIndex: 2, isBot: true, userId: "bot_2", displayName: "بوت" },
+    { seatIndex: 3, isBot: true, userId: "bot_3", displayName: "بوت" },
+  ];
+  const seats = listReplaceableBotSeats(game);
+  assert.equal(seats.length, 3);
+  assert.equal(
+    await game.replaceBotWithHuman(seats[0].seatIndex, "u_joiner", "s1", "Joiner", {
+      allowTakeover: true,
+      chips: 500,
+    }),
+    true
+  );
+  assert.equal(game.humanCount(), 2);
+  assert.equal(String(game.players.find((p) => p.seatIndex === 1).userId), "u_joiner");
   game.destroy();
 });
 
