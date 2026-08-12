@@ -194,18 +194,36 @@ exports.protect = asyncHandler(async (req, res, next) => {
 });
 
 // @desc    Authorization (User Permissions)
-// ["admin", "manager"]
+// ["admin", "manager"] — superadmin passes any staff gate; support only when listed.
 exports.allowedTo = (...roles) =>
   asyncHandler(async (req, res, next) => {
-    // 1) access roles
-    // 2) access registered user (req.user.role)
-    if (!roles.includes(req.user.role)) {
-      return next(
-        new ApiError("You are not allowed to access this route", 403)
-      );
+    const role = String(req.user?.role || "");
+    if (roles.includes(role)) return next();
+
+    const staffGate = roles.some((r) =>
+      ["admin", "manager", "support", "superadmin"].includes(r)
+    );
+    // Superadmin inherits every staff allow-list (dashboard owner).
+    if (role === "superadmin" && staffGate) return next();
+
+    // Admin inherits manager/support gates when those roles are listed.
+    if (role === "admin") {
+      if (roles.includes("manager") || roles.includes("support")) return next();
     }
-    next();
+
+    // Manager can work the support desk when support is allowed.
+    if (role === "manager" && roles.includes("support")) return next();
+
+    return next(
+      new ApiError("You are not allowed to access this route", 403)
+    );
   });
+
+/** Optional capability gate for fine-grained admin dashboard modules. */
+exports.requirePermission = (...capabilities) => {
+  const { requirePermission } = require("./platformPermissions");
+  return requirePermission(...capabilities);
+};
 
 // @desc    Forgot password
 // @route   POST /api/v1/auth/forgotPassword

@@ -35,6 +35,10 @@ const {
   adminForceCloseTicket,
   adminTransferTicket,
   adminStatistics,
+  adminDashboardOverview,
+  adminDashboardAgents,
+  adminDashboardAgentDetail,
+  adminDashboardSales,
 } = require("../services/agentDepositService");
 const {
   createTicketValidator,
@@ -113,5 +117,11 @@ router.get("/admin/tickets/:ticketId/messages", ticketIdValidator, getMessages);
 router.post("/admin/tickets/:ticketId/close", ticketIdValidator, adminForceCloseTicket);
 router.post("/admin/tickets/:ticketId/transfer", ticketIdValidator, adminTransferTicket);
 router.get("/admin/statistics", adminStatistics);
+
+// Dashboard-ready reporting (no UI yet — owner settlement / sales)
+router.get("/admin/dashboard/overview", adminDashboardOverview);
+router.get("/admin/dashboard/agents", adminDashboardAgents);
+router.get("/admin/dashboard/agents/:agentProfileId", adminDashboardAgentDetail);
+router.get("/admin/dashboard/sales", adminDashboardSales);
 
 module.exports = router;

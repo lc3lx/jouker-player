@@ -1,6 +1,7 @@
 /**
- * Tarneeb41 bot-seat takeover — any player may claim a bot seat mid-game;
+ * Trix bot-seat takeover — any player may claim a bot seat mid-game;
  * vacated players may restore within the grace window.
+ * Mirrors tarneeb41BotSeatService.
  */
 const Table = require("../models/tableModel");
 const roomManager = require("../rooms/roomManager");
@@ -11,15 +12,13 @@ const {
   transferToLocked,
   forfeitTableSeatLock,
 } = require("./walletLedgerService");
-const waitingQueueService = require("./waitingQueueService");
 const { VACATE_MS } = require("./cardTableVacateService");
 
 const ACTIVE_STATES = new Set([
   "waiting",
-  "bidding_syrian",
+  "selecting_game",
   "playing",
   "round_end",
-  "countdown",
 ]);
 
 function vacateUntilDate() {
@@ -39,6 +38,9 @@ function findVacatingEntry(table, userId) {
 
 function listReplaceableBotSeats(game) {
   if (!game || !Array.isArray(game.players)) return [];
+  if (typeof game.listReplaceableBotSeats === "function") {
+    return game.listReplaceableBotSeats();
+  }
   return game.players
     .filter((p) => p.isBot && typeof p.seatIndex === "number")
     .map((p) => ({
@@ -48,13 +50,13 @@ function listReplaceableBotSeats(game) {
 }
 
 function getGame(tableId) {
-  return roomManager.getTarneeb41GameForTable(tableId);
+  return roomManager.getTrixGameForTable(tableId);
 }
 
 /**
- * @returns {Promise<{ claimed: boolean, seatIndex?: number, reason?: string }>}
+ * @returns {Promise<{ claimed: boolean, seatIndex?: number, reason?: string, midHandJoin?: boolean }>}
  */
-async function tryClaimTarneeb41BotSeat({
+async function tryClaimTrixBotSeat({
   tableId,
   userId,
   playerId,
@@ -97,18 +99,14 @@ async function tryClaimTarneeb41BotSeat({
   try {
     await withMongoTransaction(async (session) => {
       const table = await Table.findById(tid).session(session);
-      if (!table || table.gameType !== "tarneeb41") throw new Error("NOT_TARNEEB41");
+      if (!table || table.gameType !== "trix") throw new Error("NOT_TRIX");
 
       const seatedIdx = table.seats.findIndex((s) => String(s.user) === uid);
       if (seatedIdx >= 0) {
-        // Already on this table in Mongo — engine replace below is enough.
         claimed = true;
         return;
       }
 
-      // Active humans still in the engine must never be overwritten. Mongo
-      // seats are a dense list of humans (not engine seatIndex slots), so
-      // always upsert the claimant by userId instead of seats[engineIndex].
       const activeHumanIds = new Set(
         (game.players || [])
           .filter((p) => p && !p.isBot && p.userId)
@@ -135,13 +133,9 @@ async function tryClaimTarneeb41BotSeat({
         throw new Error("INVALID_BUYIN");
       }
 
-      // Optional: clear a stale vacatingPlayers row for this engine seat's
-      // previous human (already spliced from seats on vacate).
       table.vacatingPlayers = (table.vacatingPlayers || []).filter((v) => {
         if (Number(v.seatIndex) !== seatIndex) return true;
         const vacUid = String(v.user);
-        // Keep other seats' grace entries; drop the one for this bot slot
-        // only when that user is no longer an active human.
         return activeHumanIds.has(vacUid);
       });
 
@@ -150,7 +144,7 @@ async function tryClaimTarneeb41BotSeat({
         userId,
         amount: buyIn,
         tableId: tid,
-        meta: { reason: "tarneeb41_bot_seat_claim", seatIndex },
+        meta: { reason: "trix_bot_seat_claim", seatIndex },
       });
 
       table.seats.push({ user: userId, player: playerId, chips: buyIn });
@@ -162,7 +156,7 @@ async function tryClaimTarneeb41BotSeat({
       claimed = true;
     });
   } catch (err) {
-    logger.warn("tarneeb41_bot_seat_claim_failed", {
+    logger.warn("trix_bot_seat_claim_failed", {
       tableId: tid,
       userId: uid,
       seatIndex,
@@ -177,7 +171,7 @@ async function tryClaimTarneeb41BotSeat({
     path: "seats.user",
     select: "name",
   });
-  const seat = table?.seats?.[seatIndex];
+  const seat = table?.seats?.find((s) => s.user && String(s.user._id || s.user) === uid);
   if (seat?.user && typeof seat.user === "object" && seat.user.name) {
     resolvedName = String(seat.user.name);
   }
@@ -192,18 +186,18 @@ async function tryClaimTarneeb41BotSeat({
 
   await game.applyCosmeticsToPlayers();
 
-  roomManager.setUserTarneeb41Table(uid, tid);
-  if (socketId) roomManager.setTarneeb41UserSocket(uid, socketId);
+  roomManager.setUserTrixTable(uid, tid);
+  if (socketId) roomManager.setTrixUserSocket(uid, socketId);
 
   if (typeof game.checkBotTurn === "function") game.checkBotTurn();
 
   emitTablesUpdated({
-    gameType: "tarneeb41",
+    gameType: "trix",
     reason: "bot_seat_claimed",
     tableId: tid,
   });
 
-  logger.info("tarneeb41_bot_seat_claimed", {
+  logger.info("trix_bot_seat_claimed", {
     tableId: tid,
     userId: uid,
     seatIndex,
@@ -212,8 +206,8 @@ async function tryClaimTarneeb41BotSeat({
 
   if (nsp) {
     try {
-      const { broadcastTarneeb41TableState } = require("../socket/handlers/game.handlers");
-      broadcastTarneeb41TableState(nsp, tid);
+      const { broadcastTrixTableState } = require("../socket/handlers/game.handlers");
+      broadcastTrixTableState(nsp, tid);
     } catch (_) {
       // ignore
     }
@@ -240,12 +234,11 @@ async function recordVacatedBotSeat({
   const seatChips = Number(chips) || 0;
   await withMongoTransaction(async (session) => {
     const table = await Table.findById(tid).session(session);
-    if (!table || table.gameType !== "tarneeb41") return;
+    if (!table || table.gameType !== "trix") return;
 
     table.vacatingPlayers = (table.vacatingPlayers || []).filter(
       (v) => String(v.user) !== uid
     );
-    // Intentional leave frees the seat with no reconnect hold.
     if (!skipVacatingGrace) {
       table.vacatingPlayers.push({
         user: userId,
@@ -256,24 +249,15 @@ async function recordVacatedBotSeat({
         seatIndex,
       });
     }
-    // Forfeit now, mirroring Trix's releaseTrixMongoSeatOnVacate — a bot
-    // takes over play immediately, so the lock must not stay attributed to
-    // the vacated player until a future claimant or final settlement (which
-    // may never come if the table is torn down before then). Safe to also
-    // be a no-op later at claim time: forfeitTableSeatLock clamps to the
-    // remaining locked amount, so it never double-forfeits.
     if (seatChips > 0) {
       await forfeitTableSeatLock({
         session,
         userId,
         tableId: tid,
         seatChips,
-        meta: { reason: "tarneeb41_vacate_bot_takeover", seatIndex },
+        meta: { reason: "trix_vacate_bot_takeover", seatIndex },
       });
     }
-    // Remove the human from Mongo seats (engine already converted to bot).
-    // Leaving seats.user set makes findUserActiveTableAnywhere + lobby
-    // "return to seat" treat the player as still seated forever after leave.
     const seatIdx = table.seats.findIndex(
       (s) => s.user && String(s.user) === uid
     );
@@ -285,109 +269,11 @@ async function recordVacatedBotSeat({
     }
     await table.save({ session });
   });
-  // #region agent log
-  try {
-    const { agentDebugLog } = require("../utils/agentDebugLog");
-    const after = await Table.findById(tid).select("seats.user seats.chips vacatingPlayers");
-    const stillSeated = (after?.seats || []).some(
-      (s) => s.user && String(s.user) === uid
-    );
-    agentDebugLog(
-      "A",
-      "tarneeb41BotSeatService.js:recordVacatedBotSeat",
-      "tarneeb vacate AFTER — seats.user still present?",
-      {
-        tableId: tid,
-        userId: uid,
-        seatIndex,
-        stillSeated,
-        seatCount: after?.seats?.length ?? 0,
-        vacatingCount: after?.vacatingPlayers?.length ?? 0,
-      }
-    );
-  } catch (_) {
-    /* ignore */
-  }
-  // #endregion
-}
-
-async function notifyBotSeatAvailable(nsp, tableId, seatIndex) {
-  const tid = String(tableId);
-  try {
-    const dequeued = await waitingQueueService.dequeueNext(tid, "tarneeb41");
-    if (dequeued) {
-      const sock = roomManager.getTarneeb41UserSocket(dequeued.userId);
-      const payload = {
-        tableId: tid,
-        seatIndex,
-        buyIn: dequeued.buyIn,
-      };
-      if (sock) {
-        sock.emit("bot_seat_available", payload);
-        sock.emit("queue_seat_available", payload);
-      }
-    }
-  } catch (err) {
-    logger.warn("tarneeb41_bot_seat_notify_failed", {
-      tableId: tid,
-      reason: err?.message,
-    });
-  }
-
-  emitTablesUpdated({
-    gameType: "tarneeb41",
-    reason: "bot_seat_available",
-    tableId: tid,
-  });
-
-  if (nsp) {
-    try {
-      nsp.to(`tarneeb41:${tid}`).emit("bot_seat_available", {
-        tableId: tid,
-        seatIndex,
-      });
-    } catch (_) {
-      // ignore
-    }
-  }
-}
-
-/**
- * Restore vacated tarneeb41 player within grace (mongo vacatingPlayers + engine bot).
- */
-async function tryRestoreVacatedTarneeb41Seat({ tableId, userId, socketId, displayName }) {
-  const tid = String(tableId);
-  const uid = String(userId);
-  const game = getGame(tid);
-  if (!game) return null;
-
-  const table = await Table.findById(tid);
-  if (!table) return null;
-  const vac = findVacatingEntry(table, uid);
-  if (!vac || vac.seatIndex == null) return null;
-
-  const seatIndex = Number(vac.seatIndex);
-  const bot = game.players.find((p) => p.seatIndex === seatIndex && p.isBot);
-  if (!bot) return null;
-
-  const result = await tryClaimTarneeb41BotSeat({
-    tableId: tid,
-    userId,
-    playerId: vac.player,
-    buyIn: Number(vac.chips) || table.minBuyIn,
-    seatIndex,
-    socketId,
-    displayName,
-  });
-
-  if (!result.claimed) return null;
-  return { restored: true, seatIndex, tableId: tid };
 }
 
 module.exports = {
   listReplaceableBotSeats,
-  tryClaimTarneeb41BotSeat,
+  tryClaimTrixBotSeat,
   recordVacatedBotSeat,
-  notifyBotSeatAvailable,
-  tryRestoreVacatedTarneeb41Seat,
+  ACTIVE_STATES,
 };

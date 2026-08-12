@@ -94,6 +94,8 @@ const depositTicketSchema = new mongoose.Schema(
 depositTicketSchema.index({ user: 1, status: 1, updatedAt: -1 });
 depositTicketSchema.index({ agentUser: 1, status: 1, lastMessageAt: -1 });
 depositTicketSchema.index({ status: 1, createdAt: -1 });
+depositTicketSchema.index({ status: 1, ticketType: 1, approvedAt: -1 });
+depositTicketSchema.index({ agentProfile: 1, status: 1, ticketType: 1, approvedAt: -1 });
 
 module.exports = mongoose.model("DepositTicket", depositTicketSchema);
 module.exports.DEPOSIT_STATUSES = DEPOSIT_STATUSES;

@@ -47,8 +47,18 @@ const userSchema = new mongoose.Schema(
     passwordResetVerified: Boolean,
     role: {
       type: String,
-      enum: ["user", "manager", "admin"],
+      enum: ["user", "support", "manager", "admin", "superadmin"],
       default: "user",
+      index: true,
+    },
+    /**
+     * Capability keys for staff (admin/manager/support).
+     * Superadmin ignores this and has all permissions.
+     * Empty array on legacy admin/manager = role default full access.
+     */
+    permissions: {
+      type: [{ type: String, trim: true }],
+      default: undefined,
     },
     active: {
       type: Boolean,

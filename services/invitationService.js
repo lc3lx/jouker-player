@@ -3,6 +3,13 @@ const GameInvitation = require("../models/gameInvitationModel");
 const Table = require("../models/tableModel");
 const friendService = require("./friendService");
 const auditService = require("./auditService");
+const roomManager = require("../rooms/roomManager");
+const {
+  listReplaceableBotSeats: listTarneebBotSeats,
+} = require("./tarneeb41BotSeatService");
+const {
+  listReplaceableBotSeats: listTrixBotSeats,
+} = require("./trixBotSeatService");
 
 const INVITE_TTL_MS = Math.max(
   60000,
@@ -18,6 +25,21 @@ function setSocialIo(io) {
 function emitToUser(userId, event, payload) {
   if (!socialIo) return;
   socialIo.to(`user:${String(userId)}`).emit(event, payload);
+}
+
+function tableHasOpenOrBotSeat(table) {
+  if (!table) return false;
+  if ((table.seats || []).length < (table.capacity || 4)) return true;
+  const tid = String(table._id);
+  if (table.gameType === "tarneeb41") {
+    const game = roomManager.getTarneeb41GameForTable(tid);
+    return !!(game && listTarneebBotSeats(game).length > 0);
+  }
+  if (table.gameType === "trix") {
+    const game = roomManager.getTrixGameForTable(tid);
+    return !!(game && listTrixBotSeats(game).length > 0);
+  }
+  return false;
 }
 
 async function sendInvitation(fromId, {
@@ -41,13 +63,34 @@ async function sendInvitation(fromId, {
   }
 
   if (tableId) {
-    const table = await Table.findById(tableId).select("isPrivate owner seats").lean();
+    const table = await Table.findById(tableId)
+      .select("isPrivate owner seats capacity gameType status tableNumber")
+      .lean();
     if (!table) throw new ApiError("Table not found", 404);
+
+    const isSeated = (table.seats || []).some(
+      (seat) => String(seat.user) === String(fromId)
+    );
+    const isOwner = String(table.owner || "") === String(fromId);
+
     if (table.isPrivate) {
-      const mayInvite =
-        String(table.owner || "") === String(fromId) ||
-        table.seats.some((seat) => String(seat.user) === String(fromId));
-      if (!mayInvite) throw new ApiError("Only a participant can invite to this private table", 403);
+      if (!isOwner && !isSeated) {
+        throw new ApiError("Only a participant can invite to this private table", 403);
+      }
+    }
+
+    if (table.gameType === "trix" || table.gameType === "tarneeb41") {
+      if (!isSeated) {
+        throw new ApiError("You must be seated at the table to invite", 403);
+      }
+      if (!tableHasOpenOrBotSeat(table)) {
+        throw new ApiError("No open seat or bot seat available to invite", 400);
+      }
+      // Prefer the live table gameType / number for the invite payload.
+      gameType = table.gameType || gameType;
+      if (tableNumber == null && table.tableNumber != null) {
+        tableNumber = table.tableNumber;
+      }
     }
   }
 
@@ -85,8 +128,8 @@ async function sendInvitation(fromId, {
     joinPayload,
     expiresAt: expiresAt.toISOString(),
     message: displayName
-      ? `${displayName} invited you`
-      : `Player invited you to ${gameType}`,
+      ? `${displayName} دعاك للطاولة`
+      : `دعوتك للعب ${gameType === "trix" ? "تركس" : gameType === "tarneeb41" ? "طرنيب" : gameType}`,
   };
 
   emitToUser(toUserId, "invitation:received", payload);

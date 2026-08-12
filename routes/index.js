@@ -45,6 +45,7 @@ const adminCosmeticsRoute = require("./adminCosmeticsRoute");
 const adminUserRoute = require("./adminUserRoute");
 const adminBotRoute = require("./adminBotRoute");
 const adminClanRoute = require("./adminClanRoute");
+const adminStaffRoute = require("./adminStaffRoute");
 const giftRoute = require("./giftRoute");
 const clanRoute = require("./clanRoute");
 const mountInviteLanding = require("./inviteLandingRoute");
@@ -86,6 +87,8 @@ const mountRoutes = (app) => {
   app.use("/api/v1/admin/users", adminUserRoute);
   app.use("/api/v1/admin/clans", adminClanRoute);
   app.use("/api/v1/admin/bots", adminBotRoute);
+  // Staff / permissions /me — before generic /admin catch-all.
+  app.use("/api/v1/admin", adminStaffRoute);
   app.use("/api/v1/admin", adminRoute);
   app.use("/api/v1/vip", vipRoute);
   app.use("/api/v1/analytics", analyticsRoute);

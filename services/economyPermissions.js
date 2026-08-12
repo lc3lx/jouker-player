@@ -61,6 +61,7 @@ const ROLE_CAPS = {
 
 /** Map today's platform auth roles onto economy roles. */
 const PLATFORM_ROLE_MAP = {
+  superadmin: "super_admin",
   admin: "super_admin",
   manager: "economy_manager",
 };

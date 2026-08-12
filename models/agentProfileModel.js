@@ -62,6 +62,10 @@ const agentProfileSchema = new mongoose.Schema(
       stats: {
         totalDeposits: { type: Number, default: 0 },
         totalVolume: { type: Number, default: 0 },
+        /** Completed VIP activations sold by this agent. */
+        totalVipActivations: { type: Number, default: 0 },
+        /** Sum of VIP ticket priceUsd — owner settlement basis. */
+        totalVipVolumeUsd: { type: Number, default: 0 },
       },
     },
     createdBy: { type: mongoose.Schema.ObjectId, ref: "User" },

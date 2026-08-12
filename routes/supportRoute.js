@@ -16,51 +16,29 @@ const router = express.Router();
 
 router.use(authService.protect);
 
-router.get(
-  "/ticket",
-  authService.allowedTo("user", "admin", "manager"),
-  getMyTicket
+const playerOrStaff = authService.allowedTo(
+  "user",
+  "support",
+  "manager",
+  "admin",
+  "superadmin"
 );
-router.post(
-  "/ticket",
-  authService.allowedTo("user", "admin", "manager"),
-  createTicket
-);
-router.get(
-  "/tickets/:ticketId/messages",
-  authService.allowedTo("user", "admin", "manager"),
-  getMessages
-);
-router.post(
-  "/tickets/:ticketId/messages",
-  authService.allowedTo("user", "admin", "manager"),
-  postMessage
-);
-router.post(
-  "/tickets/:ticketId/read",
-  authService.allowedTo("user", "admin", "manager"),
-  markRead
+const staffOnly = authService.allowedTo(
+  "support",
+  "manager",
+  "admin",
+  "superadmin"
 );
 
-router.get(
-  "/admin/tickets",
-  authService.allowedTo("admin", "manager"),
-  adminListTickets
-);
-router.get(
-  "/admin/counts",
-  authService.allowedTo("admin", "manager"),
-  adminOpenCounts
-);
-router.post(
-  "/admin/tickets/:ticketId/close",
-  authService.allowedTo("admin", "manager"),
-  adminCloseTicket
-);
-router.post(
-  "/admin/tickets/:ticketId/assign",
-  authService.allowedTo("admin", "manager"),
-  adminAssignTicket
-);
+router.get("/ticket", playerOrStaff, getMyTicket);
+router.post("/ticket", playerOrStaff, createTicket);
+router.get("/tickets/:ticketId/messages", playerOrStaff, getMessages);
+router.post("/tickets/:ticketId/messages", playerOrStaff, postMessage);
+router.post("/tickets/:ticketId/read", playerOrStaff, markRead);
+
+router.get("/admin/tickets", staffOnly, adminListTickets);
+router.get("/admin/counts", staffOnly, adminOpenCounts);
+router.post("/admin/tickets/:ticketId/close", staffOnly, adminCloseTicket);
+router.post("/admin/tickets/:ticketId/assign", staffOnly, adminAssignTicket);
 
 module.exports = router;

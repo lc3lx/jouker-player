@@ -13,7 +13,12 @@ function setSupportIo(io) {
 }
 
 function isStaffRole(role) {
-  return role === "admin" || role === "manager";
+  return (
+    role === "superadmin" ||
+    role === "admin" ||
+    role === "manager" ||
+    role === "support"
+  );
 }
 
 function ticketRoom(ticketId) {

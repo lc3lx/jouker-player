@@ -49,20 +49,31 @@ exports.createUser = factory.createOne(User);
 // @route   PUT /api/v1/users/:id
 // @access  Private/Admin
 exports.updateUser = asyncHandler(async (req, res, next) => {
-  const document = await User.findByIdAndUpdate(
-    req.params.id,
-    {
-      name: req.body.name,
-      slug: req.body.slug,
-      phone: req.body.phone,
-      email: req.body.email,
-      profileImg: req.body.profileImg,
-      role: req.body.role,
-    },
-    {
-      new: true,
+  const payload = {
+    name: req.body.name,
+    slug: req.body.slug,
+    phone: req.body.phone,
+    email: req.body.email,
+    profileImg: req.body.profileImg,
+  };
+
+  // Staff roles / permissions must go through /api/v1/admin/staff (superadmin).
+  if (req.body.role != null) {
+    if (req.user?.role !== "superadmin") {
+      return next(
+        new ApiError("تغيير الأدوار الإدارية عبر /admin/staff فقط", 403)
+      );
     }
-  );
+    const allowed = ["user", "support", "manager", "admin", "superadmin"];
+    if (!allowed.includes(String(req.body.role))) {
+      return next(new ApiError("دور غير صالح", 400));
+    }
+    payload.role = req.body.role;
+  }
+
+  const document = await User.findByIdAndUpdate(req.params.id, payload, {
+    new: true,
+  });
 
   if (!document) {
     return next(new ApiError(`No document for this id ${req.params.id}`, 404));

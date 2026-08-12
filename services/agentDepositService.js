@@ -8,6 +8,7 @@
  */
 const fs = require("fs");
 const path = require("path");
+const mongoose = require("mongoose");
 const asyncHandler = require("express-async-handler");
 const sharp = require("sharp");
 const { v4: uuidv4 } = require("uuid");
@@ -76,7 +77,12 @@ function isAgentOnline(userId) {
 }
 
 function isStaffRole(role) {
-  return role === "admin" || role === "manager";
+  return (
+    role === "superadmin" ||
+    role === "admin" ||
+    role === "manager" ||
+    role === "support"
+  );
 }
 
 // --- serialization -----------------------------------------------------------
@@ -866,6 +872,7 @@ async function approveVipTicket(req, res, candidate) {
       note: `Agent approved VIP ticket ${prev._id}`,
       priceCents: Math.round((prev.priceUsd || 0) * 100),
     });
+    const priceUsd = Number(prev.priceUsd) || 0;
     await DepositTicket.updateOne(
       { _id: prev._id },
       {
@@ -873,6 +880,15 @@ async function approveVipTicket(req, res, candidate) {
         amountApproved: 0,
         approvedAt: new Date(),
         approvedBy: req.user._id,
+      }
+    );
+    await AgentProfile.updateOne(
+      { _id: prev.agentProfile },
+      {
+        $inc: {
+          "deposit.stats.totalVipActivations": 1,
+          "deposit.stats.totalVipVolumeUsd": priceUsd,
+        },
       }
     );
   } catch (err) {
@@ -1406,7 +1422,7 @@ exports.adminTransferTicket = asyncHandler(async (req, res) => {
 });
 
 exports.adminStatistics = asyncHandler(async (req, res) => {
-  const [byStatus, volume, agents, vipCompleted] = await Promise.all([
+  const [byStatus, volume, agents, vipCompleted, vipVolume] = await Promise.all([
     DepositTicket.aggregate([{ $group: { _id: "$status", n: { $sum: 1 } } }]),
     DepositTicket.aggregate([
       { $match: { status: "completed", ticketType: { $ne: "vip" } } },
@@ -1414,6 +1430,10 @@ exports.adminStatistics = asyncHandler(async (req, res) => {
     ]),
     AgentProfile.countDocuments({ "deposit.enabled": true, status: "approved" }),
     DepositTicket.countDocuments({ ticketType: "vip", status: "completed" }),
+    DepositTicket.aggregate([
+      { $match: { status: "completed", ticketType: "vip" } },
+      { $group: { _id: null, totalUsd: { $sum: "$priceUsd" }, count: { $sum: 1 } } },
+    ]),
   ]);
   res.status(200).json({
     status: "success",
@@ -1422,8 +1442,383 @@ exports.adminStatistics = asyncHandler(async (req, res) => {
       completedVolume: volume?.[0]?.total || 0,
       completedCount: volume?.[0]?.count || 0,
       vipCompletedCount: vipCompleted,
+      vipVolumeUsd: vipVolume?.[0]?.totalUsd || 0,
       activeAgents: agents,
     },
+  });
+});
+
+// ==============================================================================
+ // ADMIN DASHBOARD APIs (reporting only — no UI yet)
+ // Owner settlement view: coins sold + VIP activations per agent.
+ // ==============================================================================
+
+function parseDashboardRange(query = {}) {
+  const out = {};
+  if (query.from) {
+    const d = new Date(query.from);
+    if (!Number.isNaN(d.getTime())) out.$gte = d;
+  }
+  if (query.to) {
+    const d = new Date(query.to);
+    if (!Number.isNaN(d.getTime())) out.$lte = d;
+  }
+  return Object.keys(out).length ? out : null;
+}
+
+function completedSalesMatch(query = {}) {
+  const match = { status: "completed" };
+  const range = parseDashboardRange(query);
+  if (range) match.approvedAt = range;
+  if (query.ticketType === "deposit" || query.ticketType === "vip") {
+    match.ticketType = query.ticketType;
+  }
+  if (query.agentProfileId && mongoose.Types.ObjectId.isValid(query.agentProfileId)) {
+    match.agentProfile = new mongoose.Types.ObjectId(query.agentProfileId);
+  }
+  if (query.country) {
+    match.country = String(query.country).toUpperCase();
+  }
+  return match;
+}
+
+/**
+ * GET /admin/dashboard/overview
+ * High-level totals for the owner dashboard header.
+ */
+exports.adminDashboardOverview = asyncHandler(async (req, res) => {
+  const match = completedSalesMatch(req.query);
+  const [coins, vip, byLevel, activeAgents, openTickets] = await Promise.all([
+    DepositTicket.aggregate([
+      { $match: { ...match, ticketType: { $ne: "vip" } } },
+      {
+        $group: {
+          _id: null,
+          count: { $sum: 1 },
+          coinsVolume: { $sum: "$amountApproved" },
+        },
+      },
+    ]),
+    DepositTicket.aggregate([
+      { $match: { ...match, ticketType: "vip" } },
+      {
+        $group: {
+          _id: null,
+          count: { $sum: 1 },
+          volumeUsd: { $sum: { $ifNull: ["$priceUsd", 0] } },
+        },
+      },
+    ]),
+    DepositTicket.aggregate([
+      { $match: { ...match, ticketType: "vip" } },
+      {
+        $group: {
+          _id: "$vipLevel",
+          count: { $sum: 1 },
+          volumeUsd: { $sum: { $ifNull: ["$priceUsd", 0] } },
+        },
+      },
+    ]),
+    AgentProfile.countDocuments({ "deposit.enabled": true, status: "approved" }),
+    DepositTicket.countDocuments({ status: { $in: ACTIVE_STATUSES } }),
+  ]);
+
+  const coinsRow = coins?.[0] || {};
+  const vipRow = vip?.[0] || {};
+  res.status(200).json({
+    status: "success",
+    data: {
+      range: {
+        from: req.query.from || null,
+        to: req.query.to || null,
+      },
+      activeAgents,
+      openTickets,
+      coins: {
+        salesCount: coinsRow.count || 0,
+        volume: coinsRow.coinsVolume || 0,
+      },
+      vip: {
+        activationsCount: vipRow.count || 0,
+        /** What agents sold in VIP — owner settlement basis (USD). */
+        volumeUsd: vipRow.volumeUsd || 0,
+        byLevel: Object.fromEntries(
+          (byLevel || []).map((r) => [
+            r._id || "unknown",
+            { count: r.count, volumeUsd: r.volumeUsd || 0 },
+          ])
+        ),
+      },
+    },
+  });
+});
+
+/**
+ * GET /admin/dashboard/agents
+ * Per-agent sales so owner knows e.g. "agent X sold 10 VIP / Y coins".
+ */
+exports.adminDashboardAgents = asyncHandler(async (req, res) => {
+  const match = completedSalesMatch(req.query);
+  const rows = await DepositTicket.aggregate([
+    { $match: match },
+    {
+      $group: {
+        _id: "$agentProfile",
+        coinsCount: {
+          $sum: {
+            $cond: [{ $ne: ["$ticketType", "vip"] }, 1, 0],
+          },
+        },
+        coinsVolume: {
+          $sum: {
+            $cond: [{ $ne: ["$ticketType", "vip"] }, { $ifNull: ["$amountApproved", 0] }, 0],
+          },
+        },
+        vipCount: {
+          $sum: {
+            $cond: [{ $eq: ["$ticketType", "vip"] }, 1, 0],
+          },
+        },
+        vipVolumeUsd: {
+          $sum: {
+            $cond: [
+              { $eq: ["$ticketType", "vip"] },
+              { $ifNull: ["$priceUsd", 0] },
+              0,
+            ],
+          },
+        },
+      },
+    },
+    { $sort: { vipVolumeUsd: -1, coinsVolume: -1 } },
+  ]);
+
+  const profileIds = rows.map((r) => r._id).filter(Boolean);
+  const profiles = await AgentProfile.find({ _id: { $in: profileIds } })
+    .populate("user", "name email profileImg")
+    .lean();
+  const byId = new Map(profiles.map((p) => [String(p._id), p]));
+
+  // VIP level breakdown per agent (second pass — small, dashboard-ready).
+  const levelRows = await DepositTicket.aggregate([
+    { $match: { ...match, ticketType: "vip" } },
+    {
+      $group: {
+        _id: { agentProfile: "$agentProfile", level: "$vipLevel" },
+        count: { $sum: 1 },
+        volumeUsd: { $sum: { $ifNull: ["$priceUsd", 0] } },
+      },
+    },
+  ]);
+  const levelsByAgent = new Map();
+  for (const r of levelRows) {
+    const aid = String(r._id.agentProfile);
+    if (!levelsByAgent.has(aid)) levelsByAgent.set(aid, {});
+    levelsByAgent.get(aid)[r._id.level || "unknown"] = {
+      count: r.count,
+      volumeUsd: r.volumeUsd || 0,
+    };
+  }
+
+  const data = rows.map((r) => {
+    const id = String(r._id);
+    const p = byId.get(id);
+    return {
+      agentProfileId: id,
+      displayName: p?.deposit?.displayName || p?.user?.name || "وكيل",
+      user: briefUser(p?.user),
+      countries: p?.deposit?.countries || [],
+      status: p?.status || null,
+      depositEnabled: !!p?.deposit?.enabled,
+      coins: {
+        salesCount: r.coinsCount || 0,
+        volume: r.coinsVolume || 0,
+      },
+      vip: {
+        activationsCount: r.vipCount || 0,
+        volumeUsd: r.vipVolumeUsd || 0,
+        byLevel: levelsByAgent.get(id) || {},
+      },
+      /** Owner-facing VIP money owed/collected via this agent in range. */
+      settlementUsd: r.vipVolumeUsd || 0,
+      lifetimeStats: p?.deposit?.stats || {},
+    };
+  });
+
+  const totals = data.reduce(
+    (acc, row) => {
+      acc.coins.salesCount += row.coins.salesCount;
+      acc.coins.volume += row.coins.volume;
+      acc.vip.activationsCount += row.vip.activationsCount;
+      acc.vip.volumeUsd += row.vip.volumeUsd;
+      acc.settlementUsd += row.settlementUsd;
+      return acc;
+    },
+    {
+      coins: { salesCount: 0, volume: 0 },
+      vip: { activationsCount: 0, volumeUsd: 0 },
+      settlementUsd: 0,
+    }
+  );
+
+  res.status(200).json({
+    status: "success",
+    results: data.length,
+    data: {
+      range: { from: req.query.from || null, to: req.query.to || null },
+      totals,
+      agents: data,
+    },
+  });
+});
+
+/**
+ * GET /admin/dashboard/agents/:agentProfileId
+ * Single agent settlement card + recent completed sales.
+ */
+exports.adminDashboardAgentDetail = asyncHandler(async (req, res) => {
+  const profile = await AgentProfile.findById(req.params.agentProfileId)
+    .populate("user", "name email profileImg")
+    .lean();
+  if (!profile) throw new ApiError("الوكيل غير موجود", 404);
+
+  const match = completedSalesMatch({
+    ...req.query,
+    agentProfileId: String(profile._id),
+  });
+
+  const [agg, recent] = await Promise.all([
+    DepositTicket.aggregate([
+      { $match: match },
+      {
+        $group: {
+          _id: "$ticketType",
+          count: { $sum: 1 },
+          coinsVolume: {
+            $sum: {
+              $cond: [{ $ne: ["$ticketType", "vip"] }, { $ifNull: ["$amountApproved", 0] }, 0],
+            },
+          },
+          volumeUsd: {
+            $sum: {
+              $cond: [{ $eq: ["$ticketType", "vip"] }, { $ifNull: ["$priceUsd", 0] }, 0],
+            },
+          },
+        },
+      },
+    ]),
+    DepositTicket.find(match)
+      .sort({ approvedAt: -1 })
+      .limit(Math.min(parseInt(req.query.limit || "50", 10), 200))
+      .populate("user", "name email profileImg")
+      .lean(),
+  ]);
+
+  const coinsAgg = agg.find((r) => r._id !== "vip") || {};
+  const vipAgg = agg.find((r) => r._id === "vip") || {};
+
+  res.status(200).json({
+    status: "success",
+    data: {
+      agent: {
+        agentProfileId: String(profile._id),
+        displayName: profile.deposit?.displayName || "",
+        user: briefUser(profile.user),
+        countries: profile.deposit?.countries || [],
+        status: profile.status,
+        lifetimeStats: profile.deposit?.stats || {},
+      },
+      range: { from: req.query.from || null, to: req.query.to || null },
+      summary: {
+        coins: {
+          salesCount: coinsAgg.count || 0,
+          volume: coinsAgg.coinsVolume || 0,
+        },
+        vip: {
+          activationsCount: vipAgg.count || 0,
+          volumeUsd: vipAgg.volumeUsd || 0,
+        },
+        settlementUsd: vipAgg.volumeUsd || 0,
+      },
+      recentSales: recent.map((t) => ({
+        ticketId: String(t._id),
+        ticketType: t.ticketType || "deposit",
+        vipLevel: t.vipLevel || null,
+        priceUsd: t.priceUsd ?? null,
+        amountApproved: t.amountApproved,
+        amountRequested: t.amountRequested,
+        currency: t.currency || "",
+        paymentMethod: t.paymentMethod || "",
+        country: t.country,
+        approvedAt: t.approvedAt,
+        player: briefUser(t.user),
+      })),
+    },
+  });
+});
+
+/**
+ * GET /admin/dashboard/sales
+ * Paginated completed sales feed (coins + VIP) for dashboards / exports.
+ */
+exports.adminDashboardSales = asyncHandler(async (req, res) => {
+  const match = completedSalesMatch(req.query);
+  const page = Math.max(1, parseInt(req.query.page || "1", 10));
+  const limit = Math.min(Math.max(1, parseInt(req.query.limit || "50", 10)), 200);
+  const skip = (page - 1) * limit;
+
+  const [total, rows] = await Promise.all([
+    DepositTicket.countDocuments(match),
+    DepositTicket.find(match)
+      .sort({ approvedAt: -1, createdAt: -1 })
+      .skip(skip)
+      .limit(limit)
+      .populate("user", "name email profileImg")
+      .populate({
+        path: "agentProfile",
+        select: "deposit.displayName user",
+        populate: { path: "user", select: "name email profileImg" },
+      })
+      .lean(),
+  ]);
+
+  res.status(200).json({
+    status: "success",
+    results: rows.length,
+    pagination: {
+      page,
+      limit,
+      total,
+      pages: Math.ceil(total / limit) || 1,
+    },
+    data: rows.map((t) => {
+      const isVip = t.ticketType === "vip";
+      return {
+        ticketId: String(t._id),
+        ticketType: t.ticketType || "deposit",
+        vipLevel: t.vipLevel || null,
+        /** Coins credited (deposit) or 0 (VIP). */
+        coins: isVip ? 0 : Number(t.amountApproved) || 0,
+        /** USD settlement value for VIP sales. */
+        priceUsd: isVip ? Number(t.priceUsd) || 0 : null,
+        amountRequested: t.amountRequested,
+        currency: t.currency || "",
+        paymentMethod: t.paymentMethod || "",
+        country: t.country,
+        approvedAt: t.approvedAt,
+        player: briefUser(t.user),
+        agent: {
+          agentProfileId: t.agentProfile?._id
+            ? String(t.agentProfile._id)
+            : String(t.agentProfile || ""),
+          displayName:
+            t.agentProfile?.deposit?.displayName ||
+            t.agentProfile?.user?.name ||
+            "",
+          user: briefUser(t.agentProfile?.user),
+        },
+      };
+    }),
   });
 });
 

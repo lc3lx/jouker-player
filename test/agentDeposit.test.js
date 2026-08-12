@@ -400,6 +400,7 @@ guarded("admin statistics and ticket listing", async () => {
   assert.equal(stats.body.data.completedCount, 1);
   assert.equal(stats.body.data.completedVolume, 5000);
   assert.equal(stats.body.data.activeAgents, 1);
+  assert.ok(typeof stats.body.data.vipVolumeUsd === "number");
 
   const list = await api(
     "GET",
@@ -408,4 +409,56 @@ guarded("admin statistics and ticket listing", async () => {
   );
   assert.equal(list.status, 200);
   assert.ok(list.body.total >= 3);
+});
+
+guarded("admin dashboard sales APIs expose coin + VIP settlement fields", async () => {
+  const overview = await api(
+    "GET",
+    "/api/v1/agent-deposits/admin/dashboard/overview",
+    users.admin.token
+  );
+  assert.equal(overview.status, 200);
+  assert.ok(overview.body.data.coins.salesCount >= 1);
+  assert.ok(overview.body.data.coins.volume >= 5000);
+  assert.ok(typeof overview.body.data.vip.activationsCount === "number");
+  assert.ok(typeof overview.body.data.vip.volumeUsd === "number");
+
+  const agentsDash = await api(
+    "GET",
+    "/api/v1/agent-deposits/admin/dashboard/agents",
+    users.admin.token
+  );
+  assert.equal(agentsDash.status, 200);
+  assert.ok(agentsDash.body.data.agents.length >= 1);
+  const row = agentsDash.body.data.agents[0];
+  assert.ok(row.agentProfileId);
+  assert.ok(row.coins.volume >= 5000);
+  assert.ok(typeof row.settlementUsd === "number");
+
+  const detail = await api(
+    "GET",
+    `/api/v1/agent-deposits/admin/dashboard/agents/${row.agentProfileId}`,
+    users.admin.token
+  );
+  assert.equal(detail.status, 200);
+  assert.equal(detail.body.data.agent.agentProfileId, row.agentProfileId);
+  assert.ok(detail.body.data.summary.coins.volume >= 5000);
+  assert.ok(Array.isArray(detail.body.data.recentSales));
+
+  const sales = await api(
+    "GET",
+    "/api/v1/agent-deposits/admin/dashboard/sales?ticketType=deposit&limit=20",
+    users.admin.token
+  );
+  assert.equal(sales.status, 200);
+  assert.ok(sales.body.data.length >= 1);
+  assert.ok(sales.body.data.some((s) => s.coins >= 5000));
+
+  // non-admin blocked
+  const forbidden = await api(
+    "GET",
+    "/api/v1/agent-deposits/admin/dashboard/overview",
+    users.agent.token
+  );
+  assert.equal(forbidden.status, 403);
 });
