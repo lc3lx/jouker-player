@@ -99,14 +99,7 @@ async function migrateTablesLegacyUniqueIndex() {
   }
 }
 
-const { deriveMinimumBet } = require("../utils/poker/tableBettingConfig");
-
-function deriveBlindsFromBuyIn(buyIn) {
-  const bigBlind = Math.max(100, Math.floor(Number(buyIn || 0) / 50));
-  const smallBlind = Math.max(50, Math.floor(bigBlind / 2));
-  const minimumBet = deriveMinimumBet(buyIn);
-  return { smallBlind, bigBlind, minimumBet, buyIn: Number(buyIn) || 0 };
-}
+const { deriveMinimumBet, deriveBlindsFromBuyIn } = require("../utils/poker/tableBettingConfig");
 
 async function ensureFixedTierTables() {
   if (fixedTablesReady) return;

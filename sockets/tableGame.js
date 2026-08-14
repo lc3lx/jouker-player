@@ -948,14 +948,25 @@ class PokerTable {
   /**
    * Recover idle tables stuck in a mid-hand round after an unclean shutdown.
    */
+  /**
+   * Opening raise size for a fresh street/hand — table minimum bet (buyIn/10),
+   * falling back to bigBlind when minimumBet is unset.
+   */
+  openingRaiseSize() {
+    return Math.max(
+      1,
+      toSafeInt(this.minimumBet, 0) || toSafeInt(this.bigBlind, 1)
+    );
+  }
+
   healStaleRoundIfNotRunning() {
     if (this.running || this.round === "idle") return;
     this.logSuspicious("heal_stale_round", { round: this.round });
     this.community = [];
     this.pot = 0;
     this.currentBet = 0;
-    this.minRaise = this.bigBlind;
-    this.lastRaiseAmount = this.bigBlind;
+    this.minRaise = this.openingRaiseSize();
+    this.lastRaiseAmount = this.openingRaiseSize();
     this.sbSeatIndex = -1;
     this.bbSeatIndex = -1;
     this.currentHandId = null;
@@ -1501,8 +1512,8 @@ class PokerTable {
     this.pot = 0;
     this.round = "idle"; // idle|preflop|flop|turn|river|showdown
     this.currentBet = 0;
-    this.minRaise = this.bigBlind;
-    this.lastRaiseAmount = this.bigBlind;
+    this.minRaise = this.openingRaiseSize();
+    this.lastRaiseAmount = this.openingRaiseSize();
     this.currentIndex = 0;
     this.sbSeatIndex = -1;
     this.bbSeatIndex = -1;
@@ -2745,8 +2756,8 @@ class PokerTable {
     this.pot = 0;
     if (!this.setRound("preflop")) return;
     this.currentBet = 0;
-    this.minRaise = this.bigBlind;
-    this.lastRaiseAmount = this.bigBlind;
+    this.minRaise = this.openingRaiseSize();
+    this.lastRaiseAmount = this.openingRaiseSize();
     this.currentHandId = `${this.tableId}-${Date.now()}-${this.handCounter + 1}`;
     this.handStartedAt = Date.now();
     this.currentHandActions = [];
@@ -3722,8 +3733,8 @@ class PokerTable {
   resetHandBettingState() {
     this.pot = 0;
     this.currentBet = 0;
-    this.minRaise = this.bigBlind;
-    this.lastRaiseAmount = this.bigBlind;
+    this.minRaise = this.openingRaiseSize();
+    this.lastRaiseAmount = this.openingRaiseSize();
     this.shortAllInNoReopen = false;
     for (const s of this.seats) {
       s.bet = 0;

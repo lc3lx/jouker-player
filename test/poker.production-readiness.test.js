@@ -112,6 +112,14 @@ test("deriveMinimumBet defaults to buyIn / 10", () => {
   assert.equal(deriveMinimumBet(50000, 7500), 7500);
 });
 
+test("10k table stakes — BB and minimumBet are 1k (10%)", () => {
+  const { deriveBlindsFromBuyIn } = require("../utils/poker/tableBettingConfig");
+  const s = deriveBlindsFromBuyIn(10000);
+  assert.equal(s.minimumBet, 1000);
+  assert.equal(s.bigBlind, 1000);
+  assert.equal(s.smallBlind, 500);
+});
+
 test("everyoneSettled requires actedThisStreet — BB option after limp", () => {
   const g = mkGame();
   g.running = true;
