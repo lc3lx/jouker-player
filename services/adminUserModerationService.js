@@ -143,3 +143,130 @@ exports.adminMuteUser = asyncHandler((req, res) =>
 exports.adminUnmuteUser = asyncHandler((req, res) =>
   _moderate(req, res, { set: { muted: false, mutedReason: null }, event: "admin_user_unmuted" })
 );
+
+// ── wallet credit / debit (coins) ────────────────────────────────────────────
+
+const {
+  withMongoTransaction,
+  ledgerDeposit,
+  ledgerWithdraw,
+  getOrCreateWallet,
+} = require("./walletLedgerService");
+
+/** GET /admin/users/search?q= */
+exports.adminSearchUsers = asyncHandler(async (req, res) => {
+  const q = String(req.query.q || "").trim();
+  if (q.length < 2) {
+    throw new ApiError("اكتب حرفين على الأقل للبحث", 400);
+  }
+  const limit = Math.min(parseInt(req.query.limit || "20", 10), 50);
+  const rx = new RegExp(q.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"), "i");
+  const users = await User.find({
+    $or: [{ email: rx }, { name: rx }],
+    role: { $nin: ["superadmin"] },
+  })
+    .select("name email profileImg role active country createdAt")
+    .limit(limit)
+    .lean();
+
+  const ids = users.map((u) => u._id);
+  const wallets = await Wallet.find({ user: { $in: ids } })
+    .select("user balance lockedBalance")
+    .lean();
+  const byUser = new Map(wallets.map((w) => [String(w.user), w]));
+
+  res.status(200).json({
+    status: "success",
+    results: users.length,
+    data: users.map((u) => {
+      const w = byUser.get(String(u._id));
+      return {
+        id: String(u._id),
+        name: u.name,
+        email: u.email,
+        role: u.role,
+        active: u.active !== false,
+        country: u.country || null,
+        profileImg: u.profileImg || null,
+        wallet: {
+          balance: w?.balance || 0,
+          lockedBalance: w?.lockedBalance || 0,
+        },
+      };
+    }),
+  });
+});
+
+async function adminAdjustPlayerWallet(req, res, direction) {
+  const amount = Math.round(Number(req.body?.amount));
+  if (!Number.isFinite(amount) || amount < 1) {
+    throw new ApiError("المبلغ غير صالح", 400);
+  }
+  const reason = String(req.body?.reason || "تعديل من الإدارة").slice(0, 200);
+  const user = await User.findById(req.params.id).select("_id name email isBot");
+  if (!user) throw new ApiError("اللاعب غير موجود", 404);
+
+  try {
+    await withMongoTransaction(async (session) => {
+      if (direction === "credit") {
+        await ledgerDeposit({
+          session,
+          userId: user._id,
+          amount,
+          ledgerType: "admin_grant",
+          meta: {
+            channel: "admin_dashboard",
+            by: String(req.user._id),
+            reason,
+          },
+        });
+      } else {
+        await ledgerWithdraw({
+          session,
+          userId: user._id,
+          amount,
+          ledgerType: "admin_player_debit",
+          meta: {
+            channel: "admin_dashboard",
+            by: String(req.user._id),
+            reason,
+          },
+        });
+      }
+    });
+  } catch (err) {
+    if (err?.message === "INSUFFICIENT_BALANCE") {
+      throw new ApiError("رصيد اللاعب غير كافٍ", 402);
+    }
+    throw err;
+  }
+
+  await auditService.logEvent({
+    event: direction === "credit" ? "admin_player_credit" : "admin_player_debit",
+    actor: req.user._id,
+    targetUser: user._id,
+    ip: (req.headers["x-forwarded-for"] || "").split(",")[0].trim() || req.ip || null,
+    meta: { amount, reason, direction },
+  });
+
+  const wallet = await getOrCreateWallet(user._id, null);
+  res.status(200).json({
+    status: "success",
+    data: {
+      userId: String(user._id),
+      name: user.name,
+      email: user.email,
+      balance: wallet.balance,
+      lockedBalance: wallet.lockedBalance,
+      amount,
+      direction,
+    },
+  });
+}
+
+exports.adminCreditPlayerWallet = asyncHandler((req, res) =>
+  adminAdjustPlayerWallet(req, res, "credit")
+);
+exports.adminDebitPlayerWallet = asyncHandler((req, res) =>
+  adminAdjustPlayerWallet(req, res, "debit")
+);

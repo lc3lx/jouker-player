@@ -1,7 +1,26 @@
 const jwt = require("jsonwebtoken");
 const mongoose = require("mongoose");
 const crypto = require("crypto");
+const fs = require("fs");
+const path = require("path");
 const Table = require("../models/tableModel");
+// #region agent log
+function _agentDbg(hypothesisId, location, message, data = {}) {
+  try {
+    fs.appendFileSync(
+      path.join(__dirname, "..", "..", "debug-b181d7.log"),
+      `${JSON.stringify({
+        sessionId: "b181d7",
+        hypothesisId,
+        location,
+        message,
+        data,
+        timestamp: Date.now(),
+      })}\n`
+    );
+  } catch (_) {}
+}
+// #endregion
 const HandHistory = require("../models/handHistoryModel");
 const { newDeck, shuffleDeterministic, draw, sha256Hex, randomInt: secureRandomInt } = require("../utils/poker/deck");
 const { bestOf7, compareHands7 } = require("../utils/poker/handEval");
@@ -1207,6 +1226,18 @@ class PokerTable {
     }
 
     if (this.humanSeatCount() < 1) {
+      // #region agent log
+      _agentDbg("C", "tableGame.js:beginNextHandIfPossible", "no humans after hand — wait", {
+        tableId: String(this.tableId),
+        active: this.activeSeatCount(),
+        seatsLen: Array.isArray(this.seats) ? this.seats.length : -1,
+        seatChips: (this.seats || []).map((s) => ({
+          bot: !!s?.isBot,
+          chips: s?.chips,
+          uid: String(s?.userId || "").slice(0, 12),
+        })),
+      });
+      // #endregion
       this.scheduleWaitForPlayers();
       await this.broadcastState();
       return;
@@ -1225,6 +1256,16 @@ class PokerTable {
     }
     if (this.waitForPlayersTimer) return;
 
+    // #region agent log
+    _agentDbg("A", "tableGame.js:scheduleWaitForPlayers", "arm wait window", {
+      tableId: String(this.tableId),
+      humans: this.humanSeatCount(),
+      eligible: this.eligibleHumanCount(),
+      active: this.activeSeatCount(),
+      round: this.round,
+      ms: POKER_TIMINGS.WAIT_FOR_PLAYERS_MS,
+    });
+    // #endregion
     this.waitForPlayersDeadline = Date.now() + POKER_TIMINGS.WAIT_FOR_PLAYERS_MS;
     this.waitForPlayersTimer = setTimeout(() => {
       void this.onWaitForPlayersWindowEnd();
@@ -1233,6 +1274,17 @@ class PokerTable {
 
   async onWaitForPlayersWindowEnd() {
     this.waitForPlayersTimer = null;
+    // #region agent log
+    _agentDbg("A", "tableGame.js:onWaitForPlayersWindowEnd", "wait window ended", {
+      tableId: String(this.tableId),
+      humans: this.humanSeatCount(),
+      eligible: this.eligibleHumanCount(),
+      active: this.activeSeatCount(),
+      round: this.round,
+      running: this.running,
+      frozen: this.frozen,
+    });
+    // #endregion
     if (this.running || this.frozen) {
       this.clearWaitForPlayersTimer();
       return;
@@ -1247,6 +1299,13 @@ class PokerTable {
     // At least 1 human is seated but not enough humans for a normal start.
     // Fill the remaining seats with bots and start immediately.
     if (this.humanSeatCount() >= 1) {
+      // #region agent log
+      _agentDbg("E", "tableGame.js:onWaitForPlayersWindowEnd", "fill bots + start", {
+        tableId: String(this.tableId),
+        humans: this.humanSeatCount(),
+        active: this.activeSeatCount(),
+      });
+      // #endregion
       this.addBotsForMissingSeats();
       await this.broadcastState();
       await this.startIfReady({ refreshFromDb: false, allowBotFill: true });
@@ -1254,6 +1313,13 @@ class PokerTable {
     }
 
     // No humans at all — restart the wait window and keep the table warm.
+    // #region agent log
+    _agentDbg("A", "tableGame.js:onWaitForPlayersWindowEnd", "NO HUMANS — restart wait loop", {
+      tableId: String(this.tableId),
+      active: this.activeSeatCount(),
+      seatsLen: Array.isArray(this.seats) ? this.seats.length : -1,
+    });
+    // #endregion
     this.waitForPlayersDeadline = Date.now() + POKER_TIMINGS.WAIT_FOR_PLAYERS_MS;
     this.waitForPlayersTimer = setTimeout(() => {
       void this.onWaitForPlayersWindowEnd();

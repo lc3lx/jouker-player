@@ -40,6 +40,8 @@ const walletTransactionSchema = new mongoose.Schema(
         "agent_deposit_out",
         "admin_agent_credit",
         "admin_agent_debit",
+        "admin_grant",
+        "admin_player_debit",
         "referral_reward",
         "gift_sent",
         "gift_received",

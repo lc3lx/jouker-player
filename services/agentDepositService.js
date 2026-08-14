@@ -1124,7 +1124,9 @@ exports.getAgentWalletSummary = asyncHandler(async (req, res) => {
 // ==============================================================================
 
 exports.adminListAgents = asyncHandler(async (req, res) => {
-  const rows = await AgentProfile.find({ "deposit.enabled": true })
+  const rows = await AgentProfile.find({
+    "deposit.enabled": { $in: [true, false] },
+  })
     .populate("user", "name email profileImg")
     .sort({ updatedAt: -1 })
     .limit(200)
@@ -1141,6 +1143,7 @@ exports.adminListAgents = asyncHandler(async (req, res) => {
       countries: p.deposit?.countries || [],
       paymentMethods: p.deposit?.paymentMethods || [],
       workingHours: p.deposit?.workingHours || "",
+      depositEnabled: !!p.deposit?.enabled,
       online: isAgentOnline(p.user?._id),
       stats: p.deposit?.stats || {},
     })),

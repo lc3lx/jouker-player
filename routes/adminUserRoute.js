@@ -12,11 +12,16 @@ const svc = require("../services/adminUserModerationService");
 const router = express.Router();
 router.use(authService.protect, authService.allowedTo("admin", "manager"));
 
+router.get("/search", svc.adminSearchUsers);
+
 router.get("/:id/overview", svc.adminUserOverview);
 router.get("/:id/transactions", svc.adminUserTransactions);
 router.get("/:id/purchases", svc.adminUserPurchases);
 router.get("/:id/vip-history", svc.adminUserVipHistory);
 router.get("/:id/reports", svc.adminUserReports);
+
+router.post("/:id/wallet/credit", svc.adminCreditPlayerWallet);
+router.post("/:id/wallet/debit", svc.adminDebitPlayerWallet);
 
 router.patch("/:id/ban", svc.adminBanUser);
 router.patch("/:id/unban", svc.adminUnbanUser);
