@@ -1251,11 +1251,11 @@ class PokerTable {
         ((this.dealerIndex % this.seats.length) + this.seats.length) % this.seats.length;
     }
 
-    if (this.humanSeatCount() >= 1 && this.activeSeatCount() < this.botFillTarget) {
+    if (this.seatedHumanCount() >= 1 && this.activeSeatCount() < this.botFillTarget) {
       this.addBotsForMissingSeats();
     }
 
-    if (this.humanSeatCount() < 1) {
+    if (this.seatedHumanCount() < 1) {
       // #region agent log
       _agentDbg("C", "tableGame.js:beginNextHandIfPossible", "no humans after hand — wait", {
         tableId: String(this.tableId),
@@ -1278,12 +1278,30 @@ class PokerTable {
       return;
     }
 
+    // #region agent log
+    _agentDbg("H", "tableGame.js:beginNextHandIfPossible", "start next hand", {
+      tableId: String(this.tableId),
+      seatedHumans: this.seatedHumanCount(),
+      humans: this.humanSeatCount(),
+      active: this.activeSeatCount(),
+      humanChips: (this.seats || [])
+        .filter((s) => isHumanSeat(s))
+        .map((s) => toSafeInt(s.chips, 0)),
+    });
+    // #endregion
+
     await this.startIfReady({ refreshFromDb: false, allowBotFill: true });
   }
 
   scheduleWaitForPlayers() {
     if (!this.isOwner) return; // H-3
     if (this.running || this.frozen) return;
+    // Solo human + bots: never wait for a second human. Rebuy/fill and deal.
+    if (this.seatedHumanCount() >= 1) {
+      this.clearWaitForPlayersTimer();
+      void this.startIfReady({ refreshFromDb: false, allowBotFill: true });
+      return;
+    }
     if (this.eligibleHumanCount() >= POKER_MIN_PLAYERS) {
       this.clearWaitForPlayersTimer();
       void this.startIfReady({ refreshFromDb: false, allowBotFill: true });
@@ -1295,6 +1313,7 @@ class PokerTable {
     _agentDbg("A", "tableGame.js:scheduleWaitForPlayers", "arm wait window", {
       tableId: String(this.tableId),
       humans: this.humanSeatCount(),
+      seatedHumans: this.seatedHumanCount(),
       eligible: this.eligibleHumanCount(),
       active: this.activeSeatCount(),
       round: this.round,
@@ -1322,6 +1341,42 @@ class PokerTable {
     }
     const amount = Math.max(0, toSafeInt(this.buyIn, toSafeInt(this.minBuyIn, 0)));
     if (amount <= 0) return 0;
+
+    // Refresh can historically drop 0-chip seats. Re-attach busted humans from Mongo.
+    try {
+      const table = await Table.findById(this.tableId).populate({
+        path: "seats.user",
+        select: "name profileImg",
+      });
+      for (const ms of table?.seats || []) {
+        const uid = String(ms.user?._id || ms.user || "");
+        if (!uid || toSafeInt(ms.chips, 0) > 0) continue;
+        if (this.findSeatIndexByUser(uid) >= 0) continue;
+        const chair =
+          ms.seatPosition != null
+            ? clampSeatPosition(ms.seatPosition, this.capacity)
+            : nextFreeSeatPosition(this.seats, this.capacity);
+        this.seats.push({
+          userId: uid,
+          name: ms.user?.name || "Player",
+          avatar: ms.user?.profileImg || null,
+          chips: 0,
+          inHand: false,
+          hole: [],
+          folded: false,
+          allIn: false,
+          bet: 0,
+          invested: 0,
+          isBot: false,
+          lastAction: null,
+          actedThisStreet: false,
+          seatPosition: chair,
+          cosmetics: emptyCosmetics(),
+          playerState: PLAYER_STATE.SEATED,
+        });
+      }
+    } catch (_) { /* rebuy loop still runs on RAM seats */ }
+
     let restored = 0;
     for (const s of this.seats) {
       if (!isHumanSeat(s) || toSafeInt(s.chips, 0) > 0) continue;
@@ -1384,13 +1439,14 @@ class PokerTable {
   async onWaitForPlayersWindowEnd() {
     this.waitForPlayersTimer = null;
     await this.autoRebuyBustedHumans();
-    if (this.humanSeatCount() >= 1 && this.activeSeatCount() < this.botFillTarget) {
+    if (this.seatedHumanCount() >= 1 && this.activeSeatCount() < this.botFillTarget) {
       this.addBotsForMissingSeats();
     }
     // #region agent log
     _agentDbg("A", "tableGame.js:onWaitForPlayersWindowEnd", "wait window ended", {
       tableId: String(this.tableId),
       humans: this.humanSeatCount(),
+      seatedHumans: this.seatedHumanCount(),
       eligible: this.eligibleHumanCount(),
       active: this.activeSeatCount(),
       round: this.round,
@@ -1409,13 +1465,13 @@ class PokerTable {
       return;
     }
 
-    // At least 1 human is seated but not enough humans for a normal start.
-    // Fill the remaining seats with bots and start immediately.
-    if (this.humanSeatCount() >= 1) {
+    // At least 1 human is seated (even with 0 chips) — fill bots and start.
+    if (this.seatedHumanCount() >= 1) {
       // #region agent log
       _agentDbg("E", "tableGame.js:onWaitForPlayersWindowEnd", "fill bots + start", {
         tableId: String(this.tableId),
         humans: this.humanSeatCount(),
+        seatedHumans: this.seatedHumanCount(),
         active: this.activeSeatCount(),
       });
       // #endregion
@@ -1570,7 +1626,9 @@ class PokerTable {
     const mapped = [];
     const usedChair = new Set();
     for (const s of sortSeatsByPosition(table.seats)) {
-      if (toSafeInt(s.chips, 0) <= 0) continue;
+      // Keep busted humans (0 chips) — cash-game auto-rebuy needs the seat.
+      const uid = String(s.user?._id || s.user || "");
+      if (!uid) continue;
       let chair = s.seatPosition;
       if (chair == null) {
         chair = nextFreeSeatPosition(
@@ -1581,7 +1639,7 @@ class PokerTable {
       if (chair == null) chair = mapped.length;
       usedChair.add(chair);
       mapped.push({
-        userId: String(s.user?._id || s.user),
+        userId: uid,
         name: s.user?.name || "Player",
         avatar: s.user?.profileImg || null,
         chips: toSafeInt(s.chips, 0),
@@ -1603,6 +1661,13 @@ class PokerTable {
       });
     }
     this.seats = mapped.slice(0, this.capacity);
+    // #region agent log
+    _agentDbg("K", "tableGame.js:resetStateFromTable", "reloaded seats", {
+      tableId: String(this.tableId),
+      count: this.seats.length,
+      chips: this.seats.map((s) => ({ bot: !!s.isBot, chips: s.chips })),
+    });
+    // #endregion
 
     if (this.seats.length > 0) {
       if (toSafeInt(this.handCounter, 0) === 0) {
@@ -1771,7 +1836,7 @@ class PokerTable {
     await this.applyCosmeticsToSeats();
 
     const shouldRestoreBots =
-      this.humanSeatCount() >= 1 &&
+      this.seatedHumanCount() >= 1 &&
       this.activeSeatCount() < Math.min(this.capacity, Math.max(2, this.botFillTarget));
     if (shouldRestoreBots && previousBots.length > 0) {
       const humanChairs = new Set(
@@ -1829,6 +1894,11 @@ class PokerTable {
 
   humanSeatCount() {
     return this.seats.filter((s) => !s.isBot && s.chips > 0).length;
+  }
+
+  /** Humans still sitting, including a just-busted stack waiting for auto-rebuy. */
+  seatedHumanCount() {
+    return this.seats.filter((s) => isHumanSeat(s)).length;
   }
 
   eligibleHumanCount() {
@@ -2046,7 +2116,7 @@ class PokerTable {
 
     this.clearWaitForPlayersTimer();
     await this.applyCosmeticsToSeats();
-    if (this.humanSeatCount() >= 1 && this.activeSeatCount() < this.botFillTarget) {
+    if (this.seatedHumanCount() >= 1 && this.activeSeatCount() < this.botFillTarget) {
       this.addBotsForMissingSeats();
     }
     await this.bootstrapLobbyStart();
@@ -2381,7 +2451,7 @@ class PokerTable {
       this.dealerIndex = 0;
     }
 
-    const humans = this.humanSeatCount();
+    const humans = this.seatedHumanCount();
     if (humans <= 0) return 0;
 
     const target = Math.min(this.capacity, Math.max(2, this.botFillTarget));
@@ -2442,7 +2512,7 @@ class PokerTable {
     }
     // Bots fill empty seats during an active game as long as at least 1 human is seated.
     if (!this.running) return;
-    if (this.humanSeatCount() < 1) return;
+    if (this.seatedHumanCount() < 1) return;
     if (this.activeSeatCount() >= this.botFillTarget) {
       this.clearBotFillTimer();
       return;
@@ -2454,7 +2524,7 @@ class PokerTable {
       this.botFillTimer = null;
       this.botFillDeadline = null;
       if (!this.botsEnabled || !this.running || this.starting) return;
-      if (this.humanSeatCount() < 1) return;
+      if (this.seatedHumanCount() < 1) return;
       if (this.activeSeatCount() >= this.botFillTarget) return;
 
       this.addBotsForMissingSeats();
@@ -2494,36 +2564,49 @@ class PokerTable {
   }
 
   buildLobbyStateFields() {
+    const seatedHumans = this.seatedHumanCount();
     const humans = this.humanSeatCount();
     const active = this.activeSeatCount();
     const base = buildPokerLobbyFields({
-      mongoSeatCount: humans,
+      mongoSeatCount: seatedHumans,
       engineSeats: this.seats,
       capacity: this.capacity,
       running: this.running,
       round: this.round,
       frozen: this.frozen === true,
     });
+    const soloWithBots = seatedHumans >= 1 && this.botsEnabled !== false;
     const canBotStart =
       !this.frozen &&
       this.round === "idle" &&
-      humans >= 1 &&
+      soloWithBots &&
       active >= POKER_MIN_PLAYERS;
     const playersNeeded =
-      humans >= POKER_MIN_PLAYERS || canBotStart
+      seatedHumans >= POKER_MIN_PLAYERS || canBotStart || soloWithBots
         ? 0
         : Math.max(0, POKER_MIN_PLAYERS - humans);
     let tableStatus = base.tableStatus;
     if (this.running || (this.round && String(this.round) !== "idle")) {
       tableStatus = "playing";
-    } else if (canBotStart || humans >= POKER_MIN_PLAYERS) {
+    } else if (canBotStart || humans >= POKER_MIN_PLAYERS || soloWithBots) {
       tableStatus = "ready";
     }
+    // #region agent log
+    _agentDbg("I", "tableGame.js:buildLobbyStateFields", "lobby fields", {
+      tableId: String(this.tableId),
+      seatedHumans,
+      humans,
+      active,
+      playersNeeded,
+      tableStatus,
+      round: this.round,
+    });
+    // #endregion
     if (this.frozen || this.tableStatusOverride === "frozen") {
       return {
         ...base,
-        seatedCount: humans,
-        humanSeatedCount: humans,
+        seatedCount: seatedHumans,
+        humanSeatedCount: seatedHumans,
         activeSeatCount: active,
         totalSeatedCount: active,
         playersNeeded,
@@ -2534,14 +2617,14 @@ class PokerTable {
     }
     return {
       ...base,
-      seatedCount: humans,
-      humanSeatedCount: humans,
+      seatedCount: seatedHumans,
+      humanSeatedCount: seatedHumans,
       activeSeatCount: active,
       totalSeatedCount: active,
       playersNeeded,
       tableStatus,
-      canStart: humans >= POKER_MIN_PLAYERS || canBotStart,
-      canStartWithBots: canBotStart,
+      canStart: humans >= POKER_MIN_PLAYERS || canBotStart || soloWithBots,
+      canStartWithBots: canBotStart || soloWithBots,
     };
   }
 
@@ -2560,16 +2643,16 @@ class PokerTable {
     await this.refreshSeatsFromDb();
     await this.autoRebuyBustedHumans();
 
-    if (this.humanSeatCount() >= 1 && this.activeSeatCount() < this.botFillTarget) {
+    if (this.seatedHumanCount() >= 1 && this.activeSeatCount() < this.botFillTarget) {
       this.addBotsForMissingSeats();
     }
 
     const canBotStart =
-      this.humanSeatCount() >= 1 && this.activeSeatCount() >= POKER_MIN_PLAYERS;
+      this.seatedHumanCount() >= 1 && this.activeSeatCount() >= POKER_MIN_PLAYERS;
 
-    if (this.eligibleHumanCount() >= POKER_MIN_PLAYERS || canBotStart) {
+    if (this.eligibleHumanCount() >= POKER_MIN_PLAYERS || canBotStart || this.seatedHumanCount() >= 1) {
       this.clearWaitForPlayersTimer();
-      await this.startIfReady({ refreshFromDb: false, allowBotFill: canBotStart });
+      await this.startIfReady({ refreshFromDb: false, allowBotFill: true });
       return;
     }
 
@@ -2605,19 +2688,38 @@ class PokerTable {
       }
       await this.autoRebuyBustedHumans();
 
+      if (this.seatedHumanCount() >= 1 && this.activeSeatCount() < this.botFillTarget) {
+        this.addBotsForMissingSeats();
+      }
+
       const humans = this.eligibleHumanCount();
       // Normal case: 2+ eligible humans.
-      // Bot-fill case: at least 1 human and bots fill the remaining seats.
+      // Bot-fill case: a seated human (even 0 chips after a bust) + bots.
       const canStartWithBots =
-        allowBotFill &&
-        this.humanSeatCount() >= 1 &&
+        (allowBotFill || this.seatedHumanCount() >= 1) &&
+        this.seatedHumanCount() >= 1 &&
         this.activeSeatCount() >= POKER_MIN_PLAYERS;
+
+      // #region agent log
+      _agentDbg("H", "tableGame.js:startIfReady", "start gate", {
+        tableId: String(this.tableId),
+        seatedHumans: this.seatedHumanCount(),
+        humansWithChips: this.humanSeatCount(),
+        eligible: humans,
+        active: this.activeSeatCount(),
+        canStartWithBots,
+        allowBotFill,
+        willWait: humans < POKER_MIN_PLAYERS && !canStartWithBots && this.seatedHumanCount() < 1,
+      });
+      // #endregion
 
       if (humans < POKER_MIN_PLAYERS && !canStartWithBots) {
         this.running = false;
         this.clearActionScheduling();
         this.clearBotFillTimer();
-        this.scheduleWaitForPlayers();
+        if (this.seatedHumanCount() < 1) {
+          this.scheduleWaitForPlayers();
+        }
         await this.syncMongoTableStatus();
         await this.broadcastState();
         return;
@@ -2625,7 +2727,7 @@ class PokerTable {
 
       this.clearWaitForPlayersTimer();
 
-      if (allowBotFill) {
+      if (allowBotFill || this.seatedHumanCount() >= 1) {
         promoteWaitingToSeated(this.seats);
         for (const s of this.seats) {
           if (!isHumanSeat(s) || toSafeInt(s.chips, 0) <= 0) continue;
@@ -2961,10 +3063,12 @@ class PokerTable {
       this.healStaleRoundIfNotRunning();
       this.running = false;
       this.clearActionScheduling();
-      if (this.humanSeatCount() >= 1 && this.activeSeatCount() < this.botFillTarget) {
+      if (this.seatedHumanCount() >= 1 && this.activeSeatCount() < this.botFillTarget) {
         this.addBotsForMissingSeats();
       }
-      this.scheduleWaitForPlayers();
+      if (this.seatedHumanCount() < 1) {
+        this.scheduleWaitForPlayers();
+      }
       await this.broadcastState();
       return;
     }
@@ -6165,12 +6269,12 @@ async function syncLivePokerTableAfterLeave(tableId) {
   if (!game || !game.isOwner) return;
   await game.refreshSeatsFromDb();
   game.clearWaitForPlayersTimer();
-  if (game.humanSeatCount() < 1) {
+  if (game.seatedHumanCount() < 1) {
     await resetLivePokerTableWhenEmpty(tableId);
     return;
   }
   if (game.round === "idle" && !game.running && !game.frozen) {
-    if (game.humanSeatCount() >= 1) {
+    if (game.seatedHumanCount() >= 1) {
       await game.bootstrapLobbyStart();
     } else {
       game.scheduleWaitForPlayers();

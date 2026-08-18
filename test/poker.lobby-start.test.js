@@ -40,6 +40,7 @@ function mkGame(overrides = {}) {
   const g = new PokerTable(createNspStub(), mkTableDoc(overrides));
   g.broadcastState = async () => {};
   g.syncMongoTableStatus = async () => {};
+  g.autoRebuyBustedHumans = async () => 0;
   g.startHand = async () => {
     g.running = true;
     g.round = "preflop";
@@ -148,6 +149,55 @@ test("beginNextHandIfPossible auto-rebuy busted human then starts", async () => 
   assert.equal(g.humanSeatCount(), 1);
   assert.ok(g.activeSeatCount() >= POKER_MIN_PLAYERS);
   assert.equal(started, true);
+});
+
+test("resetStateFromTable keeps busted human so auto-rebuy can run", () => {
+  const g = mkGame();
+  g.resetStateFromTable({
+    smallBlind: 500,
+    bigBlind: 1000,
+    minBuyIn: 100000,
+    maxBuyIn: 100000,
+    buyIn: 100000,
+    capacity: 9,
+    seats: [
+      { user: { _id: "u1", name: "Hero" }, chips: 0, seatPosition: 4 },
+    ],
+  });
+  assert.equal(g.seats.length, 1);
+  assert.equal(g.seats[0].userId, "u1");
+  assert.equal(g.seats[0].chips, 0);
+});
+
+test("beginNextHandIfPossible starts with busted seated human even if rebuy is a no-op", async () => {
+  const g = mkGame();
+  g.refreshSeatsFromDb = async () => true;
+  g.round = "idle";
+  g.running = false;
+  const hero = g.seats.find((s) => !s.isBot);
+  assert.ok(hero);
+  hero.chips = 0;
+  g.autoRebuyBustedHumans = async () => 0;
+  let started = false;
+  let waited = false;
+  g.scheduleWaitForPlayers = () => {
+    waited = true;
+  };
+  g.startHand = async () => {
+    started = true;
+    g.running = true;
+    g.round = "preflop";
+  };
+
+  await g.beginNextHandIfPossible();
+
+  assert.equal(g.seatedHumanCount(), 1);
+  assert.equal(waited, false);
+  assert.equal(started, true);
+  assert.ok(g.activeSeatCount() >= POKER_MIN_PLAYERS);
+  const lobby = g.buildLobbyStateFields();
+  assert.equal(lobby.playersNeeded, 0);
+  assert.notEqual(lobby.tableStatus, "waiting");
 });
 
 test("scheduleWaitForPlayers starts hand when enough eligible humans", async () => {

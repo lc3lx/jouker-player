@@ -46,6 +46,7 @@ function mkGame(seatCount, overrides = {}) {
   const g = new PokerTable(createNspStub(), mkMongoTable(seatCount, overrides));
   g.broadcastState = async () => {};
   g.syncMongoTableStatus = async () => {};
+  g.autoRebuyBustedHumans = async () => 0;
   g.startHand = async () => {
     g.handStarted = true;
   };
@@ -188,15 +189,14 @@ test("normalizeCapacity hard caps at 9", () => {
   assert.equal(normalizeCapacity(9), 9);
 });
 
-test("1 seated human does not start a hand", async () => {
+test("1 seated human fills bots and starts a hand", async () => {
   const g = mkGame(1);
   await g.startIfReady({ refreshFromDb: false });
-  assert.equal(g.running, false);
-  assert.equal(g.handStarted, undefined);
+  assert.equal(g.handStarted, true);
+  assert.ok(g.activeSeatCount() >= POKER_MIN_PLAYERS);
   const lobby = g.buildLobbyStateFields();
   assert.equal(lobby.seatedCount, 1);
-  assert.equal(lobby.playersNeeded, 1);
-  assert.equal(lobby.tableStatus, "waiting");
+  assert.equal(lobby.playersNeeded, 0);
 });
 
 test("2 seated humans start a hand", async () => {
@@ -253,8 +253,8 @@ test("getPublicState includes lobby fields for reconnect while waiting", () => {
   const g = mkGame(1);
   const state = g.getPublicState("u0");
   assert.equal(state.seatedCount, 1);
-  assert.equal(state.playersNeeded, 1);
-  assert.equal(state.tableStatus, "waiting");
+  assert.equal(state.playersNeeded, 0);
+  assert.equal(state.tableStatus, "ready");
   assert.equal(state.capacity, 9);
 });
 
@@ -267,15 +267,17 @@ test("getPublicState includes playing status during active hand", () => {
   assert.equal(state.seatedCount, 3);
 });
 
-test("start-if-ready with 1 human does not invoke startHand even via socket path", async () => {
+test("start-if-ready with 1 human fills bots and starts", async () => {
   const g = mkGame(1);
   let starts = 0;
   g.startHand = async () => {
     starts += 1;
+    g.running = true;
+    g.round = "preflop";
   };
   await g.startIfReady({ refreshFromDb: false });
-  assert.equal(starts, 0);
-  assert.equal(g.buildLobbyStateFields().playersNeeded, POKER_MIN_PLAYERS - 1);
+  assert.equal(starts, 1);
+  assert.equal(g.buildLobbyStateFields().playersNeeded, 0);
 });
 
 console.log("poker.table-allocation.test.js: all tests registered");
