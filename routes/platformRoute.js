@@ -32,6 +32,11 @@ router.get(
         gameType: req.params.gameType === "all" ? null : req.params.gameType,
         limit,
       });
+    } else if (req.params.gameType && req.params.gameType !== "poker") {
+      data = await leaderboardPlatformService.winsLeaderboard({
+        gameType: req.params.gameType,
+        limit: Math.max(limit, 200),
+      });
     } else {
       data = await leaderboardPlatformService.pokerLeaderboard({
         period,

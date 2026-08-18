@@ -254,12 +254,34 @@ exports.getPokerRetention = asyncHandler(async (req, res) => {
   });
 });
 
+exports.getWinsLeaderboard = asyncHandler(async (req, res) => {
+  const limit = Math.min(50, parseInt(req.query.limit || "20", 10));
+  const rows = await Player.find({ "stats.wins": { $gt: 0 } })
+    .populate("user", "name profileImg")
+    .sort({ "stats.wins": -1, "stats.gamesPlayed": -1 })
+    .limit(limit)
+    .lean();
+
+  res.status(200).json({
+    status: "success",
+    data: rows.map((p, i) => ({
+      rank: i + 1,
+      userId: p.user?._id,
+      name: (p.user && p.user.name) || p.displayName || "Player",
+      profileImg: (p.user && p.user.profileImg) || "",
+      wins: p.stats?.wins || 0,
+      gamesPlayed: p.stats?.gamesPlayed || 0,
+      byGame: p.stats?.byGame || {},
+    })),
+  });
+});
+
 /** Rolling 7-day poker win volume (wallet `win` ledger rows). */
 exports.getWeeklyPokerWinsLeaderboard = asyncHandler(async (req, res) => {
   const limit = Math.min(50, parseInt(req.query.limit || "20", 10));
   const since = new Date(Date.now() - 7 * 24 * 60 * 60 * 1000);
   const rows = await WalletTransaction.aggregate([
-    { $match: { type: "win", createdAt: { $gte: since } } },
+    { $match: { type: { $in: ["win", "game_win", "island_jackpot_win"] }, createdAt: { $gte: since } } },
     { $group: { _id: "$userId", totalWon: { $sum: "$amount" } } },
     { $sort: { totalWon: -1 } },
     { $limit: limit },

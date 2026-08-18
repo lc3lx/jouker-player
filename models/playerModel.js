@@ -23,6 +23,7 @@ const playerSchema = new mongoose.Schema(
       level: { type: Number, default: 1 },
       experience: { type: Number, default: 0 },
       wins: { type: Number, default: 0 },
+      byGame: { type: mongoose.Schema.Types.Mixed, default: {} },
     },
     achievements: [
       {
@@ -46,6 +47,7 @@ const playerSchema = new mongoose.Schema(
 
 playerSchema.index({ "stats.totalScore": -1 });
 playerSchema.index({ "stats.bestScore": -1 });
+playerSchema.index({ "stats.wins": -1 });
 
 playerSchema.statics.getOrCreateByUser = async function (userId) {
   let player = await this.findOne({ user: userId });

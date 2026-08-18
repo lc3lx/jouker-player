@@ -358,7 +358,11 @@ exports.spinLuckyWheel = asyncHandler(async (req, res, next) => {
   }).catch(() => {});
 
   const { publishSpinCompleted } = require("../domain/publishers/playerActivityPublishers");
-  publishSpinCompleted(userId, { sourceId: spinResult.spinId, game: "lucky-wheel" });
+  publishSpinCompleted(userId, {
+    sourceId: spinResult.spinId,
+    game: "lucky-wheel",
+    won: Number(spinResult.chips || spinResult.amount || 0) > 0,
+  });
 
   res.status(200).json({
     status: "success",

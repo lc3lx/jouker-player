@@ -4411,6 +4411,7 @@ class PokerTable {
               userId: String(uid),
               gameType: "poker",
               handsPlayed: 1,
+              won: wonSet.has(String(uid)),
               xp: XP_RATES.pokerHand,
             });
           }

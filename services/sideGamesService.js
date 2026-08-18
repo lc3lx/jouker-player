@@ -76,5 +76,14 @@ exports.play = asyncHandler(async (req, res, next) => {
     result,
   });
 
+  try {
+    require("./playerWinStatsService").publishCompletedGame({
+      userId: req.user._id,
+      gameType: type,
+      won: payout > betVal,
+      sourceId: String(play._id),
+    });
+  } catch (_) {}
+
   res.status(200).json({ status: "success", data: { play, walletBalance: wallet.balance } });
 });

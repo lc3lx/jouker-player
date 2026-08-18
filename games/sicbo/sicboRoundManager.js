@@ -113,6 +113,16 @@ async function settleRound(roundId, { onUserSettled } = {}) {
       const res = await walletAdapter.settleUserBets({ userId, roundId, dice });
       settledCount += 1;
       payouts.push(res);
+      if (!res.alreadySettled) {
+        try {
+          require("../../services/playerWinStatsService").publishCompletedGame({
+            userId,
+            gameType: "sicbo",
+            won: Number(res.wonBets || 0) > 0,
+            sourceId: roundId,
+          });
+        } catch (_) {}
+      }
       if (typeof onUserSettled === "function") {
         try {
           onUserSettled(res);

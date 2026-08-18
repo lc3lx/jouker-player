@@ -4,6 +4,7 @@ const {
   getMyStats,
   getCountryRanking,
   getBalanceLeaderboard,
+  getWinsLeaderboard,
   getWeeklyPokerWinsLeaderboard,
   claimDailyBonus,
   getPokerRetention,
@@ -14,6 +15,7 @@ const router = express.Router();
 router.get("/me", authService.protect, getMyStats);
 router.get("/country", authService.protect, getCountryRanking);
 router.get("/leaderboard/balance", authService.protect, getBalanceLeaderboard);
+router.get("/leaderboard/wins", authService.protect, getWinsLeaderboard);
 router.get("/leaderboard/poker-weekly", authService.protect, getWeeklyPokerWinsLeaderboard);
 router.get("/poker-retention", authService.protect, getPokerRetention);
 router.post("/daily-bonus", authService.protect, claimDailyBonus);

@@ -141,7 +141,11 @@ async function executeSpin(userId, betAmountInput) {
   });
 
   const { publishSpinCompleted } = require("../../domain/publishers/playerActivityPublishers");
-  publishSpinCompleted(userKey, { sourceId: round.roundId, game: "poseidon" });
+  publishSpinCompleted(userKey, {
+    sourceId: round.roundId,
+    game: "poseidon",
+    won: Number(totalWin || 0) > 0,
+  });
 
   const liveSession = roundManager.getBonusSession(userKey);
 

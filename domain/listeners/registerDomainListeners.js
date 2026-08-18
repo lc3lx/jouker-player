@@ -45,8 +45,15 @@ function registerDomainListeners() {
   subscribe(
     Events.PLAYER_COMPLETED_GAME,
     async ({ payload }) => {
-      const { userId, gameType, handsPlayed = 0, sourceId } = payload || {};
+      const { userId, gameType, handsPlayed = 0, sourceId, won } = payload || {};
       if (!userId) return;
+      const playerWinStatsService = require("../../services/playerWinStatsService");
+      await playerWinStatsService.recordOutcome({
+        userId,
+        gameType,
+        won: won === true,
+        sourceId,
+      });
       const xp =
         gameType === "poker"
           ? XP_RATES.pokerHand
@@ -77,8 +84,17 @@ function registerDomainListeners() {
   subscribe(
     Events.PLAYER_COMPLETED_SPIN,
     async ({ payload }) => {
-      const { userId, sourceId } = payload || {};
+      const { userId, sourceId, game, won } = payload || {};
       if (!userId) return;
+      if (game && game !== "lucky-wheel") {
+        const playerWinStatsService = require("../../services/playerWinStatsService");
+        await playerWinStatsService.recordOutcome({
+          userId,
+          gameType: game || "spin",
+          won: won === true,
+          sourceId,
+        });
+      }
       await playerProgressService.grantXp(userId, XP_RATES.spin, {
         source: "spin",
         sourceId: sourceId || "",

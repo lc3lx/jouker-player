@@ -435,16 +435,22 @@ async function maybeAbandonTrixTable(nsp, tableId) {
   }
 }
 
-function publishCardGameActivityForHumans(ctx, sourceId) {
+function publishCardGameActivityForHumans(ctx, sourceId, settlement) {
   if (!ctx?.game?.players) return;
   try {
     const { publish } = require("../../domain/events/domainEventBus");
     const Events = require("../../domain/events/eventTypes");
+    const winnerIds = new Set(
+      (settlement?.participants || [])
+        .filter((p) => p.isWinner && p.userId && !p.isBot)
+        .map((p) => String(p.userId))
+    );
     for (const p of ctx.game.players) {
       if (p.isBot || !p.userId) continue;
       publish(Events.PLAYER_COMPLETED_GAME, {
         userId: String(p.userId),
         gameType: ctx.type,
+        won: winnerIds.has(String(p.userId)),
         sourceId: sourceId || String(ctx.tableId),
       });
     }
@@ -531,10 +537,6 @@ async function runGameSettlement(nsp, ctx, gameResult) {
           tableId: String(ctx.tableId),
         });
       }
-      publishCardGameActivityForHumans(
-        ctx,
-        outcome?.settlement?.settlementId || String(ctx.tableId)
-      );
     }
     return outcome;
   } catch (err) {
@@ -1275,6 +1277,7 @@ function registerGameHandlers(nsp, jwtVerify) {
         publishSpinCompleted(userId, {
           sourceId: String(play._id),
           game: "king-arth",
+          won: Number(play.profit || 0) > 0,
         });
 
         const fairness = {
@@ -1432,6 +1435,7 @@ function registerGameHandlers(nsp, jwtVerify) {
         publishSpinCompleted(userId, {
           sourceId: String(play._id),
           game: "king-arth",
+          won: false,
         });
 
         const freeSpinsRemaining =
@@ -1596,14 +1600,6 @@ function registerGameHandlers(nsp, jwtVerify) {
               const winner = game.players[gameResult.winnerIndex];
               if (winner && !winner.isBot && winner.userId) {
                 trackTrixWin(winner.userId, { tableId: ctx.tableId });
-            try {
-              const { publish } = require("../../domain/events/domainEventBus");
-              const Events = require("../../domain/events/eventTypes");
-              publish(Events.PLAYER_COMPLETED_GAME, {
-                userId: String(winner.userId),
-                gameType: "trix",
-              });
-            } catch (_) {}
               }
             }
             void runGameSettlement(nsp, ctx, gameResult);

@@ -634,6 +634,10 @@ async function settleGameOnFinish({
     settlementDoc.settledAt = new Date();
     await settlementDoc.save();
 
+    try {
+      require("./playerWinStatsService").publishFromSettlement(settlementDoc);
+    } catch (_) {}
+
     logger.info("game_settlement_completed", {
       settlementId,
       tableId: String(tableId),
@@ -717,6 +721,10 @@ async function recoverPendingSettlement(settlementId) {
   doc.settledAt = new Date();
   doc.errorMessage = undefined;
   await doc.save();
+
+  try {
+    require("./playerWinStatsService").publishFromSettlement(doc);
+  } catch (_) {}
 
   logger.info("settlement_recovered", { settlementId, tableId: String(doc.tableId), gameType: doc.gameType });
   return { recovered: true, settlement: doc };
@@ -837,6 +845,10 @@ async function settleParkourRace({ raceMongoId, sessionId, gameResult, gamePlaye
       totalRake: plan.totalRake,
       totalPayout: plan.totalPayout,
     });
+
+    try {
+      require("./playerWinStatsService").publishFromSettlement(settlementDoc);
+    } catch (_) {}
 
     return { success: true, settlement: settlementDoc, plan, reconciliation };
   } catch (err) {

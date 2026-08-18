@@ -190,7 +190,11 @@ async function executeSpin(userId, betAmountInput) {
   const remainingBonus = roundManager.getBonusSession(userKey);
 
   const { publishSpinCompleted } = require("../../domain/publishers/playerActivityPublishers");
-  publishSpinCompleted(userKey, { sourceId: round.roundId, game: "golden-tree" });
+  publishSpinCompleted(userKey, {
+    sourceId: round.roundId,
+    game: "golden-tree",
+    won: Number(round.totalWin || 0) > 0,
+  });
 
   return buildSpinResponse(round, balanceAfter, {
     winCapped: capped,

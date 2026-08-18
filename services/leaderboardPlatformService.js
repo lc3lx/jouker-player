@@ -1,4 +1,5 @@
 const User = require("../models/userModel");
+const Player = require("../models/playerModel");
 const HandHistory = require("../models/handHistoryModel");
 const GameSettlement = require("../models/gameSettlementModel");
 
@@ -85,7 +86,44 @@ async function settlementProfitLeaderboard({ period = "monthly", gameType = null
   return rows.map((r) => ({ userId: String(r._id), profit: r.profit }));
 }
 
+async function winsLeaderboard({ gameType = "all", limit = 50 } = {}) {
+  const type = String(gameType || "all");
+  if (!type || type === "all" || type === "global") {
+    const rows = await Player.find({ "stats.wins": { $gt: 0 } })
+      .sort({ "stats.wins": -1, "stats.gamesPlayed": -1 })
+      .limit(limit)
+      .populate("user", "name profileImg country")
+      .lean();
+    return rows.map((p) => ({
+      userId: p.user?._id ? String(p.user._id) : String(p.user || ""),
+      name: (p.user && p.user.name) || p.displayName || "Player",
+      avatar: (p.user && p.user.profileImg) || "",
+      country: (p.user && p.user.country) || "",
+      value: p.stats?.wins || 0,
+      wins: p.stats?.wins || 0,
+      gamesPlayed: p.stats?.gamesPlayed || 0,
+    }));
+  }
+
+  const winPath = `stats.byGame.${type}.wins`;
+  const rows = await Player.find({ [winPath]: { $gt: 0 } })
+    .sort({ [winPath]: -1 })
+    .limit(limit)
+    .populate("user", "name profileImg country")
+    .lean();
+  return rows.map((p) => ({
+    userId: p.user?._id ? String(p.user._id) : String(p.user || ""),
+    name: (p.user && p.user.name) || p.displayName || "Player",
+    avatar: (p.user && p.user.profileImg) || "",
+    country: (p.user && p.user.country) || "",
+    value: p.stats?.byGame?.[type]?.wins || 0,
+    wins: p.stats?.byGame?.[type]?.wins || 0,
+    gamesPlayed: p.stats?.byGame?.[type]?.played || 0,
+  }));
+}
+
 module.exports = {
   pokerLeaderboard,
   settlementProfitLeaderboard,
+  winsLeaderboard,
 };
