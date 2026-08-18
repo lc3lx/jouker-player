@@ -100,7 +100,9 @@ test("addBotsForMissingSeats reindexes so turn order stays clockwise", () => {
   const chairs = game.seats.map((s) => s.seatPosition);
   const sorted = [...chairs].sort((a, b) => a - b);
   assert.deepEqual(chairs, sorted, "seats array must be sorted by chair after bot fill");
-  game.dealerIndex = game.seats.findIndex((s) => s.seatPosition === 0);
+  game.handCounter = 0;
+  game._ensureDealerAtSeatPosition(0);
+  assert.equal(game.seats[game.dealerIndex].seatPosition, 0);
   const orderChairs = game.seatOrderFrom(game.dealerIndex).map((i) => game.seats[i].seatPosition);
   // After dealer at 0, clockwise among occupied
   for (let i = 1; i < orderChairs.length; i++) {
@@ -113,4 +115,16 @@ test("addBotsForMissingSeats reindexes so turn order stays clockwise", () => {
     }
   }
   assert.equal(orderChairs[0], 1);
+});
+
+test("_ensureDealerAtSeatPosition pins dealer on chair 0 when occupied", () => {
+  const game = mkTable([
+    mkSeat("d0", 0),
+    mkSeat("p4", 4),
+    mkSeat("b1", 1),
+  ]);
+  game.dealerIndex = 1; // was pointing at chair 4
+  game.handCounter = 0;
+  game._ensureDealerAtSeatPosition(0);
+  assert.equal(game.seats[game.dealerIndex].seatPosition, 0);
 });

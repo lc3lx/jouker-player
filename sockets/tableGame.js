@@ -1503,7 +1503,12 @@ class PokerTable {
     this.seats = mapped.slice(0, this.capacity);
 
     if (this.seats.length > 0) {
-      this.dealerIndex = ((this.dealerIndex % this.seats.length) + this.seats.length) % this.seats.length;
+      if (toSafeInt(this.handCounter, 0) === 0) {
+        this._ensureDealerAtSeatPosition(0);
+      } else {
+        this.dealerIndex =
+          ((this.dealerIndex % this.seats.length) + this.seats.length) % this.seats.length;
+      }
     } else {
       this.dealerIndex = 0;
     }
@@ -2593,6 +2598,24 @@ class PokerTable {
     return this.seats.findIndex((s) => toSafeInt(s?.seatPosition, -1) === target);
   }
 
+  /**
+   * Pin the dealer button on a physical chair (default 0). Falls back to the
+   * next occupied seat clockwise if that chair is empty.
+   */
+  _ensureDealerAtSeatPosition(targetPos = 0) {
+    const cap = Math.max(2, toSafeInt(this.capacity, POKER_CAPACITY) || POKER_CAPACITY);
+    const start = toSafeInt(targetPos, 0);
+    for (let k = 0; k < cap; k++) {
+      const pos = (start + k) % cap;
+      const i = this._indexAtSeatPosition(pos);
+      if (i >= 0 && toSafeInt(this.seats[i]?.chips, 0) > 0) {
+        this.dealerIndex = i;
+        return i;
+      }
+    }
+    return -1;
+  }
+
   dealHoleCards(deck) {
     for (const s of this.seats) {
       if (canBeDealtIntoHand(s)) {
@@ -2750,6 +2773,19 @@ class PokerTable {
     if (!this.isOwner) return; // H-3: only the owner deals hands
     this.clearActionScheduling();
     promoteWaitingToSeated(this.seats);
+    this.reindexSeatsByPosition();
+
+    // First hand on a table always opens from physical chair 0 (dealer button).
+    if (toSafeInt(this.handCounter, 0) === 0) {
+      this._ensureDealerAtSeatPosition(0);
+    }
+    // #region agent log
+    _agentDbg("F", "tableGame.js:startHand", "dealer pinned for hand start", {
+      handCounter: this.handCounter,
+      dealerIndex: this.dealerIndex,
+      dealerChair: this.seats[this.dealerIndex]?.seatPosition ?? null,
+    });
+    // #endregion
 
     // Reset
     this.community = [];
