@@ -17,6 +17,7 @@ const houseWalletTransactionSchema = new mongoose.Schema(
         "house_rake",
         "house_bot_buyin",
         "house_bot_payout",
+        "house_dev_topup",
       ],
       required: true,
       index: true,

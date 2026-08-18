@@ -1205,16 +1205,34 @@ class PokerTable {
     }, delay);
   }
 
+  /**
+   * Chip-conservation looking OK is not enough to resume after a ledger
+   * failure: RAM was never advanced, so the probe is a false positive.
+   */
+  _tryUnfreezeFromChipProbe(context) {
+    if (!this.frozen || this.running) return false;
+    if (this.frozenReason === "settlement") {
+      logger.warn("poker_skip_unfreeze_settlement", {
+        tableId: this.tableId,
+        context,
+        frozenReason: this.frozenReason,
+      });
+      return false;
+    }
+    const probe = auditChipConservation(this, "unfreeze_probe");
+    if (!probe.ok) return false;
+    this.frozen = false;
+    this.frozenReason = null;
+    this.tableStatusOverride = null;
+    this.logSuspicious("unfreeze_false_positive", { context });
+    return true;
+  }
+
   async beginNextHandIfPossible() {
     if (!this.isOwner) return; // H-3
 
     if (this.frozen && !this.running) {
-      const probe = auditChipConservation(this, "unfreeze_probe");
-      if (probe.ok) {
-        this.frozen = false;
-        this.frozenReason = null;
-        this.tableStatusOverride = null;
-      }
+      this._tryUnfreezeFromChipProbe("begin_next_hand");
     }
     if (this.frozen || this.running || this.starting) return;
     if (this.round !== "idle") {
@@ -1295,6 +1313,13 @@ class PokerTable {
    * Bots are replaced separately via addBotsForMissingSeats.
    */
   async autoRebuyBustedHumans() {
+    if (this.frozen) {
+      logger.warn("poker_auto_rebuy_skipped_frozen", {
+        tableId: this.tableId,
+        frozenReason: this.frozenReason,
+      });
+      return 0;
+    }
     const amount = Math.max(0, toSafeInt(this.buyIn, toSafeInt(this.minBuyIn, 0)));
     if (amount <= 0) return 0;
     let restored = 0;
@@ -2349,7 +2374,7 @@ class PokerTable {
     for (const s of this.seats) {
       if (s && s.isBot && s.chips <= 0 && s.userId) botPoolService.release(s.userId);
     }
-    this.seats = this.seats.filter((s) => s.chips > 0);
+    this.seats = this.seats.filter((s) => toSafeInt(s.chips, 0) > 0 || isHumanSeat(s));
     if (this.seats.length > 0) {
       this.dealerIndex = ((this.dealerIndex % this.seats.length) + this.seats.length) % this.seats.length;
     } else {
@@ -2523,13 +2548,7 @@ class PokerTable {
   async bootstrapLobbyStart() {
     if (!this.isOwner) return; // H-3: followers never start the loop
     if (this.frozen && !this.running) {
-      const probe = auditChipConservation(this, "unfreeze_probe");
-      if (probe.ok) {
-        this.frozen = false;
-        this.frozenReason = null;
-        this.tableStatusOverride = null;
-        this.logSuspicious("unfreeze_false_positive", { context: "bootstrap" });
-      }
+      this._tryUnfreezeFromChipProbe("bootstrap");
     }
     if (this.frozen) return;
     if (this.running) return;
@@ -2627,6 +2646,12 @@ class PokerTable {
       this.clearBotFillTimer();
       this.running = true;
       await this.syncMongoTableStatus();
+      // Human sits opposite (UI seat 5 / chair 4) first — pin dealer to UI seat 1
+      // (chair 0) before the deal so the hand does not open from the hero.
+      if (toSafeInt(this.handCounter, 0) === 0) {
+        this.reindexSeatsByPosition();
+        this._ensureDealerAtSeatPosition(0);
+      }
       await this.startHand();
     } catch (err) {
       // A throw during the deal must NOT strand running=true with no armed timer
@@ -2854,10 +2879,16 @@ class PokerTable {
     promoteWaitingToSeated(this.seats);
     this.reindexSeatsByPosition();
 
-    // First hand on a table always opens from physical chair 0 (dealer button).
+    // First hand: dealer button on physical chair 0 = UI "مقعد 1".
     if (toSafeInt(this.handCounter, 0) === 0) {
       this._ensureDealerAtSeatPosition(0);
     }
+    logger.info("poker_hand_deal_origin", {
+      tableId: this.tableId,
+      handCounter: this.handCounter,
+      dealerChair: this.seats[this.dealerIndex]?.seatPosition ?? null,
+      dealerUiSeat: (this.seats[this.dealerIndex]?.seatPosition ?? -1) + 1,
+    });
     // #region agent log
     _agentDbg("F", "tableGame.js:startHand", "dealer pinned for hand start", {
       handCounter: this.handCounter,
@@ -4529,6 +4560,11 @@ class PokerTable {
       sbSeatIndex: this.sbSeatIndex,
       bbSeatIndex: this.bbSeatIndex,
       dealerSeatIndex: this.dealerIndex,
+      dealerSeatPosition: this._seatPositionOf(this.dealerIndex),
+      sbSeatPosition:
+        this.sbSeatIndex >= 0 ? this._seatPositionOf(this.sbSeatIndex) : null,
+      bbSeatPosition:
+        this.bbSeatIndex >= 0 ? this._seatPositionOf(this.bbSeatIndex) : null,
       turnUserId,
       actionDeadline: this.actionDeadline,
       turnSeconds: this.turnSeconds,

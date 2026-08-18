@@ -128,3 +128,17 @@ test("_ensureDealerAtSeatPosition pins dealer on chair 0 when occupied", () => {
   game._ensureDealerAtSeatPosition(0);
   assert.equal(game.seats[game.dealerIndex].seatPosition, 0);
 });
+
+test("first hand dealer is UI seat 1 (chair 0) when human sat opposite at 4", () => {
+  const game = mkTable([
+    mkSeat("hero", 4),
+    mkSeat("bot0", 0),
+    mkSeat("bot1", 1),
+  ]);
+  game.dealerIndex = 0; // array slot 0 is the human at chair 4
+  game.handCounter = 0;
+  game.reindexSeatsByPosition();
+  game._ensureDealerAtSeatPosition(0);
+  assert.equal(game.seats[game.dealerIndex].seatPosition, 0);
+  assert.notEqual(game.seats[game.dealerIndex].userId, "hero");
+});
