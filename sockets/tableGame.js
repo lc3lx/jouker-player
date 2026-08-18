@@ -27,7 +27,7 @@ const { bestOf7, compareHands7 } = require("../utils/poker/handEval");
 const Jackpot = require("../models/jackpotModel");
 const User = require("../models/userModel");
 const { RedisTableStateStore } = require("../utils/tableStateStore");
-const { applyLockedDelta, applyHouseSettlementDelta, withMongoTransaction, creditJackpotWin } = require("../services/walletLedgerService");
+const { applyLockedDelta, applyHouseSettlementDelta, withMongoTransaction, creditJackpotWin, transferToLocked } = require("../services/walletLedgerService");
 const logger = require("../utils/logger");
 const tableChat = require("./tableChat");
 const { metrics } = require("../utils/metrics");
@@ -1223,10 +1223,11 @@ class PokerTable {
     }
 
     promoteWaitingToSeated(this.seats);
+    await this.autoRebuyBustedHumans();
     for (const s of this.seats) {
       if (s && s.isBot && s.chips <= 0 && s.userId) botPoolService.release(s.userId);
     }
-    this.seats = this.seats.filter((s) => s.chips > 0);
+    this.seats = this.seats.filter((s) => toSafeInt(s.chips, 0) > 0 || isHumanSeat(s));
     if (this.seats.length > 0) {
       this.dealerIndex =
         ((this.dealerIndex % this.seats.length) + this.seats.length) % this.seats.length;
@@ -1249,6 +1250,11 @@ class PokerTable {
         })),
       });
       // #endregion
+      logger.info("poker_next_hand_waiting_no_human", {
+        tableId: this.tableId,
+        active: this.activeSeatCount(),
+        seats: Array.isArray(this.seats) ? this.seats.length : -1,
+      });
       this.scheduleWaitForPlayers();
       await this.broadcastState();
       return;
@@ -1283,8 +1289,79 @@ class PokerTable {
     }, POKER_TIMINGS.WAIT_FOR_PLAYERS_MS);
   }
 
+  /**
+   * Cash-game auto-rebuy: a busted human (0 chips) still seated is topped up
+   * from their wallet for one table buy-in so the next hand can start.
+   * Bots are replaced separately via addBotsForMissingSeats.
+   */
+  async autoRebuyBustedHumans() {
+    const amount = Math.max(0, toSafeInt(this.buyIn, toSafeInt(this.minBuyIn, 0)));
+    if (amount <= 0) return 0;
+    let restored = 0;
+    for (const s of this.seats) {
+      if (!isHumanSeat(s) || toSafeInt(s.chips, 0) > 0) continue;
+      const uid = s.userId;
+      try {
+        await withMongoTransaction(async (session) => {
+          await transferToLocked({
+            session,
+            userId: uid,
+            amount,
+            tableId: this.tableId,
+            meta: { reason: "auto_rebuy" },
+          });
+          const tableQuery = Table.findById(this.tableId);
+          const table = session ? await tableQuery.session(session) : await tableQuery;
+          if (!table) throw new Error("TABLE_NOT_FOUND");
+          const tSeat = (table.seats || []).find(
+            (x) => String(x.user) === String(uid)
+          );
+          if (!tSeat) throw new Error("SEAT_NOT_FOUND");
+          tSeat.chips = amount;
+          await table.save(session ? { session } : undefined);
+        });
+        s.chips = amount;
+        s.allIn = false;
+        s.folded = false;
+        s.inHand = false;
+        if (s.playerState === PLAYER_STATE.ACTIVE_HAND) {
+          s.playerState = PLAYER_STATE.SEATED;
+        }
+        restored += 1;
+        logger.info("poker_auto_rebuy", {
+          tableId: this.tableId,
+          userId: uid,
+          amount,
+        });
+        // #region agent log
+        _agentDbg("G", "tableGame.js:autoRebuyBustedHumans", "rebuy ok", {
+          tableId: String(this.tableId),
+          amount,
+        });
+        // #endregion
+      } catch (err) {
+        logger.warn("poker_auto_rebuy_failed", {
+          tableId: this.tableId,
+          userId: uid,
+          reason: err?.message || "unknown",
+        });
+        // #region agent log
+        _agentDbg("G", "tableGame.js:autoRebuyBustedHumans", "rebuy failed", {
+          tableId: String(this.tableId),
+          reason: err?.message || "unknown",
+        });
+        // #endregion
+      }
+    }
+    return restored;
+  }
+
   async onWaitForPlayersWindowEnd() {
     this.waitForPlayersTimer = null;
+    await this.autoRebuyBustedHumans();
+    if (this.humanSeatCount() >= 1 && this.activeSeatCount() < this.botFillTarget) {
+      this.addBotsForMissingSeats();
+    }
     // #region agent log
     _agentDbg("A", "tableGame.js:onWaitForPlayersWindowEnd", "wait window ended", {
       tableId: String(this.tableId),
@@ -2462,6 +2539,7 @@ class PokerTable {
     if (this.round !== "idle") return;
 
     await this.refreshSeatsFromDb();
+    await this.autoRebuyBustedHumans();
 
     if (this.humanSeatCount() >= 1 && this.activeSeatCount() < this.botFillTarget) {
       this.addBotsForMissingSeats();
@@ -2506,6 +2584,7 @@ class PokerTable {
       if (refreshFromDb) {
         await this.refreshSeatsFromDb();
       }
+      await this.autoRebuyBustedHumans();
 
       const humans = this.eligibleHumanCount();
       // Normal case: 2+ eligible humans.

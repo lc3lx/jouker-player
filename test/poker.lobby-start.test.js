@@ -124,6 +124,32 @@ test("beginNextHandIfPossible auto-starts with bots after solo human hand", asyn
   assert.equal(started, true);
 });
 
+test("beginNextHandIfPossible auto-rebuy busted human then starts", async () => {
+  const g = mkGame();
+  g.refreshSeatsFromDb = async () => true;
+  g.round = "idle";
+  g.running = false;
+  const hero = g.seats.find((s) => !s.isBot);
+  assert.ok(hero);
+  hero.chips = 0;
+  g.autoRebuyBustedHumans = async () => {
+    hero.chips = g.buyIn;
+    return 1;
+  };
+  let started = false;
+  g.startHand = async () => {
+    started = true;
+    g.running = true;
+    g.round = "preflop";
+  };
+
+  await g.beginNextHandIfPossible();
+
+  assert.equal(g.humanSeatCount(), 1);
+  assert.ok(g.activeSeatCount() >= POKER_MIN_PLAYERS);
+  assert.equal(started, true);
+});
+
 test("scheduleWaitForPlayers starts hand when enough eligible humans", async () => {
   const g = mkGame({
     seats: [
