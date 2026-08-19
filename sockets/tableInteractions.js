@@ -25,9 +25,12 @@ function registerTableInteractionHandlers(nsp, roomForGame, fixedGameType = null
     socket.on("interaction_catalog", async (_payload, ack) => {
       if (typeof ack !== "function") return;
       try {
-        const [items, inventory] = await Promise.all([
+        const [items, inventory, chatPresets] = await Promise.all([
           svc.listCatalog(),
           svc.getInventory(socket.userId),
+          require("../services/tableChatPresetService")
+            .listPublished()
+            .catch(() => ({ emojis: [], phrases: [] })),
         ]);
         ack({
           ok: true,
@@ -58,6 +61,7 @@ function registerTableInteractionHandlers(nsp, roomForGame, fixedGameType = null
             cooldownMs: i.cooldownMs,
           })),
           inventory,
+          chatPresets,
         });
       } catch (e) {
         logger.warn("interaction_catalog_failed", { reason: e?.message || "unknown" });

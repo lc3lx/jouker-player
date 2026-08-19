@@ -17,6 +17,16 @@ router.get(
   })
 );
 
+/** Free HUD emojis + canned phrases (admin-managed). */
+router.get(
+  "/chat-presets",
+  authService.allowedTo("user"),
+  asyncHandler(async (req, res) => {
+    const presets = await require("../services/tableChatPresetService").listPublished();
+    res.status(200).json({ status: "success", data: presets });
+  })
+);
+
 /** My owned items (consumable stock + permanent ownership). */
 router.get(
   "/inventory",

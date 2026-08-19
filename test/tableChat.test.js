@@ -37,6 +37,28 @@ test("buildChatMessage rejects unknown emoji", () => {
   assert.equal(r.ok, false);
 });
 
+test("resolveChatInput maps admin phraseKey to published text", async () => {
+  tableChat.injectPresetCacheForTests({
+    phrases: { phrase_welcome: "مرحباً بالجميع" },
+  });
+  const r = await tableChat.resolveChatInput({ phraseKey: "phrase_welcome" });
+  assert.equal(r.ok, true);
+  assert.equal(r.body, "مرحباً بالجميع");
+  assert.equal(r.emoji, null);
+});
+
+test("resolveChatInput rejects unknown phraseKey", async () => {
+  tableChat.injectPresetCacheForTests({ phrases: {} });
+  const r = await tableChat.resolveChatInput({ phraseKey: "nope" });
+  assert.equal(r.ok, false);
+  assert.equal(r.reason, "unknown_phrase");
+});
+
+test("sanitizeEmoji accepts admin-injected extra emoji", () => {
+  tableChat.injectPresetCacheForTests({ emojis: ["🫡"] });
+  assert.equal(tableChat.sanitizeEmoji("🫡"), "🫡");
+});
+
 test("buildChatMessage rejects empty payload", () => {
   const r = tableChat.buildChatMessage({ userId: "u1", name: "X", body: "   " });
   assert.equal(r.ok, false);

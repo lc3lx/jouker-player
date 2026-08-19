@@ -318,4 +318,50 @@ router.get(
   ctrl(async (req, res) => ok(res, await economyAudit.list(req.query)))
 );
 
+// ── TABLE CHAT PRESETS (free emojis + canned phrases) ────────────────────────
+const chatPresets = require("../services/tableChatPresetService");
+
+router.get(
+  "/chat-presets",
+  requireEconomyPermission(CAPABILITIES.VIEW),
+  ctrl(async (req, res) => ok(res, { rows: await chatPresets.listAdmin(req.query) }))
+);
+router.post(
+  "/chat-presets",
+  requireEconomyPermission(CAPABILITIES.CREATE),
+  ctrl(async (req, res) => {
+    const row = await chatPresets.create(req.body || {});
+    await economyAudit.record({ ...ctxOf(req), action: "create", entity: "chat_preset", entityId: row.key, after: row });
+    ok(res, { row }, 201);
+  })
+);
+router.put(
+  "/chat-presets/:key",
+  requireEconomyPermission(CAPABILITIES.EDIT),
+  ctrl(async (req, res) => {
+    const row = await chatPresets.update(req.params.key, req.body || {});
+    await economyAudit.record({ ...ctxOf(req), action: "update", entity: "chat_preset", entityId: req.params.key, after: row });
+    ok(res, { row });
+  })
+);
+router.patch(
+  "/chat-presets/:key/enable",
+  requireEconomyPermission(CAPABILITIES.PUBLISH),
+  ctrl(async (req, res) => ok(res, { row: await chatPresets.setEnabled(req.params.key, true) }))
+);
+router.patch(
+  "/chat-presets/:key/disable",
+  requireEconomyPermission(CAPABILITIES.PUBLISH),
+  ctrl(async (req, res) => ok(res, { row: await chatPresets.setEnabled(req.params.key, false) }))
+);
+router.delete(
+  "/chat-presets/:key",
+  requireEconomyPermission(CAPABILITIES.ARCHIVE),
+  ctrl(async (req, res) => {
+    const r = await chatPresets.remove(req.params.key);
+    await economyAudit.record({ ...ctxOf(req), action: "delete", entity: "chat_preset", entityId: req.params.key });
+    ok(res, r);
+  })
+);
+
 module.exports = router;

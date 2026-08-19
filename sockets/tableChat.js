@@ -34,6 +34,41 @@ const QUICK_EMOJIS = [
 ];
 const EMOJI_SET = new Set(QUICK_EMOJIS);
 
+/** Extra allowlist + phrase map loaded from TableChatPreset (admin CMS). */
+let extraEmojis = new Set();
+let phraseMap = new Map();
+let presetCacheAt = 0;
+const PRESET_CACHE_MS = 15000;
+
+function invalidatePresetCache() {
+  presetCacheAt = 0;
+}
+
+function injectPresetCacheForTests({ emojis, phrases } = {}) {
+  extraEmojis = new Set(emojis || []);
+  phraseMap = new Map(Object.entries(phrases || {}));
+  presetCacheAt = Date.now();
+}
+
+async function refreshPresetCache(force = false) {
+  if (!force && Date.now() - presetCacheAt < PRESET_CACHE_MS && presetCacheAt > 0) {
+    return;
+  }
+  try {
+    const svc = require("../services/tableChatPresetService");
+    const { emojis, phrases } = await svc.listPublished();
+    extraEmojis = new Set(
+      (emojis || []).map((e) => e.icon).filter((icon) => typeof icon === "string" && icon)
+    );
+    phraseMap = new Map(
+      (phrases || []).map((p) => [p.key, p.textAr || p.textEn]).filter(([, t]) => t)
+    );
+    presetCacheAt = Date.now();
+  } catch (_) {
+    if (presetCacheAt === 0) presetCacheAt = Date.now();
+  }
+}
+
 // Per-user sliding window: max messages inside the window.
 const RATE_WINDOW_MS = 5000;
 const RATE_MAX = 6;
@@ -83,7 +118,45 @@ function sanitizeAvatar(raw) {
 
 function sanitizeEmoji(raw) {
   if (typeof raw !== "string") return null;
-  return EMOJI_SET.has(raw) ? raw : null;
+  return EMOJI_SET.has(raw) || extraEmojis.has(raw) ? raw : null;
+}
+
+/**
+ * Resolve free-text / emoji / admin phraseKey into the fields buildChatMessage
+ * expects. Phrase keys never go on the wire as raw keys — only the published text.
+ */
+async function resolveChatInput({ body, emoji, phraseKey }) {
+  const key = typeof phraseKey === "string" ? phraseKey.trim() : "";
+  if (key) {
+    await refreshPresetCache();
+    const text = phraseMap.get(key);
+    // #region agent log
+    try {
+      fetch("http://127.0.0.1:7937/ingest/b9a00eef-7143-4edb-b1d5-038072464bf7", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "X-Debug-Session-Id": "b181d7",
+        },
+        body: JSON.stringify({
+          sessionId: "b181d7",
+          runId: "emoji-hud",
+          hypothesisId: "H2",
+          location: "tableChat.js:resolveChatInput",
+          message: "phraseKey resolved",
+          data: { phraseKey: key, hit: Boolean(text), phraseCount: phraseMap.size },
+          timestamp: Date.now(),
+        }),
+      }).catch(() => {});
+    } catch (_) {
+      /* ignore */
+    }
+    // #endregion
+    if (!text) return { ok: false, reason: "unknown_phrase" };
+    return { ok: true, body: sanitizeBody(text), emoji: null };
+  }
+  if (emoji) await refreshPresetCache();
+  return { ok: true, body: sanitizeBody(body), emoji: sanitizeEmoji(emoji) };
 }
 
 /**
@@ -117,4 +190,8 @@ module.exports = {
   sanitizeAvatar,
   sanitizeEmoji,
   buildChatMessage,
+  resolveChatInput,
+  invalidatePresetCache,
+  injectPresetCacheForTests,
+  refreshPresetCache,
 };

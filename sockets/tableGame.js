@@ -6006,9 +6006,9 @@ function initTableGame(io, options = {}) {
       );
     });
 
-    socket.on("table_chat", (payload, ack) => {
+    socket.on("table_chat", async (payload, ack) => {
       try {
-        const { tableId, body, emoji } = payload || {};
+        const { tableId, body, emoji, phraseKey } = payload || {};
         if (!tableId) return;
         const room = `tg:${tableId}`;
         if (!socket.rooms.has(room)) return;
@@ -6039,12 +6039,18 @@ function initTableGame(io, options = {}) {
           }
         }
 
+        const resolved = await tableChat.resolveChatInput({ body, emoji, phraseKey });
+        if (!resolved.ok) {
+          if (typeof ack === "function") ack(resolved);
+          return;
+        }
+
         const built = tableChat.buildChatMessage({
           userId: socket.userId,
           name,
           avatar,
-          body,
-          emoji,
+          body: resolved.body,
+          emoji: resolved.emoji,
         });
         if (!built.ok) {
           if (typeof ack === "function") ack(built);

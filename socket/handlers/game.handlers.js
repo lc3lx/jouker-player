@@ -1871,9 +1871,9 @@ function registerGameHandlers(nsp, jwtVerify) {
     });
 
     // ── In-table chat (trix + tarneeb41 share the /game namespace) ───────────
-    socket.on("table_chat", (payload, ack) => {
+    socket.on("table_chat", async (payload, ack) => {
       try {
-        const { tableId, body, emoji } = payload || {};
+        const { tableId, body, emoji, phraseKey } = payload || {};
         if (!tableId) return;
         const tid = String(tableId);
 
@@ -1910,12 +1910,18 @@ function registerGameHandlers(nsp, jwtVerify) {
           if (p && p.name) name = p.name;
         }
 
+        const resolved = await tableChat.resolveChatInput({ body, emoji, phraseKey });
+        if (!resolved.ok) {
+          if (typeof ack === "function") ack(resolved);
+          return;
+        }
+
         const built = tableChat.buildChatMessage({
           userId,
           name,
           avatar,
-          body,
-          emoji,
+          body: resolved.body,
+          emoji: resolved.emoji,
         });
         if (!built.ok) {
           if (typeof ack === "function") ack(built);

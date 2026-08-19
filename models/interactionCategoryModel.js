@@ -22,8 +22,9 @@ const interactionCategorySchema = new mongoose.Schema(
 
 const DEFAULT_CATEGORIES = [
   { key: "emoji", name: "Emojis", nameAr: "إيموجي", icon: "😀", sortOrder: 1 },
-  { key: "throwable", name: "Throwables", nameAr: "رميات", icon: "🍅", sortOrder: 2 },
-  { key: "gift", name: "Gifts", nameAr: "هدايا", icon: "🎁", sortOrder: 3 },
+  { key: "sticker", name: "Stickers", nameAr: "ملصقات", icon: "🎁", sortOrder: 2 },
+  { key: "throwable", name: "Throwables", nameAr: "رميات", icon: "🍅", sortOrder: 3 },
+  { key: "gift", name: "Gifts", nameAr: "هدايا", icon: "💎", sortOrder: 4 },
 ];
 
 interactionCategorySchema.statics.ensureDefaults = async function ensureDefaults() {
