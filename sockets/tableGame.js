@@ -5683,6 +5683,15 @@ function initTableGame(io, options = {}) {
         const isVacating = (table.vacatingPlayers || []).some(
           (v) => String(v.user) === uid && new Date(v.vacateUntil).getTime() > Date.now()
         );
+        // #region agent log
+        _agentDbg("K", "tableGame.js:handleJoinTable", "join gate", {
+          tableId: String(tableId),
+          isSeated,
+          isVacating,
+          mongoSeats: Array.isArray(table.seats) ? table.seats.length : -1,
+          vacating: Array.isArray(table.vacatingPlayers) ? table.vacatingPlayers.length : -1,
+        });
+        // #endregion
         if (!isSeated && !isVacating) {
           socket.emit("table_event", { type: "not_seated", tableId: String(tableId) });
           return;

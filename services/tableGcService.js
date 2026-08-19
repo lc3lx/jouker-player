@@ -296,8 +296,42 @@ async function sanitizeCardTableOnBoot(table) {
   return { tableId, action: "reopened", refunded, seatCount };
 }
 
+function countHumanMongoSeats(table) {
+  return (table.seats || []).filter((s) => s && s.user).length;
+}
+
+function countActiveVacating(table) {
+  const now = Date.now();
+  return (table.vacatingPlayers || []).filter(
+    (v) => v && v.user && v.vacateUntil && new Date(v.vacateUntil).getTime() > now
+  ).length;
+}
+
+function _agentDbg(hypothesisId, location, message, data = {}) {
+  // #region agent log
+  try {
+    const fs = require("fs");
+    const path = require("path");
+    fs.appendFileSync(
+      path.join(__dirname, "..", "..", "debug-b181d7.log"),
+      `${JSON.stringify({
+        sessionId: "b181d7",
+        hypothesisId,
+        location,
+        message,
+        data,
+        timestamp: Date.now(),
+      })}\n`
+    );
+  } catch (_) {}
+  // #endregion
+}
+
 /**
- * Boot-time cleanup for poker tables without a recoverable Redis snapshot.
+ * Boot-time cleanup for poker tables.
+ * Cash-game humans must stay seated across a process restart: Redis snapshot
+ * (any round) or Mongo seats/vacate-window are enough to keep the table.
+ * Empty leftovers (queue / expired vacate only) are still refunded.
  */
 async function sanitizePokerTableOnBoot(table, redis) {
   const tableId = String(table._id);
@@ -311,30 +345,56 @@ async function sanitizePokerTableOnBoot(table, redis) {
 
   const stateStore = new RedisTableStateStore(redis);
   const snapshot = stateStore.isEnabled() ? await stateStore.load(tableId) : null;
+  const humanSeats = countHumanMongoSeats(table);
+  const activeVacating = countActiveVacating(table);
 
-  const handRecoverable =
-    snapshot &&
-    (snapshot.running === true ||
-      (snapshot.round && String(snapshot.round) !== "idle"));
+  // #region agent log
+  _agentDbg("J", "tableGcService.js:sanitizePokerTableOnBoot", "boot poker table", {
+    tableId,
+    status: table.status,
+    humanSeats,
+    activeVacating,
+    hasSnapshot: !!snapshot,
+    snapshotRound: snapshot?.round || null,
+    snapshotRunning: !!snapshot?.running,
+    redisEnabled: stateStore.isEnabled(),
+  });
+  // #endregion
 
-  if (handRecoverable) {
+  if (snapshot) {
     pokerRecoveryWatch.set(tableId, {
       recoveredAt: Date.now(),
       noSocketsSince: null,
     });
-    logger.info("poker_table_deferred_redis_recovery", { tableId });
-    return { tableId, action: "deferred_redis_recovery" };
+    logger.info("poker_table_deferred_redis_recovery", {
+      tableId,
+      round: snapshot.round || null,
+    });
+    return { tableId, action: "deferred_redis_recovery", seatCount: humanSeats };
   }
 
-  if (stateStore.isEnabled()) {
-    await stateStore.delete(tableId);
+  if (humanSeats > 0 || activeVacating > 0) {
+    logger.info("poker_table_kept_after_reboot", {
+      tableId,
+      humanSeats,
+      activeVacating,
+    });
+    // #region agent log
+    _agentDbg("J", "tableGcService.js:sanitizePokerTableOnBoot", "KEEP seated humans", {
+      tableId,
+      humanSeats,
+      activeVacating,
+    });
+    // #endregion
+    return { tableId, action: "keep_seated", seatCount: humanSeats };
   }
 
-  const seatCount = Array.isArray(table.seats) ? table.seats.length : 0;
+  const leftoverQueue = Array.isArray(table.waitingQueue) ? table.waitingQueue.length : 0;
+  const leftoverVacating = Array.isArray(table.vacatingPlayers) ? table.vacatingPlayers.length : 0;
   let refunded = 0;
-  if (seatCount > 0 || (table.vacatingPlayers || []).length > 0) {
+  if (leftoverQueue > 0 || leftoverVacating > 0) {
     refunded = await refundPokerTableTransactional(table, "poker_boot_sanitizer_refund");
-    logAbortedMatch({ gameType: "poker", tableId, reason: "server_reboot", seatCount });
+    logAbortedMatch({ gameType: "poker", tableId, reason: "server_reboot", seatCount: 0 });
   } else {
     await Table.findByIdAndUpdate(tableId, {
       $set: { status: "waiting", activeSettlementId: null },
@@ -343,7 +403,7 @@ async function sanitizePokerTableOnBoot(table, redis) {
 
   await evictTableFromRegistry(tableId);
   emitTablesUpdated({ gameType: "poker", reason: "table_reset_reboot", tableId });
-  return { tableId, action: "reset", refunded, seatCount };
+  return { tableId, action: "reset", refunded, seatCount: 0 };
 }
 
 /**

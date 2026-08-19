@@ -82,7 +82,60 @@ test("settlement forfeits locked buy-in of vacated human replaced by bot", async
 
 // ─── 2. poker boot refund covers waitingQueue ────────────────────────────────
 
-test("poker boot sanitizer refunds seats, vacating players AND queued players", async () => {
+test("poker boot sanitizer keeps seated cash-game humans across restart", async () => {
+  const Table = require("../models/tableModel");
+  const walletLedger = require("../services/walletLedgerService");
+
+  const origFindById = Table.findById;
+  const orig = {
+    withMongoTransaction: walletLedger.withMongoTransaction,
+    releaseTableSeatToBalance: walletLedger.releaseTableSeatToBalance,
+  };
+
+  const releases = [];
+  walletLedger.withMongoTransaction = async (fn) => fn(null);
+  walletLedger.releaseTableSeatToBalance = async ({ userId, seatChips, meta }) => {
+    releases.push({ userId: String(userId), seatChips, reason: meta?.reason });
+  };
+
+  const tableDoc = {
+    _id: "poker-boot-keep",
+    gameType: "poker",
+    tableKind: "static",
+    tableNumber: 7,
+    status: "playing",
+    seats: [
+      { user: "seatA", chips: 0 },
+      { user: "seatB", chips: 3000 },
+    ],
+    vacatingPlayers: [],
+    waitingQueue: [],
+    activeSettlementId: null,
+    save: async function save() {
+      return this;
+    },
+  };
+
+  Table.findById = () => thenable(() => tableDoc);
+
+  try {
+    delete require.cache[require.resolve("../services/tableGcService")];
+    const { sanitizePokerTableOnBoot } = require("../services/tableGcService");
+
+    const result = await sanitizePokerTableOnBoot(tableDoc, null);
+    assert.equal(result.action, "keep_seated");
+    assert.equal(releases.length, 0);
+    assert.equal(tableDoc.seats.length, 2);
+    assert.equal(tableDoc.seats[0].chips, 0);
+  } finally {
+    Table.findById = origFindById;
+    walletLedger.withMongoTransaction = orig.withMongoTransaction;
+    walletLedger.releaseTableSeatToBalance = orig.releaseTableSeatToBalance;
+    delete require.cache[require.resolve("../services/tableGcService")];
+  }
+});
+
+test("poker boot sanitizer refunds leftover queue when no seated humans", async () => {
   const Table = require("../models/tableModel");
   const walletLedger = require("../services/walletLedgerService");
 
@@ -103,18 +156,13 @@ test("poker boot sanitizer refunds seats, vacating players AND queued players", 
     gameType: "poker",
     tableKind: "static",
     tableNumber: 7,
-    status: "playing",
-    seats: [
-      { user: "seatA", chips: 5000 },
-      { user: "seatB", chips: 3000 },
-    ],
+    status: "waiting",
+    seats: [],
     vacatingPlayers: [
       { user: "vacC", chips: 2000, vacateUntil: new Date(Date.now() - 1000) },
     ],
     waitingQueue: [
       { user: "queueD", buyIn: 4000 },
-      // Duplicate of a seated user must NOT be refunded twice.
-      { user: "seatA", buyIn: 5000 },
     ],
     activeSettlementId: null,
     save: async function save() {
@@ -132,11 +180,9 @@ test("poker boot sanitizer refunds seats, vacating players AND queued players", 
     assert.equal(result.action, "reset");
 
     const byUser = new Map(releases.map((r) => [r.userId, r]));
-    assert.equal(byUser.get("seatA")?.seatChips, 5000);
-    assert.equal(byUser.get("seatB")?.seatChips, 3000);
     assert.equal(byUser.get("vacC")?.seatChips, 2000);
     assert.equal(byUser.get("queueD")?.seatChips, 4000, "queued buy-in must be refunded");
-    assert.equal(releases.length, 4, "seated user duplicated in queue must not double-refund");
+    assert.equal(releases.length, 2);
 
     assert.equal(tableDoc.seats.length, 0);
     assert.equal(tableDoc.waitingQueue.length, 0);
