@@ -3,9 +3,16 @@ const mongoose = require("mongoose");
 const seatSnapshotSchema = new mongoose.Schema(
   {
     user: { type: mongoose.Schema.ObjectId, ref: "User" },
+    name: { type: String },
+    isBot: { type: Boolean, default: false },
+    seatIndex: Number,
     chipsBefore: Number,
     chipsAfter: Number,
+    net: Number,
     hole: [String],
+    folded: { type: Boolean, default: false },
+    won: { type: Boolean, default: false },
+    handCategory: { type: String },
     result: { type: String },
   },
   { _id: false }

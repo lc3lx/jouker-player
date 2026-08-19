@@ -4321,12 +4321,25 @@ class PokerTable {
               winners,
               potDistribution: potDistributionFinal || [],
               handCategory: handCategory || null,
-              seats: this.seats.map((s, i) => ({
-                user: s.isBot ? undefined : s.userId,
-                chipsBefore: toSafeInt(s.handStartChips, s.chips),
-                chipsAfter: toSafeInt(intendedChips[i], 0),
-                hole: s.hole,
-              })),
+              seats: this.seats.map((s, i) => {
+                const summary = seatSummaries[i] || {};
+                const chipsBefore = toSafeInt(s.handStartChips, s.chips);
+                const chipsAfter = toSafeInt(intendedChips[i], 0);
+                return {
+                  user: s.isBot ? undefined : s.userId,
+                  name: s.name || undefined,
+                  isBot: !!s.isBot,
+                  seatIndex: i,
+                  chipsBefore,
+                  chipsAfter,
+                  net: chipsAfter - chipsBefore,
+                  hole: Array.isArray(s.hole) ? [...s.hole] : [],
+                  folded: !!s.folded,
+                  won: summary.won === true,
+                  handCategory: summary.handCategory || null,
+                  result: summary.won ? "won" : (s.folded ? "folded" : "lost"),
+                };
+              }),
               endedAt: new Date(),
               provablyFair: {
                 serverSeed: this.serverSeed,
