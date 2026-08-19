@@ -4271,6 +4271,13 @@ class PokerTable {
         if (existingHand) {
           settledHandHistoryId = existingHand._id || null;
           alreadySettled = true;
+          // #region agent log
+          _agentDbg("L", "tableGame.js:persistAndPrepareNext", "hand already stored", {
+            handId: this.currentHandId,
+            tableId: String(this.tableId || ""),
+            alreadySettled: true,
+          });
+          // #endregion
           return;
         }
         const [handDoc] = await HandHistory.create(
@@ -4353,6 +4360,17 @@ class PokerTable {
           createOpts
         );
         settledHandHistoryId = handDoc?._id || null;
+        // #region agent log
+        _agentDbg("L", "tableGame.js:persistAndPrepareNext", "hand stored", {
+          handId: this.currentHandId,
+          tableId: String(this.tableId || ""),
+          alreadySettled: false,
+          seatCount: Array.isArray(this.seats) ? this.seats.length : 0,
+          holesStored: Array.isArray(handDoc?.seats)
+            ? handDoc.seats.filter((s) => Array.isArray(s?.hole) && s.hole.length > 0).length
+            : 0,
+        });
+        // #endregion
 
         if (this.fairnessCommitRequiredForHand) {
           const PokerHandCommit = require("../models/pokerHandCommitModel");

@@ -16,7 +16,7 @@ const {
   joinTableValidator,
   leaveTableValidator,
 } = require("../utils/validators/tableValidator");
-const { getFairPlayLastHand } = require("../services/fairPlayService");
+const { getFairPlayLastHand, getFairPlayHands } = require("../services/fairPlayService");
 const lobbyService = require("../services/lobbyService");
 const vipTableService = require("../services/vipTableService");
 
@@ -76,6 +76,13 @@ router.get(
   authService.protect,
   getTableValidator,
   getFairPlayLastHand
+);
+
+router.get(
+  "/:id/fair-play-hands",
+  authService.protect,
+  getTableValidator,
+  getFairPlayHands
 );
 
 // ── VIP table routes ─────────────────────────────────────────────────────

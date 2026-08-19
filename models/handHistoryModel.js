@@ -119,4 +119,6 @@ const handHistorySchema = new mongoose.Schema(
   { timestamps: true }
 );
 
+handHistorySchema.index({ table: 1, endedAt: -1, createdAt: -1 });
+
 module.exports = mongoose.model("HandHistory", handHistorySchema);

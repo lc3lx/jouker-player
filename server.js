@@ -358,6 +358,8 @@ async function startServer() {
     }
     const islandJackpotCache = require("./utils/islandJackpotCache");
     islandJackpotCache.attachRedisClient(realtimeRedis.commandClient);
+    const { startAutoFill } = require("./services/islandJackpotService");
+    startAutoFill();
   }
 
   const { startPokerTableGc } = require("./services/pokerTableGcService");

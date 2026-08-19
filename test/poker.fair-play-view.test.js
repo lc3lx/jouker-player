@@ -54,6 +54,7 @@ test("buildFairPlayView numbers seats, marks winner, keeps board cards", () => {
   assert.equal(view.winners.length, 1);
   assert.equal(view.winners[0].name, "أحمد");
   assert.equal(view.winners[0].share, 8000);
+  assert.equal(view.handId, "h1");
 });
 
 test("buildFairPlayView labels unnamed bot seats", () => {
@@ -67,4 +68,16 @@ test("buildFairPlayView labels unnamed bot seats", () => {
   );
   assert.equal(view.players[0].isBot, true);
   assert.match(view.players[0].name, /بوت/);
+});
+
+test("fair-play list numbering counts newest as the highest hand number", () => {
+  const total = 10;
+  const skip = 0;
+  const docs = [
+    { handId: "t-10" },
+    { handId: "t-9" },
+    { handId: "t-1" },
+  ];
+  const numbers = docs.map((_, i) => total - skip - i);
+  assert.deepEqual(numbers, [10, 9, 8]);
 });

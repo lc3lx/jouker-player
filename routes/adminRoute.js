@@ -18,6 +18,10 @@ const {
   adminUpdateCurrencySettings,
 } = require("../services/currencySettingsService");
 const { adminListGameSettlements } = require("../services/gameSettlementService");
+const {
+  adminSearchHands,
+  adminGetHandById,
+} = require("../services/fairPlayService");
 const AuditLog = require("../models/auditLogModel");
 const HandScreenshot = require("../models/handScreenshotModel");
 const HandHistory = require("../models/handHistoryModel");
@@ -46,6 +50,9 @@ router.get("/currency-settings", adminGetCurrencySettings);
 router.put("/currency-settings", adminUpdateCurrencySettings);
 
 router.get("/game-settlements", adminListGameSettlements);
+
+router.get("/hands", adminSearchHands);
+router.get("/hands/:handId", adminGetHandById);
 
 router.get(
   "/audit-logs",

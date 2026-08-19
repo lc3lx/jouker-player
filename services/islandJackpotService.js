@@ -894,3 +894,42 @@ exports.onHandSettled = onHandSettled;
 exports.reservePayoutForHand = reservePayoutForHand;
 exports.buildStatusSnapshot = buildStatusSnapshot;
 exports.resetJoinCooldownForTests = () => _joinCooldown.clear();
+
+// ─── Auto-fill pool: gradually inflate to TARGET over ~7 days ────────────────
+const AUTOFILL_TARGET = 120_000_000;
+const AUTOFILL_INTERVAL_MS = 10 * 60 * 1000; // every 10 minutes
+const AUTOFILL_TICKS_PER_WEEK = (7 * 24 * 60) / 10; // ~1008 ticks in a week
+const AUTOFILL_INCREMENT = Math.ceil(AUTOFILL_TARGET / AUTOFILL_TICKS_PER_WEEK);
+
+let _autoFillTimer = null;
+
+const AUTOFILL_SEED = 36_000_000;
+
+async function _autoFillTick() {
+  try {
+    const pool = await IslandPool.getSingleton();
+    if (pool.poolBalance >= AUTOFILL_TARGET) return;
+    // Seed: if pool is empty or near-zero, start from a base amount
+    const base = pool.poolBalance < 1_000_000 ? AUTOFILL_SEED : pool.poolBalance;
+    const newBalance = Math.min(base + AUTOFILL_INCREMENT, AUTOFILL_TARGET);
+    pool.poolBalance = newBalance;
+    syncArmedFlags(pool);
+    pool.version = (pool.version || 0) + 1;
+    await pool.save();
+    invalidateStatusCache();
+    broadcastPoolTick(newBalance);
+    if (pool.hotJackpot) broadcastHotJackpot(true);
+  } catch (err) {
+    logger.warn("island_autofill_error", { reason: err?.message || "unknown" });
+  }
+}
+
+function startAutoFill() {
+  if (_autoFillTimer) return;
+  _autoFillTimer = setInterval(_autoFillTick, AUTOFILL_INTERVAL_MS);
+  // Initial tick after short delay
+  setTimeout(_autoFillTick, 5000);
+}
+
+exports.startAutoFill = startAutoFill;
+exports.AUTOFILL_TARGET = AUTOFILL_TARGET;

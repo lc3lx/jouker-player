@@ -433,17 +433,14 @@ exports.getTables = asyncHandler(async (req, res) => {
     gameType === "tarneeb41" &&
     (!req.query.status || req.query.status === "open")
   ) {
-    // "open" in the lobby means joinable: waiting tables OR mid-hand tables
-    // that still have bot seats (Mongo human seats < capacity).
+    // Lobby lists waiting + in-progress tables (including full ones) so the
+    // client can show total players per stake and still join via table pooling.
     filter.status = { $in: ["open", "playing"] };
-    filter.$expr = { $lt: [{ $size: "$seats" }, "$capacity"] };
   } else if (
     gameType === "trix" &&
     (!req.query.status || req.query.status === "open")
   ) {
-    // Joinable: waiting tables OR mid-hand tables with free/bot seats.
     filter.status = { $in: ["open", "playing"] };
-    filter.$expr = { $lt: [{ $size: "$seats" }, "$capacity"] };
   } else if (req.query.status) {
     filter.status = req.query.status;
   } else {
@@ -463,17 +460,44 @@ exports.getTables = asyncHandler(async (req, res) => {
       "gameType tier tableNumber smallBlind bigBlind minBuyIn maxBuyIn capacity seats status waitingQueue vacatingPlayers"
     );
 
+  const summaryMatch = {
+    gameType,
+    status: { $nin: LOBBY_EXCLUDED_STATUSES },
+  };
+  if (req.query.tier) summaryMatch.tier = req.query.tier;
+  if (gameType === "poker") summaryMatch.isPrivate = { $ne: true };
+
+  const stakeRows = await Table.aggregate([
+    { $match: summaryMatch },
+    {
+      $group: {
+        _id: "$minBuyIn",
+        seatedCount: { $sum: { $size: { $ifNull: ["$seats", []] } } },
+        tableCount: { $sum: 1 },
+      },
+    },
+  ]);
+  const stakeMap = new Map(
+    stakeRows.map((row) => [Number(row._id) || 0, row])
+  );
+
   const withLive = String(req.query.live || "") === "1";
   const data = await Promise.all(
     tables.map(async (t) => {
       const o = t.toObject ? t.toObject() : t;
-      if (gameType !== "poker") return o;
+      const stake = stakeMap.get(Number(o.minBuyIn) || 0);
+      const stakeFields = {
+        stakeSeatedCount: stake?.seatedCount ?? (Array.isArray(o.seats) ? o.seats.length : 0),
+        stakeTableCount: stake?.tableCount ?? 1,
+      };
+      if (gameType !== "poker") return { ...o, ...stakeFields };
       const live = withLive ? getTableGameDebugSnapshot(String(t._id)) : null;
       const row = enrichPokerTableRow(o, live);
       const qLen = await getWaitingQueueSize(String(t._id));
       return {
         ...redactPokerLobbyRoster(row, req.user?._id),
         waitingQueueSize: qLen,
+        ...stakeFields,
       };
     })
   );
@@ -846,27 +870,8 @@ exports.joinTable = asyncHandler(async (req, res, next) => {
       const botSeats = game ? listReplaceableBotSeats(game) : [];
       if (botSeats.length > 0) {
         // Keep this table — bot seat claim runs after wallet check.
-      } else if (table.tableKind === "static") {
-        // Static card game table full → queue the player
-        const player = await Player.getOrCreateByUser(req.user._id);
-        try {
-          const position = await waitingQueueService.enqueue({
-            userId: req.user._id,
-            playerId: player._id,
-            tableId: id,
-            gameType: "tarneeb41",
-            buyIn,
-          });
-          return res.status(200).json({
-            status: "success",
-            message: "Added to waiting queue",
-            data: { tableId: id, tableNumber: table.tableNumber, queued: true, queuePosition: position },
-          });
-        } catch (e) {
-          if (e.message === "ALREADY_QUEUED") throw new ApiError("You are already in the waiting queue", 400);
-          throw e;
-        }
       } else {
+        // Pool: full table → sit at another table of the same stakes (or create one).
         table = await findAvailableTarneeb41Table(table.tier, buyIn);
         id = String(table._id);
       }
@@ -878,26 +883,6 @@ exports.joinTable = asyncHandler(async (req, res, next) => {
       const botSeats = game ? listReplaceableTrixBotSeats(game) : [];
       if (botSeats.length > 0) {
         // Keep this table — bot seat claim runs after wallet check.
-      } else if (table.tableKind === "static") {
-        // Static card game table full → queue the player
-        const player = await Player.getOrCreateByUser(req.user._id);
-        try {
-          const position = await waitingQueueService.enqueue({
-            userId: req.user._id,
-            playerId: player._id,
-            tableId: id,
-            gameType: "trix",
-            buyIn,
-          });
-          return res.status(200).json({
-            status: "success",
-            message: "Added to waiting queue",
-            data: { tableId: id, tableNumber: table.tableNumber, queued: true, queuePosition: position },
-          });
-        } catch (e) {
-          if (e.message === "ALREADY_QUEUED") throw new ApiError("You are already in the waiting queue", 400);
-          throw e;
-        }
       } else {
         table = await findAvailableTrixTable(table.tier, buyIn);
         id = String(table._id);
@@ -913,6 +898,8 @@ exports.joinTable = asyncHandler(async (req, res, next) => {
 
   if (table.gameType === "poker") {
     // full-table routing handled inside joinPokerWithRetry
+  } else if (table.gameType === "tarneeb41" || table.gameType === "trix") {
+    // Pool overflow is handled by joinFixedCapacityWithRetry / bot-seat claim.
   } else if (table.seats.length >= table.capacity) {
     // A "full" table may still have a BOT seat a new human can take over —
     // don't reject; the bot-seat claim below (tryClaim*BotSeat) handles it.
