@@ -169,7 +169,7 @@ async function _buildSnapshot(targetId) {
       name: user.name,
       country: user.country || null,
       profileImg: user.profileImg || null,
-      memberSince: user.createdAt,
+      memberSince: user.createdAt ? new Date(user.createdAt).toISOString() : null,
       hideProfile: !!user.preferences?.hideProfile,
     },
     presence: presence
@@ -182,7 +182,7 @@ async function _buildSnapshot(targetId) {
       color: vipCfg?.color || null,
       badge: vipCfg?.badge || null,
       rank: vipCfg?.rank || 0,
-      expireDate: vipExpire,
+      expireDate: vipExpire ? new Date(vipExpire).toISOString() : null,
       daysRemaining,
       benefits: vipCfg
         ? { dailyChips: vipCfg.dailyChips, cashbackPercent: vipCfg.cashbackPercent, quiz: !!vipCfg.quiz, priorityQueue: !!vipCfg.priorityQueue }

@@ -111,21 +111,28 @@ exports.getCountryRanking = asyncHandler(async (req, res) => {
 
 exports.getBalanceLeaderboard = asyncHandler(async (req, res) => {
   const limit = Math.min(50, parseInt(req.query.limit || "20", 10));
-  const rows = await Wallet.find()
+  const rows = await Wallet.find({ user: { $ne: null } })
     .populate("user", "name profileImg")
     .sort({ balance: -1 })
-    .limit(limit)
+    .limit(limit * 2) // over-fetch in case some users were deleted
     .lean();
+
+  const data = [];
+  for (const w of rows) {
+    if (!w.user || !w.user._id) continue;
+    data.push({
+      rank: data.length + 1,
+      userId: w.user._id,
+      name: w.user.name || "Player",
+      profileImg: w.user.profileImg || "",
+      balance: w.balance || 0,
+    });
+    if (data.length >= limit) break;
+  }
 
   res.status(200).json({
     status: "success",
-    data: rows.map((w, i) => ({
-      rank: i + 1,
-      userId: w.user?._id,
-      name: (w.user && w.user.name) || "Player",
-      profileImg: (w.user && w.user.profileImg) || "",
-      balance: w.balance || 0,
-    })),
+    data,
   });
 });
 

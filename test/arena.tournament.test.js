@@ -20,6 +20,9 @@ const { resetMongoTransactionProbeForTests } = require("../services/walletLedger
 const catalog = require("../services/arenaTournamentCatalog");
 const engine = require("../services/arenaTournamentEngineService");
 
+/** Owners need enough coins to cover CREATE_FEE (5M) plus leftover asserts. */
+const OWNER_BAL = catalog.CREATE_FEE + 50_000;
+
 let replSet = null;
 const savedEnv = {};
 
@@ -72,17 +75,24 @@ test.beforeEach(async () => {
   ]);
 });
 
-test("catalog exposes 5 tiers and 4/8/12 minute durations", () => {
+test("catalog exposes 5 tiers and 4/8/12 round lengths", () => {
   const data = catalog.serializeCatalog();
   assert.equal(data.tiers.length, 5);
   assert.deepEqual(data.durations, [4, 8, 12]);
+  assert.deepEqual(data.rounds, [4, 8, 12]);
+  assert.equal(data.tiers[0].nameAr, "صغيرة");
+  assert.equal(data.tiers[1].nameAr, "أكبر بشوي");
+  assert.equal(data.tiers[2].nameAr, "أكبر");
+  assert.equal(data.tiers[3].nameAr, "أكبر بكثير");
+  assert.equal(data.tiers[4].nameAr, "الأكبر");
+  assert.ok(data.tiers.every((t) => [4, 8, 12].includes(t.rounds)));
   assert.equal(data.createFee, catalog.CREATE_FEE);
   assert.equal(data.slotMs, 2 * 60 * 60 * 1000);
   assert.ok(data.tiers.every((t) => t.guaranteedPrize > 0 && t.entryFee > 0));
 });
 
 test("creating a tournament charges the create fee", async () => {
-  const owner = await makeUser("Owner", 50_000);
+  const owner = await makeUser("Owner", OWNER_BAL);
   const t = await engine.createTournament(owner, {
     game: "poker",
     name: "Test Cup",
@@ -93,14 +103,14 @@ test("creating a tournament charges the create fee", async () => {
     startAt: startSoon(),
   });
   assert.equal(t.origin, "player");
-  assert.equal(await balanceOf(owner), 50_000 - catalog.CREATE_FEE);
+  assert.equal(await balanceOf(owner), OWNER_BAL - catalog.CREATE_FEE);
   const doc = await ArenaTournament.findById(t.id).lean();
   assert.equal(doc.createFee, catalog.CREATE_FEE);
   assert.equal(doc.lifecycle, "registering");
 });
 
 test("register / unregister refunds the entry fee transactionally", async () => {
-  const owner = await makeUser("Owner", 50_000);
+  const owner = await makeUser("Owner", OWNER_BAL);
   const player = await makeUser("P1", 10_000);
   const t = await engine.createTournament(owner, {
     game: "trix",
@@ -124,7 +134,7 @@ test("register / unregister refunds the entry fee transactionally", async () => 
 });
 
 test("cancel refunds all entry fees but keeps the create fee", async () => {
-  const owner = await makeUser("Owner", 50_000);
+  const owner = await makeUser("Owner", OWNER_BAL);
   const a = await makeUser("A", 5000);
   const b = await makeUser("B", 5000);
   const t = await engine.createTournament(owner, {
@@ -144,12 +154,12 @@ test("cancel refunds all entry fees but keeps the create fee", async () => {
   assert.equal(doc.lifecycle, "cancelled");
   assert.equal(await balanceOf(a), beforeA + 500);
   assert.equal(await balanceOf(b), beforeB + 500);
-  assert.equal(await balanceOf(owner), 50_000 - catalog.CREATE_FEE);
+  assert.equal(await balanceOf(owner), OWNER_BAL - catalog.CREATE_FEE);
 });
 
 test("paid finish pays the whole escrow and conserves coins", async () => {
   const FEE = 1000;
-  const owner = await makeUser("Owner", 50_000);
+  const owner = await makeUser("Owner", OWNER_BAL);
   const players = [];
   for (let i = 0; i < 4; i++) players.push(await makeUser("P" + i, 10_000));
 
@@ -187,6 +197,40 @@ test("paid finish pays the whole escrow and conserves coins", async () => {
   assert.equal(prizeSum, FEE * 4);
 });
 
+test("heat ends after target rounds, not after a few minutes", async () => {
+  const owner = await makeUser("Owner", OWNER_BAL);
+  const players = [];
+  for (let i = 0; i < 4; i++) players.push(await makeUser("R" + i, 10_000));
+  const t = await engine.createTournament(owner, {
+    game: "poker",
+    type: "paid",
+    entryFee: 500,
+    maxPlayers: 8,
+    minPlayers: 4,
+    rounds: 4,
+    startAt: startSoon(),
+  });
+  for (const p of players) await engine.register(p, t.id);
+  await engine.startTournament(t.id);
+  const running = await ArenaTournament.findById(t.id).lean();
+  assert.equal(running.durationMinutes, 4);
+  assert.ok(running.endsAt.getTime() - Date.now() > 60 * 60 * 1000, "safety window is hours, not minutes");
+  await ArenaTournament.updateOne(
+    { _id: t.id },
+    { $set: { gamesCompleted: 4, "participants.0.tournamentScore": 400 } }
+  );
+  await engine.tick();
+  const finished = await ArenaTournament.findById(t.id).lean();
+  assert.equal(finished.lifecycle, "finished");
+});
+
+test("house names use round labels", () => {
+  const name = catalog.houseName("poker", catalog.TIERS[0]);
+  assert.match(name, /جولات/);
+  assert.match(name, /صغيرة/);
+  assert.equal(name.includes(" د"), false);
+});
+
 test("house schedule is idempotent across 3 games × 5 tiers", async () => {
   await engine.ensureSchedule();
   const n1 = await ArenaTournament.countDocuments({ origin: "house" });
@@ -199,7 +243,7 @@ test("house schedule is idempotent across 3 games × 5 tiers", async () => {
 });
 
 test("private tournaments are hidden from strangers", async () => {
-  const owner = await makeUser("Owner", 50_000);
+  const owner = await makeUser("Owner", OWNER_BAL);
   const stranger = await makeUser("Str", 5000);
   const t = await engine.createTournament(owner, {
     game: "poker",
@@ -228,7 +272,7 @@ test("insufficient coins cannot create or register", async () => {
       }),
     (e) => e.statusCode === 402
   );
-  const owner = await makeUser("Owner", 50_000);
+  const owner = await makeUser("Owner", OWNER_BAL);
   const t = await engine.createTournament(owner, {
     game: "poker",
     type: "paid",

@@ -9,7 +9,8 @@ const GAME_LABEL_AR = {
 };
 
 /**
- * House catalog. Durations are consecutive play minutes after kickoff.
+ * House catalog. Length is a round count (4 / 8 / 12 games), not a clock.
+ * `durationMinutes` is kept on the document as the round target (legacy field).
  * House events fire on a 2-hour grid. Prize numbers shown in the lobby are
  * the full-field pool (entryFee × maxPlayers); the live prizePool is the
  * escrow actually collected.
@@ -29,7 +30,7 @@ const TIERS = [
   {
     id: "small",
     nameAr: "أكبر بشوي",
-    nameEn: "Small+",
+    nameEn: "A bit bigger",
     durationMinutes: 4,
     maxPlayers: 12,
     minPlayers: 4,
@@ -39,8 +40,8 @@ const TIERS = [
   },
   {
     id: "medium",
-    nameAr: "متوسطة",
-    nameEn: "Medium",
+    nameAr: "أكبر",
+    nameEn: "Bigger",
     durationMinutes: 8,
     maxPlayers: 16,
     minPlayers: 8,
@@ -50,8 +51,8 @@ const TIERS = [
   },
   {
     id: "large",
-    nameAr: "كبيرة",
-    nameEn: "Large",
+    nameAr: "أكبر بكثير",
+    nameEn: "Much bigger",
     durationMinutes: 8,
     maxPlayers: 24,
     minPlayers: 8,
@@ -61,8 +62,8 @@ const TIERS = [
   },
   {
     id: "pro",
-    nameAr: "احترافية",
-    nameEn: "Championship",
+    nameAr: "الأكبر",
+    nameEn: "Biggest",
     durationMinutes: 12,
     maxPlayers: 32,
     minPlayers: 8,
@@ -72,9 +73,10 @@ const TIERS = [
   },
 ];
 
-const CREATE_FEE = 2000;
+const CREATE_FEE = 5_000_000;
 const SLOT_MS = 2 * 60 * 60 * 1000;
 const DURATIONS = [4, 8, 12];
+const ROUND_SAFETY_MS = 6 * 60 * 60 * 1000;
 
 function getTier(id) {
   return TIERS.find((t) => t.id === id) || null;
@@ -88,8 +90,13 @@ function slotKey(game, tierId, slotStartMs) {
   return `house:${game}:${tierId}:${slotStartMs}`;
 }
 
+function roundsOf(tierOrDoc) {
+  const n = Number(tierOrDoc?.rounds ?? tierOrDoc?.durationMinutes) || 4;
+  return DURATIONS.includes(n) ? n : 4;
+}
+
 function houseName(game, tier) {
-  return `${GAME_LABEL_AR[game] || game} · ${tier.nameAr} · ${tier.durationMinutes} د`;
+  return `${GAME_LABEL_AR[game] || game} · ${tier.nameAr} · ${roundsOf(tier)} جولات`;
 }
 
 function defaultPrizeDistribution(playerCount) {
@@ -115,9 +122,11 @@ function serializeCatalog() {
     createFee: CREATE_FEE,
     slotMs: SLOT_MS,
     durations: DURATIONS,
+    rounds: DURATIONS,
     games: GAMES.map((id) => ({ id, nameAr: GAME_LABEL_AR[id] })),
     tiers: TIERS.map((t) => ({
       ...t,
+      rounds: t.durationMinutes,
       prizeHint: t.entryFee * t.maxPlayers,
     })),
   };
@@ -130,9 +139,11 @@ module.exports = {
   CREATE_FEE,
   SLOT_MS,
   DURATIONS,
+  ROUND_SAFETY_MS,
   getTier,
   nextSlotStart,
   slotKey,
+  roundsOf,
   houseName,
   defaultPrizeDistribution,
   serializeCatalog,

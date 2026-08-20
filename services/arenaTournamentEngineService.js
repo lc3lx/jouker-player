@@ -63,6 +63,8 @@ function serializeTournament(t, { viewerId } = {}) {
     prizeDistribution: t.prizeDistribution || [],
     startAt: t.startAt,
     durationMinutes: t.durationMinutes,
+    rounds: catalog.roundsOf(t),
+    gamesCompleted: toInt(t.gamesCompleted),
     endsAt: t.endsAt,
     maxPlayers: t.maxPlayers,
     minPlayers: t.minPlayers,
@@ -92,9 +94,8 @@ async function createTournament(actorId, payload = {}) {
   const visibility = payload.visibility === "private" ? "private" : "public";
   const type = payload.type === "friendly" ? "friendly" : "paid";
   const entryFee = type === "paid" ? Math.max(1, toInt(payload.entryFee)) : 0;
-  const durationMinutes = catalog.DURATIONS.includes(toInt(payload.durationMinutes))
-    ? toInt(payload.durationMinutes)
-    : 4;
+  const rawRounds = toInt(payload.rounds ?? payload.durationMinutes);
+  const durationMinutes = catalog.DURATIONS.includes(rawRounds) ? rawRounds : 4;
   const maxPlayers = Math.min(32, Math.max(4, toInt(payload.maxPlayers) || 8));
   const minPlayers = Math.min(maxPlayers, Math.max(2, toInt(payload.minPlayers) || 4));
 
@@ -325,7 +326,7 @@ async function startTournament(tournamentId) {
     }
   }
 
-  const endsAt = new Date(Date.now() + t.durationMinutes * 60 * 1000);
+  const endsAt = new Date(Date.now() + catalog.ROUND_SAFETY_MS);
   const update = {
     $set: {
       participants: seated,
@@ -475,6 +476,15 @@ async function onGameFinished({ table, gameType, gameResult, gamePlayers }) {
     }
     t.gamesCompleted = toInt(t.gamesCompleted) + 1;
     await t.save();
+    const target = catalog.roundsOf(t);
+    if (toInt(t.gamesCompleted) >= target) {
+      finishTournament(t._id).catch((err) => {
+        logger.warn("arena_round_finish_failed", {
+          id: String(t._id),
+          reason: err?.message,
+        });
+      });
+    }
     return { handled: true };
   } catch (e) {
     logger.error("arena_on_game_finished_failed", { reason: e?.message });
@@ -707,6 +717,15 @@ async function ensureSchedule(nowMs = Date.now()) {
       }
     }
   }
+
+  for (const tier of catalog.TIERS) {
+    for (const game of GAMES) {
+      await ArenaTournament.updateMany(
+        { origin: "house", lifecycle: "registering", game, tierId: tier.id },
+        { $set: { name: houseName(game, tier), durationMinutes: tier.durationMinutes } }
+      );
+    }
+  }
 }
 
 async function tick() {
@@ -729,7 +748,13 @@ async function tick() {
     }
   }
 
-  const toFinish = await ArenaTournament.find({ lifecycle: "running", endsAt: { $lte: now } })
+  const toFinish = await ArenaTournament.find({
+    lifecycle: "running",
+    $or: [
+      { endsAt: { $lte: now } },
+      { $expr: { $gte: ["$gamesCompleted", "$durationMinutes"] } },
+    ],
+  })
     .select("_id")
     .limit(40)
     .lean();

@@ -23,7 +23,8 @@ const prizeSlotSchema = new mongoose.Schema(
 );
 
 /**
- * Public / player-created timed tournaments for poker, trix, tarneeb41.
+ * Public / player-created round-based tournaments for poker, trix, tarneeb41.
+ * `durationMinutes` stores the target round count (4 / 8 / 12).
  * Money moves only through walletLedgerService inside withMongoTransaction
  * (same pattern as ClanTournament). Independent of the disabled legacy
  * Tournament collection.
@@ -58,6 +59,7 @@ const arenaTournamentSchema = new mongoose.Schema(
     prizePaid: { type: Number, default: 0, min: 0 },
 
     startAt: { type: Date, required: true, index: true },
+    /** Target round count (4 / 8 / 12). Legacy field name kept for existing docs. */
     durationMinutes: { type: Number, required: true, min: 1, max: 60 },
     endsAt: { type: Date, default: null, index: true },
     maxPlayers: { type: Number, default: 8, min: 2, max: 32 },
