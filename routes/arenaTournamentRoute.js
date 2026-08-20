@@ -34,7 +34,6 @@ router.get(
 router.post(
   "/",
   authService.protect,
-  authService.allowedTo("user"),
   asyncHandler(async (req, res) => {
     const data = await arena.createTournament(req.user._id, req.body || {});
     res.status(201).json({ status: "success", data });
