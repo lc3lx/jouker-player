@@ -122,6 +122,17 @@ const tableSchema = new mongoose.Schema(
       default: null,
       index: true,
     },
+    /**
+     * When set, this table is hosting a public arena tournament heat.
+     * Settlement skips cash (entry is already in escrow) and scores feed the
+     * timed ranking. Null for ordinary / clan tables.
+     */
+    arenaTournament: {
+      type: mongoose.Schema.ObjectId,
+      ref: "ArenaTournament",
+      default: null,
+      index: true,
+    },
     /** Per-table config knobs controlled by VIP owner or admin. */
     settings: {
       allowSpectators: { type: Boolean, default: true },

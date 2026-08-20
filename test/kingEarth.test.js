@@ -34,6 +34,23 @@ test("base and bonus multiplier caps match Poseidon", () => {
   assert.equal(engine.appliedMultiplierFor(1000, true), 10);
 });
 
+test("multiplier applies only when the spin wins", () => {
+  for (let n = 0; n < 240; n += 1) {
+    const outcome = engine.spin(10000, {
+      serverSeed: "srv-mult",
+      clientSeed: "client-mult",
+      nonce: String(n),
+    });
+    if (outcome.baseWin <= 0) {
+      assert.equal(outcome.multipliers.applied, 1);
+      assert.equal(outcome.totalWin, 0);
+    } else if (outcome.multipliers.collected > 0) {
+      assert.ok(outcome.multipliers.applied >= 1);
+      assert.ok(outcome.totalWin > 0);
+    }
+  }
+});
+
 test("multiplier landing rates use Poseidon's base and bonus ratios", () => {
   const regularMass = engine.BASE_WEIGHTS.reduce((sum, weight) => sum + weight, 0);
   const baseChance = 0.35 / (regularMass + 0.35);

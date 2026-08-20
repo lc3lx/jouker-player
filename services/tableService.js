@@ -725,6 +725,11 @@ exports.joinTable = asyncHandler(async (req, res, next) => {
   let table = await Table.findById(id);
   if (!table) return next(new ApiError("Table not found", 404));
 
+  if (table.arenaTournament) {
+    const arenaEngine = require("./arenaTournamentEngineService");
+    return arenaEngine.joinRunningTable({ req, res, next, table });
+  }
+
   if (
     table.tableKind === "vip" &&
     table.settings?.isLocked === true &&

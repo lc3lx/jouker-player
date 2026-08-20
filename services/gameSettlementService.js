@@ -545,6 +545,12 @@ async function settleGameOnFinish({
     return { skipped: true, reason: "clan_tournament_match" };
   }
 
+  if (table.arenaTournament) {
+    const arenaTournamentEngine = require("./arenaTournamentEngineService");
+    await arenaTournamentEngine.onGameFinished({ table, gameType, gameResult, gamePlayers });
+    return { skipped: true, reason: "arena_tournament" };
+  }
+
   await assertHouseWalletReady({ createIfMissing: process.env.NODE_ENV !== "production" });
 
   const participants = participantsFromTableAndGame(table, gamePlayers);

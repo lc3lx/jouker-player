@@ -183,6 +183,57 @@ async function createTournamentTable({ gameType, matchId, capacity, session }) {
 }
 
 /**
+ * Timed public-arena tournament heat. Tagged with `arenaTournament` so cash
+ * settlement is skipped and scores feed the ranking at duration end.
+ */
+async function createArenaTournamentTable({
+  gameType,
+  tournamentId,
+  capacity,
+  displayName,
+  allowedUsers,
+  session,
+}) {
+  const maxDoc = await Table.findOne({ gameType, tier: "private" })
+    .sort({ tableNumber: -1 })
+    .select("tableNumber");
+  const tableNumber = (maxDoc?.tableNumber || 100000) + 1;
+  const cap = capacity || (gameType === "poker" ? 6 : 4);
+  const createOpts = session ? { session } : {};
+  const [doc] = await Table.create(
+    [
+      {
+        gameType,
+        tier: "private",
+        tableNumber,
+        tableKind: "tournament",
+        displayName: displayName || "Arena Tournament",
+        smallBlind: 0,
+        bigBlind: 0,
+        minBuyIn: 0,
+        maxBuyIn: 0,
+        capacity: cap,
+        isPrivate: true,
+        status: gameType === "poker" ? "waiting" : "open",
+        arenaTournament: tournamentId,
+        allowedUsers: allowedUsers || [],
+        seats: [],
+        settings: {
+          allowSpectators: true,
+          botsEnabled: false,
+          minPlayers: gameType === "poker" ? 2 : 4,
+          maxPlayers: cap,
+          isLocked: false,
+        },
+      },
+    ],
+    createOpts
+  );
+  emitTablesUpdated({ gameType, reason: "table_created", tableId: String(doc._id), tier: "private" });
+  return doc;
+}
+
+/**
  * Destroy or archive a table based on its kind:
  * - dynamic / vip → DELETE from Mongo (ephemeral; never permanent)
  * - static / tournament → archive (status:"archived", seats cleared — preserves history)
@@ -210,5 +261,6 @@ module.exports = {
   createDynamicTable,
   createVipTable,
   createTournamentTable,
+  createArenaTournamentTable,
   destroyOrArchiveTable,
 };

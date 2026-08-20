@@ -129,7 +129,11 @@ function runTumbles(initialGrid, rng, options) {
     cascadeSteps.push({ phase: "tumble", index, grid: beforeGrid, afterGrid: cloneGrid(afterGrid), win: stepWin, wins, cells: [...stepKeys].map((key) => { const [col, row] = key.split(",").map(Number); return { col, row }; }), multiplierHits: multiplierCells(afterGrid), multiplierTotal: multiplierCells(afterGrid).reduce((sum, m) => sum + m.value, 0) });
     grid = afterGrid;
   }
-  const plaques = multiplierCells(grid), collected = plaques.reduce((sum, p) => sum + p.value, 0), applied = appliedMultiplierFor(collected, options.isFreeSpin);
+  const plaques = multiplierCells(grid), collected = plaques.reduce((sum, p) => sum + p.value, 0);
+  // Same as Poseidon: plaques only multiply a tumble win — never a zero-win spin.
+  const applied = baseWin > 0 && collected > 0
+    ? appliedMultiplierFor(collected, options.isFreeSpin)
+    : 1;
   return { finalGrid: grid, baseWin, collectedMultiplier: collected, appliedMultiplier: applied, nextFreeSpinMultiplier: applied, multipliedWin: roundMoney(baseWin * applied), lineWins, winningCells, cascadeSteps };
 }
 function calculateWins(grid, stake, freeSpinMultiplier = 0) { const { wins, winningCells } = findPayAnywhereWins(grid, stake); const totalWin = wins.reduce((sum, w) => sum + w.win, 0); return { totalWin: roundMoney(totalWin), winningCells: [...winningCells].map((key) => { const [col, row] = key.split(",").map(Number); return { col, row }; }), lineWins: wins, scatterCount: multiplierCells(grid).length }; }

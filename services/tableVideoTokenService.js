@@ -61,6 +61,12 @@ async function createPokerTableVideoToken({ userId, tableId, displayName }) {
     throw new ApiError("LiveKit is not configured (LIVEKIT_URL)", 503);
   }
 
+  const apiKey = (process.env.LIVEKIT_API_KEY || "").trim();
+  const apiSecret = (process.env.LIVEKIT_API_SECRET || "").trim();
+  if (!apiKey || !apiSecret) {
+    throw new ApiError("LiveKit is not configured (API credentials)", 503);
+  }
+
   const { roomName } = await assertUserSeatedAtVideoTable(userId, tableId);
 
   const ttlSec = Math.max(
@@ -73,7 +79,7 @@ async function createPokerTableVideoToken({ userId, tableId, displayName }) {
       ? String(displayName).trim().slice(0, 128)
       : undefined;
 
-  const at = new AccessToken(undefined, undefined, {
+  const at = new AccessToken(apiKey, apiSecret, {
     identity: String(userId),
     ttl: ttlSec,
     name,

@@ -412,6 +412,9 @@ async function startServer() {
   const { startEngine: startClanTournamentEngine } = require("./services/clanTournamentEngineService");
   startClanTournamentEngine();
 
+  const { startEngine: startArenaTournamentEngine } = require("./services/arenaTournamentEngineService");
+  startArenaTournamentEngine();
+
   // Production monitoring + self-healing sweep — starts after every engine
   // it inspects (table game, clan tournaments) is already up.
   require("./services/systemHealthMonitorService").startEngine();

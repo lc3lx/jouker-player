@@ -48,6 +48,7 @@ const adminClanRoute = require("./adminClanRoute");
 const adminStaffRoute = require("./adminStaffRoute");
 const giftRoute = require("./giftRoute");
 const clanRoute = require("./clanRoute");
+const arenaTournamentRoute = require("./arenaTournamentRoute");
 const mountInviteLanding = require("./inviteLandingRoute");
 
 const mountRoutes = (app) => {
@@ -72,6 +73,7 @@ const mountRoutes = (app) => {
   app.use("/api/v1/game", gameRoute);
   app.use("/api/v1/tables", tableRoute);
   app.use("/api/v1/tournaments", tournamentRoute);
+  app.use("/api/v1/arena-tournaments", arenaTournamentRoute);
   app.use("/api/v1/jackpot", jackpotRoute);
   app.use("/api/v1/poker/island", islandJackpotRoute);
   app.use("/api/v1/side-games", sideGamesRoute);
