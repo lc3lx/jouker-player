@@ -31,14 +31,14 @@ const GAMBLE_MAX_WIN_MULTIPLIER = 35;
 
 const FREE_SPINS_PER_BONUS = 5;
 
-/** Same-row ≥3 from reel 0; plus seven adjacent to wild tree. */
-const WIN_RULES_VERSION = "horizontal-col0-min3-seven-tree-v4";
+/** Same-row ≥3 from reel 0 only (no vertical / adjacent specials). */
+const WIN_RULES_VERSION = "horizontal-col0-min3-v5";
 
 /**
- * Seven touching a wild tree (orthogonal neighbour) pays this × bet.
- * Same as three sevens on a line.
+ * @deprecated Removed — seven+tree adjacent pairs no longer pay.
+ * Kept export as 0 so any stale import cannot award a win by accident.
  */
-const SEVEN_TREE_ADJACENT_MULT = 1;
+const SEVEN_TREE_ADJACENT_MULT = 0;
 
 const SYMBOLS = Object.freeze({
   CHERRY: "cherry",
@@ -56,7 +56,7 @@ const SYMBOLS = Object.freeze({
 });
 
 const SCATTERS = new Set();
-/** Symbols that break adjacent-path wins (jackpot scatter). */
+/** Symbols that break horizontal line wins (jackpot scatter). */
 const LINE_BREAKERS = new Set([
   SYMBOLS.JACKPOT,
 ]);

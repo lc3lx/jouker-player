@@ -436,27 +436,22 @@ function mixedDeadMatrix() {
   ];
 }
 
-test("seven next to wild tree pays (special pair, mid-board ok)", () => {
+test("seven next to wild tree alone does NOT pay — need ≥3 horizontal", () => {
   const matrix = mixedDeadMatrix();
   // Tree on reel 2 middle, seven on reel 3 middle — not a col0 run of 3.
   matrix[2][1] = SYMBOLS.WILD;
   matrix[3][1] = SYMBOLS.SEVEN;
 
   const result = calculateWins(matrix, {}, 10000, { bonusMode: false });
-  const win = result.lineWins.find((w) => w.symbol === SYMBOLS.SEVEN);
-  assert.ok(win);
-  assert.equal(win.special, "sevenTree");
-  assert.equal(win.count, 2);
-  assert.equal(win.amount, 10000); // 1× bet
-  assert.equal(result.totalWin, 10000);
+  assert.equal(result.lineWins.length, 0);
+  assert.equal(result.totalWin, 0);
 
   const { hardenWinResult } = require("../games/goldenTree/winGuard");
   const hardened = hardenWinResult(matrix, {}, 10000, { bonusMode: false });
-  assert.equal(hardened.totalWin, 10000);
-  assert.equal(hardened.lineWins[0].special, "sevenTree");
+  assert.equal(hardened.totalWin, 0);
 });
 
-test("orange next to wild tree does NOT get the seven-tree special", () => {
+test("orange next to wild tree does NOT pay", () => {
   const matrix = mixedDeadMatrix();
   matrix[2][1] = SYMBOLS.WILD;
   matrix[3][1] = SYMBOLS.ORANGE;
@@ -465,14 +460,14 @@ test("orange next to wild tree does NOT get the seven-tree special", () => {
   assert.equal(result.totalWin, 0);
 });
 
-test("seven above wild tree pays (vertical neighbour)", () => {
+test("seven above wild tree does NOT pay — vertical is not a win", () => {
   const matrix = mixedDeadMatrix();
   matrix[1][1] = SYMBOLS.WILD;
   matrix[1][0] = SYMBOLS.SEVEN;
 
   const result = calculateWins(matrix, {}, 10000, { bonusMode: false });
-  assert.equal(result.totalWin, 10000);
-  assert.equal(result.lineWins[0].special, "sevenTree");
+  assert.equal(result.totalWin, 0);
+  assert.equal(result.lineWins.length, 0);
 });
 
 test("wild connector in the middle completes a match (main)", () => {

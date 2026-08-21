@@ -6,13 +6,10 @@ const {
   SYMBOLS,
   WILD_ROW,
   MIN_CONSECUTIVE,
-  SEVEN_TREE_ADJACENT_MULT,
   minMatchCount,
   isLineBreaker,
   roundMoney,
 } = require("./constants");
-
-const SEVEN_TREE_SPECIAL = "sevenTree";
 
 /**
  * Each landed wild tree expands over its whole reel (all rows) for win
@@ -122,66 +119,6 @@ function cellContinues(sym, baseSymbol) {
 }
 
 /**
- * Special: a seven orthogonally next to a wild tree pays (seven only).
- * Positions are [seven, wild] sorted left→right for VFX.
- */
-function isSevenTreePair(positions, matrix) {
-  if (!Array.isArray(positions) || positions.length !== 2) return false;
-  const [a, b] = positions;
-  if (!a || !b) return false;
-  const dc = Math.abs(a.col - b.col);
-  const dr = Math.abs(a.row - b.row);
-  if (dc + dr !== 1) return false; // orthogonal neighbours only
-  const cellA = matrix[a.col]?.[a.row];
-  const cellB = matrix[b.col]?.[b.row];
-  const hasSeven =
-    cellA === SYMBOLS.SEVEN || cellB === SYMBOLS.SEVEN;
-  const hasWild = cellA === SYMBOLS.WILD || cellB === SYMBOLS.WILD;
-  return hasSeven && hasWild;
-}
-
-function collectSevenTreeAdjacent(evalMatrix) {
-  const found = [];
-  const seen = new Set();
-  const dirs = [
-    [1, 0],
-    [-1, 0],
-    [0, 1],
-    [0, -1],
-  ];
-
-  for (let col = 0; col < REEL_COUNT; col += 1) {
-    for (let row = 0; row < ROW_COUNT; row += 1) {
-      if (evalMatrix[col][row] !== SYMBOLS.WILD) continue;
-      for (const [dc, dr] of dirs) {
-        const c2 = col + dc;
-        const r2 = row + dr;
-        if (c2 < 0 || c2 >= REEL_COUNT || r2 < 0 || r2 >= ROW_COUNT) continue;
-        if (evalMatrix[c2][r2] !== SYMBOLS.SEVEN) continue;
-        const positions = [
-          { col: c2, row: r2 },
-          { col, row },
-        ].sort((a, b) => a.col - b.col || a.row - b.row);
-        const key = positions.map((p) => `${p.col}.${p.row}`).join("-");
-        if (seen.has(key)) continue;
-        seen.add(key);
-        found.push({
-          symbol: SYMBOLS.SEVEN,
-          count: 2,
-          positions,
-          special: SEVEN_TREE_SPECIAL,
-        });
-      }
-    }
-  }
-  return found;
-}
-
-function sevenTreePayout(betAmount) {
-  return roundMoney(SEVEN_TREE_ADJACENT_MULT * (betAmount / REFERENCE_BET));
-}
-
-/**
  * One horizontal run per row, starting at reel 0 only.
  * Stops at the first gap / foreign symbol. Needs ≥ MIN_CONSECUTIVE.
  */
@@ -267,25 +204,14 @@ function calculateWins(matrix, wildMultipliers, betAmount, options = {}) {
   }
 
   const bestBySymbol = new Map();
-  const candidates = [
-    ...collectContiguousWins(evalMatrix),
-    ...collectSevenTreeAdjacent(evalMatrix),
-  ];
+  const candidates = collectContiguousWins(evalMatrix);
 
   for (let i = 0; i < candidates.length; i += 1) {
-    const { symbol, count, positions, special } = candidates[i];
+    const { symbol, count, positions } = candidates[i];
     if (count !== positions.length) continue;
+    if (!pathMatchesMatrix(positions, symbol, evalMatrix)) continue;
 
-    const isSevenTree = special === SEVEN_TREE_SPECIAL;
-    if (isSevenTree) {
-      if (!isSevenTreePair(positions, evalMatrix)) continue;
-    } else if (!pathMatchesMatrix(positions, symbol, evalMatrix)) {
-      continue;
-    }
-
-    const base = isSevenTree
-      ? sevenTreePayout(betAmount)
-      : basePayout(symbol, count, betAmount);
+    const base = basePayout(symbol, count, betAmount);
     if (base <= 0) continue;
 
     const mult = wildMultiplierSum(
@@ -302,7 +228,6 @@ function calculateWins(matrix, wildMultipliers, betAmount, options = {}) {
       baseAmount: base,
       wildMultiplier: mult,
       amount,
-      ...(isSevenTree ? { special: SEVEN_TREE_SPECIAL } : {}),
     };
 
     const prev = bestBySymbol.get(symbol);
@@ -355,11 +280,7 @@ module.exports = {
   matchPayline,
   basePayout,
   collectContiguousWins,
-  collectSevenTreeAdjacent,
-  isSevenTreePair,
-  sevenTreePayout,
   isContiguousFromCol0,
   pathMatchesMatrix,
   normalizeLandscapeMatrix,
-  SEVEN_TREE_SPECIAL,
 };
