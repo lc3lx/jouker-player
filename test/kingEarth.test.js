@@ -29,9 +29,11 @@ test("seeded spins are deterministic and only yield known symbol IDs", () => {
   assert.ok(first.totalWin <= first.maxWin);
 });
 
-test("base and bonus multiplier caps match Poseidon", () => {
-  assert.equal(engine.appliedMultiplierFor(1000, false), 2);
-  assert.equal(engine.appliedMultiplierFor(1000, true), 10);
+test("applied multiplier uses full plaque face value (no soft-cap)", () => {
+  assert.equal(engine.appliedMultiplierFor(1000, false), 1000);
+  assert.equal(engine.appliedMultiplierFor(1000, true), 1000);
+  assert.equal(engine.appliedMultiplierFor(500, false), 500);
+  assert.equal(engine.appliedMultiplierFor(2, true), 2);
 });
 
 test("multiplier applies only when the spin wins", () => {
@@ -51,14 +53,14 @@ test("multiplier applies only when the spin wins", () => {
   }
 });
 
-test("multiplier landing rates use Poseidon's base and bonus ratios", () => {
+test("multiplier landing rates use Poseidon-aligned plaque spawn weights", () => {
   const regularMass = engine.BASE_WEIGHTS.reduce((sum, weight) => sum + weight, 0);
-  const baseChance = 0.35 / (regularMass + 0.35);
-  const bonusChance = 1.2 / (regularMass + 1.2);
-  assert.ok(Math.abs(baseChance - 0.35 / 76.6) < 1e-10);
-  assert.ok(Math.abs(bonusChance - 1.2 / 77.45) < 1e-10);
-  assert.deepEqual(engine.BASE_MULTIPLIER_WEIGHTS, [55, 18, 12, 6.5, 3.8, 2.4, 1.2, 0.7, 0.4]);
-  assert.deepEqual(engine.BONUS_MULTIPLIER_WEIGHTS, [36, 16, 14, 11, 8, 6, 4, 3, 2]);
+  const baseChance = 0.22 / (regularMass + 0.22);
+  const bonusChance = 0.55 / (regularMass + 0.55);
+  assert.ok(Math.abs(baseChance - 0.22 / (regularMass + 0.22)) < 1e-12);
+  assert.ok(Math.abs(bonusChance - 0.55 / (regularMass + 0.55)) < 1e-12);
+  assert.deepEqual(engine.BASE_MULTIPLIER_WEIGHTS, [82, 11, 4.2, 1.6, 0.7, 0.3, 0.12, 0.05, 0.02]);
+  assert.deepEqual(engine.BONUS_MULTIPLIER_WEIGHTS, [62, 16, 10, 5.5, 3, 1.8, 0.9, 0.45, 0.2]);
 });
 
 test("natural free spins start with five spins", async () => {

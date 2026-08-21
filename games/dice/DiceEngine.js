@@ -47,13 +47,13 @@ const BASE_WEIGHTS = [
   9.66549296, 9.66549296, 8.05457746, 5.90669014,
 ];
 const FREESPIN_WEIGHTS = [...BASE_WEIGHTS];
-const BASE_MULTIPLIER_WEIGHTS = [55, 18, 12, 6.5, 3.8, 2.4, 1.2, .7, .4];
-const BONUS_MULTIPLIER_WEIGHTS = [36, 16, 14, 11, 8, 6, 4, 3, 2];
-const SUPPRESSED_MULTIPLIER_WEIGHTS = [75, 16, 7, 1.4, .4, .15, .04, .01, .005];
+const BASE_MULTIPLIER_WEIGHTS = [82, 11, 4.2, 1.6, .7, .3, .12, .05, .02];
+const BONUS_MULTIPLIER_WEIGHTS = [62, 16, 10, 5.5, 3, 1.8, .9, .45, .2];
+const SUPPRESSED_MULTIPLIER_WEIGHTS = [88, 9, 2.2, .5, .15, .05, .015, .005, .002];
 const MULTIPLIER_GATES = [.48, .35, .33, .32, .35, .4, .4, .35, .4];
 const BIG_MULTIPLIER_THRESHOLD = 20;
-const APPLIED_MULTIPLIER_CAP_BASE = 2;
-const APPLIED_MULTIPLIER_CAP_BONUS = 10;
+const APPLIED_MULTIPLIER_CAP_BASE = Number.POSITIVE_INFINITY;
+const APPLIED_MULTIPLIER_CAP_BONUS = Number.POSITIVE_INFINITY;
 const MAX_TUMBLES = 40;
 
 function roundMoney(n) { return Math.round(Number(n) * 100) / 100; }
@@ -73,7 +73,7 @@ function isJackpot(symbol) {
 }
 
 function pickSymbol(rng, isFreeSpin, bigAlready) {
-  const plaqueWeight = isFreeSpin ? 1.2 : .35;
+  const plaqueWeight = isFreeSpin ? 0.55 : 0.22;
   const regular = isFreeSpin ? FREESPIN_WEIGHTS : BASE_WEIGHTS;
   const choice = weightedIndex(rng, [...regular, plaqueWeight, JACKPOT_WEIGHT]);
   if (choice < REGULAR_SYMBOLS) return choice;
@@ -116,7 +116,7 @@ function collapseGrid(grid, removed, rng, volatility, doubleChance, isFreeSpin) 
   for (let c = 0; c < COLS; c++) { const survivors = []; for (let r = 0; r < ROWS; r++) if (!removed.has(`${c},${r}`)) survivors.push(grid[c][r]); const incoming = []; while (incoming.length + survivors.length < ROWS) { const s = pickSymbol(rng, isFreeSpin, hasBig); if (multiplierValue(s) >= BIG_MULTIPLIER_THRESHOLD) hasBig = true; incoming.push(s); } next[c] = [...incoming, ...survivors]; }
   return next;
 }
-function appliedMultiplierFor(sum, isBonus) { return sum > 0 ? Math.min(sum, isBonus ? APPLIED_MULTIPLIER_CAP_BONUS : APPLIED_MULTIPLIER_CAP_BASE) : 1; }
+function appliedMultiplierFor(sum, isBonus) { return sum > 0 ? sum : 1; }
 function classifyWinType(total, stake) { const r = total / Math.max(stake, 1); return r >= 50 ? "mega" : r >= 12 ? "big" : "normal"; }
 function runTumbles(initialGrid, rng, options) {
   let grid = cloneGrid(initialGrid), baseWin = 0; const lineWins = [], winningCells = new Set(), cascadeSteps = [];
@@ -131,6 +131,7 @@ function runTumbles(initialGrid, rng, options) {
   }
   const plaques = multiplierCells(grid), collected = plaques.reduce((sum, p) => sum + p.value, 0);
   // Same as Poseidon: plaques only multiply a tumble win — never a zero-win spin.
+  // Applied = full face-value plaque sum (no soft-cap); MAX_WIN still hard-caps payout.
   const applied = baseWin > 0 && collected > 0
     ? appliedMultiplierFor(collected, options.isFreeSpin)
     : 1;

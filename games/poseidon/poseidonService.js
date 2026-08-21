@@ -75,9 +75,9 @@ async function executeSpin(userId, betAmountInput) {
 
   // --- win math (bet multiples) ---
   // Plaques multiply the sequence win when it exists — per spin, in both
-  // modes. Face values still show uncapped on the board; the applied product
-  // is soft-capped so a lone x1000 does not break RTP. Losing spins ignore
-  // plaques for payout (they still count for the free-spins trigger below).
+  // modes. Applied multiplier equals the face-value plaque sum (no soft-cap).
+  // Losing spins ignore plaques for payout (they still count for the free-spins
+  // trigger below). Overall win is still hard-capped by MAX_WIN_MULTIPLIER.
   const appliedMultiplier =
     spin.baseWin > 0 && spin.multiplierSum > 0
       ? appliedMultiplierFor(spin.multiplierSum, isFreeSpin)

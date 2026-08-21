@@ -52,20 +52,19 @@ const SYMBOLS = Object.freeze({
 
 /**
  * Multiplier plaques are encoded straight into the matrix as `x<value>`.
- * Values are weighted (not the old ultra-rare gate cascade) so x20–x1000
- * actually show up — richer in free spins / buy-bonus. Soft-capping in the
- * spin engine still makes stacking several big plaques uncommon.
+ * Face value applies in full to the win; high plaques are rare so RTP stays
+ * sane without a soft-cap on applied.
  */
 const MULTIPLIER_VALUES = Object.freeze([2, 5, 10, 20, 50, 100, 200, 500, 1000]);
 
-/** Base-game plaque value weights (sum ≈ 100). */
+/** Base-game plaque value weights — heavily skewed to small faces. */
 const BASE_MULTIPLIER_WEIGHTS = Object.freeze([
-  55, 18, 12, 6.5, 3.8, 2.4, 1.2, 0.7, 0.4,
+  82, 11, 4.2, 1.6, 0.7, 0.3, 0.12, 0.05, 0.02,
 ]);
 
-/** Buy-bonus / free-spins — mid & high plaques land more often. */
+/** Buy-bonus / free-spins — still richer, but x500/x1000 stay rare. */
 const BONUS_MULTIPLIER_WEIGHTS = Object.freeze([
-  36, 16, 14, 11, 8, 6, 4, 3, 2,
+  62, 16, 10, 5.5, 3, 1.8, 0.9, 0.45, 0.2,
 ]);
 
 /**
@@ -73,7 +72,7 @@ const BONUS_MULTIPLIER_WEIGHTS = Object.freeze([
  * toward small values so several huge multipliers rarely stack.
  */
 const SUPPRESSED_MULTIPLIER_WEIGHTS = Object.freeze([
-  75, 16, 7, 1.4, 0.4, 0.15, 0.04, 0.01, 0.005,
+  88, 9, 2.2, 0.5, 0.15, 0.05, 0.015, 0.005, 0.002,
 ]);
 
 /** @deprecated kept for any external reads — prefer BASE/BONUS_MULTIPLIER_WEIGHTS */
@@ -81,24 +80,21 @@ const MULTIPLIER_GATES = Object.freeze([
   0.48, 0.35, 0.33, 0.32, 0.35, 0.4, 0.4, 0.35, 0.4,
 ]);
 
-/** Plaques at/above this count as "big" for soft-cap stacking. */
+/** Plaques at/above this count as "big" for stacking suppression. */
 const BIG_MULTIPLIER_THRESHOLD = 20;
 
 /**
- * Hard ceiling on how large a plaque *sum* can multiply the win.
- * Plaques still display their full face value (x1000 can show), but the
- * applied product is capped so RTP stays sane. Bonus allows a higher ceiling.
+ * Plaque face values multiply the win in full (no soft-cap on applied).
+ * Overall payout is still bounded by [MAX_WIN_MULTIPLIER] × bet.
+ * Kept exports for API compatibility; caps are effectively uncapped.
  */
-const APPLIED_MULTIPLIER_CAP_BASE = 2;
-const APPLIED_MULTIPLIER_CAP_BONUS = 10;
+const APPLIED_MULTIPLIER_CAP_BASE = Number.POSITIVE_INFINITY;
+const APPLIED_MULTIPLIER_CAP_BONUS = Number.POSITIVE_INFINITY;
 
-/** Face-value plaque sum, clamped for payout (display stays uncapped). */
+/** Face-value plaque sum used for payout (uncapped; display matches pay). */
 function appliedMultiplierFor(sum, isBonus = false) {
   if (!(sum > 0)) return 1;
-  const cap = isBonus
-    ? APPLIED_MULTIPLIER_CAP_BONUS
-    : APPLIED_MULTIPLIER_CAP_BASE;
-  return Math.min(sum, cap);
+  return sum;
 }
 
 const PAYING_SYMBOLS = Object.freeze([
@@ -152,11 +148,11 @@ const BASE_WEIGHTS = Object.freeze([
   [SYMBOLS.FISH, 7.5],
   [SYMBOLS.CROWN, 5.5],
   [SYMBOLS.PEARL, 5],
-  ["mult", 0.35],
+  ["mult", 0.22],
   ["jackpot", 0.25],
 ]);
 
-/** Free spins: plaques rain more often but capped for the higher base pays. */
+/** Free spins: plaques rain more often; high faces stay rare for RTP. */
 const BONUS_WEIGHTS = Object.freeze([
   [SYMBOLS.S, 10],
   [SYMBOLS.N, 10],
@@ -167,7 +163,7 @@ const BONUS_WEIGHTS = Object.freeze([
   [SYMBOLS.FISH, 7.5],
   [SYMBOLS.CROWN, 5.5],
   [SYMBOLS.PEARL, 5],
-  ["mult", 1.2],
+  ["mult", 0.55],
   ["jackpot", 0.25],
 ]);
 

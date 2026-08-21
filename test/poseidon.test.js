@@ -96,7 +96,7 @@ test("winTierFor maps bet multiples to banners", () => {
 
 // --- multiplier value weights -------------------------------------------------
 
-test("weighted plaques: mid/high values appear, ladder stays descending", () => {
+test("weighted plaques: ladder descending; high faces rare but possible", () => {
   const rng = mulberry32(2024);
   const counts = {};
   const draws = 200000;
@@ -104,15 +104,13 @@ test("weighted plaques: mid/high values appear, ladder stays descending", () => 
     const v = pickMultiplierValue(rng);
     counts[v] = (counts[v] || 0) + 1;
   }
-  // x2 is still the plurality, but no longer ~90%.
-  assert.ok(counts[2] / draws > 0.4 && counts[2] / draws < 0.55, `x2 share ${counts[2] / draws}`);
-  // x20+ must actually land at a playable rate.
+  // Full face-value payout: x2 dominates; x500/x1000 stay rare for RTP.
+  assert.ok(counts[2] / draws > 0.75 && counts[2] / draws < 0.9, `x2 share ${counts[2] / draws}`);
   const midPlus =
     (counts[20] + counts[50] + counts[100] + counts[200] + counts[500] + counts[1000]) /
     draws;
-  assert.ok(midPlus > 0.12, `x20+ share too low: ${midPlus}`);
-  assert.ok(counts[1000] / draws > 0.002, `x1000 must appear, got ${counts[1000] / draws}`);
-  // strictly decreasing frequency up the value ladder
+  assert.ok(midPlus > 0.015 && midPlus < 0.08, `x20+ share ${midPlus}`);
+  assert.ok(counts[1000] / draws > 0.00005, `x1000 must appear, got ${counts[1000] / draws}`);
   for (let i = 1; i < MULTIPLIER_VALUES.length; i += 1) {
     const prev = counts[MULTIPLIER_VALUES[i - 1]] || 0;
     const cur = counts[MULTIPLIER_VALUES[i]] || 0;
@@ -120,7 +118,7 @@ test("weighted plaques: mid/high values appear, ladder stays descending", () => 
   }
 });
 
-test("bonus plaques are richer than base; soft-cap suppresses stacked bigs", () => {
+test("bonus plaques are richer than base; stacking suppression keeps mid+ rare", () => {
   const rng = mulberry32(99);
   const draws = 100000;
   let baseHigh = 0;
@@ -134,7 +132,7 @@ test("bonus plaques are richer than base; soft-cap suppresses stacked bigs", () 
   assert.ok(bonusHigh > baseHigh * 1.2, `bonus mid+ ${bonusHigh} vs base ${baseHigh}`);
   assert.ok(
     suppressedHigh / draws < 0.03,
-    `soft-cap should rarely stack mid+, got ${suppressedHigh / draws}`,
+    `stacking suppression should rarely land mid+, got ${suppressedHigh / draws}`,
   );
 });
 
