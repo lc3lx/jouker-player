@@ -68,9 +68,7 @@ function basePayout(symbol, count, betAmount) {
   return roundMoney(table[idx] * (betAmount / REFERENCE_BET));
 }
 
-function wildMultiplierSum(positions, matrix, wildMultipliers, bonusMode) {
-  if (!bonusMode) return 1;
-
+function wildMultiplierSum(positions, matrix, wildMultipliers) {
   let sum = 0;
   for (const { col, row } of positions) {
     if (matrix[col][row] === SYMBOLS.WILD) {
@@ -218,7 +216,6 @@ function calculateWins(matrix, wildMultipliers, betAmount, options = {}) {
       positions,
       evalMatrix,
       wildMultipliers,
-      bonusMode,
     );
     const amount = roundMoney(base * mult);
     const candidate = {
@@ -255,13 +252,18 @@ function calculateWins(matrix, wildMultipliers, betAmount, options = {}) {
 
   const totalWin = roundMoney(lineTotal + scatterTotal);
 
-  const expandedWilds = bonusMode
-    ? [...expandedReels].sort().map((reel) => ({
-        reel,
-        row: WILD_ROW,
-        multiplier: wildMultipliers[reel] || 2,
-      }))
-    : [];
+  // Always report landed trees + multipliers so the client can show treex art.
+  // `expands` is true only in bonus — main trees connect in-cell, no column fill.
+  const expandedWilds = Object.keys(wildMultipliers)
+    .map(Number)
+    .filter((reel) => Number.isInteger(reel))
+    .sort((a, b) => a - b)
+    .map((reel) => ({
+      reel,
+      row: WILD_ROW,
+      multiplier: wildMultipliers[reel] || 2,
+      expands: bonusMode,
+    }));
 
   return {
     expandedMatrix: evalMatrix,

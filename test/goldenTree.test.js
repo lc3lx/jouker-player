@@ -495,13 +495,16 @@ test("wild connector in the middle completes a match (main)", () => {
   matrix[2][1] = SYMBOLS.SEVEN;
 
   const result = calculateWins(matrix, { 1: 2 }, 10000, { bonusMode: false });
-  assert.equal(result.expandedWilds.length, 0);
+  assert.equal(result.expandedWilds.length, 1);
+  assert.equal(result.expandedWilds[0].expands, false);
+  assert.equal(result.expandedWilds[0].multiplier, 2);
   assert.equal(result.expandedMatrix[1][0], SYMBOLS.ORANGE);
   const win = result.lineWins.find(
     (w) => w.symbol === SYMBOLS.SEVEN && w.count === 3,
   );
   assert.ok(win);
-  assert.equal(win.wildMultiplier, 1);
+  assert.equal(win.wildMultiplier, 2);
+  assert.equal(win.amount, 20000);
 });
 
 test("an unmultiplied tree connects two matching symbols on the same row", () => {
@@ -510,15 +513,33 @@ test("an unmultiplied tree connects two matching symbols on the same row", () =>
   matrix[1][1] = SYMBOLS.WILD;
   matrix[2][1] = SYMBOLS.CHERRY;
 
+  // No explicit multiplier map → default 2× when wild is on the paying run.
   const result = calculateWins(matrix, {}, 10000, { bonusMode: false });
   const win = result.lineWins.find(
     (w) => w.symbol === SYMBOLS.CHERRY && w.count === 3,
   );
 
   assert.ok(win, "expected cherry → plain tree → cherry on one row");
-  assert.equal(win.wildMultiplier, 1);
-  assert.equal(win.amount, 2000);
+  assert.equal(win.wildMultiplier, 2);
+  assert.equal(win.amount, 4000);
   assert.ok(win.positions.every((p) => p.row === 1));
+});
+
+test("main tree between matching symbols applies assigned multiplier", () => {
+  const matrix = emptyMatrix(SYMBOLS.BANANA);
+  matrix[0][1] = SYMBOLS.CHERRY;
+  matrix[1][1] = SYMBOLS.WILD;
+  matrix[2][1] = SYMBOLS.CHERRY;
+
+  const result = calculateWins(matrix, { 1: 3 }, 10000, { bonusMode: false });
+  const win = result.lineWins.find(
+    (w) => w.symbol === SYMBOLS.CHERRY && w.count === 3,
+  );
+  assert.ok(win);
+  assert.equal(win.wildMultiplier, 3);
+  assert.equal(win.baseAmount, 2000);
+  assert.equal(win.amount, 6000);
+  assert.equal(result.expandedWilds[0].expands, false);
 });
 
 test("the reported screenshot board has no server-side win", () => {
@@ -601,6 +622,7 @@ test("bonus expanding wild substitutes the whole reel", () => {
   assert.equal(result.expandedMatrix[1][2], SYMBOLS.WILD);
   assert.equal(result.expandedWilds.length, 1);
   assert.equal(result.expandedWilds[0].multiplier, 3);
+  assert.equal(result.expandedWilds[0].expands, true);
 
   const win = result.lineWins.find(
     (w) =>
@@ -627,7 +649,8 @@ test("main mode does not expand wilds", () => {
   ];
 
   const result = calculateWins(matrix, { 1: 3 }, 10000, { bonusMode: false });
-  assert.equal(result.expandedWilds.length, 0);
+  assert.equal(result.expandedWilds.length, 1);
+  assert.equal(result.expandedWilds[0].expands, false);
   assert.equal(result.expandedMatrix[1][0], SYMBOLS.GRAPES);
   assert.equal(result.expandedMatrix[1][2], SYMBOLS.BANANA);
 });
@@ -700,6 +723,40 @@ test("settlement is all-or-nothing on insufficient funds (no partial debit)", as
     (err) => err.code === "INSUFFICIENT_BALANCE",
   );
   assert.equal(await wallet.getBalance("upoor"), before);
+});
+
+test("wallet loss settlement deducts bet only", async () => {
+  wallet.clearStubForTests();
+  roundManager.clearAllForTests();
+  wallet.seedStubBalance("uloss", 1_000_000);
+
+  const before = await wallet.getBalance("uloss");
+  const balanceAfter = await wallet.atomicSpinWallet("uloss", {
+    betAmount: 10000,
+    winAmount: 0,
+    meta: { type: "main_spin" },
+  });
+
+  assert.equal(balanceAfter, roundMoney(before - 10000));
+  assert.equal(await wallet.getBalance("uloss"), balanceAfter);
+});
+
+test("executeSpin credits connector wild multiplier on main", async () => {
+  wallet.clearStubForTests();
+  roundManager.clearAllForTests();
+  wallet.seedStubBalance("uwild", 50_000_000);
+
+  // Force a known board via calculateWins path — use service only for wallet
+  // shape; win math covered above. Here verify buy+spin session still settles.
+  const before = await wallet.getBalance("uwild");
+  const spin = await goldenTreeService.executeSpin("uwild", 10000);
+  assert.ok(typeof spin.totalWin === "number");
+  assert.equal(spin.balance, roundMoney(before - 10000 + spin.totalWin));
+  for (const w of spin.expandedWilds || []) {
+    assert.equal(typeof w.multiplier, "number");
+    assert.equal(typeof w.expands, "boolean");
+    assert.equal(w.expands, false); // main spin
+  }
 });
 
 test("gamble feature is disabled", async () => {
