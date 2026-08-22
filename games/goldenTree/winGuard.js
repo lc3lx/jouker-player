@@ -16,7 +16,7 @@ const logger = require("../../utils/logger");
 
 /**
  * Defense-in-depth: never credit a win that does not match the landed grid.
- * Only horizontal ≥3 runs from reel 0 on the same row are payable.
+ * Payable paths: L→R from reel 0 with adjacent/corner steps (|Δrow| ≤ 1).
  */
 function hardenWinResult(matrix, wildMultipliers, betAmount, options = {}) {
   const bonusMode = options.bonusMode === true;

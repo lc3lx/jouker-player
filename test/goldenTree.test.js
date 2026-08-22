@@ -115,16 +115,40 @@ test("every line symbol needs at least 3 matches", () => {
   assert.equal(basePayout(SYMBOLS.SEVEN, 3, 10000), 10000);
 });
 
-test("diagonal cherries do NOT pay — same-row only", () => {
+test("corner-touch diagonal cherries DO pay", () => {
   const matrix = emptyMatrix(SYMBOLS.BANANA);
+  // Clear bananas so only the cherry path pays.
+  for (let col = 0; col < 5; col += 1) {
+    for (let row = 0; row < 3; row += 1) {
+      matrix[col][row] = SYMBOLS.ORANGE;
+    }
+  }
   matrix[0][0] = SYMBOLS.CHERRY;
   matrix[1][1] = SYMBOLS.CHERRY;
   matrix[2][2] = SYMBOLS.CHERRY;
 
   const result = calculateWins(matrix, {}, 10000, { bonusMode: false });
-  const cherryWins = result.lineWins.filter((w) => w.symbol === SYMBOLS.CHERRY);
-  assert.equal(cherryWins.length, 0);
-  assert.equal(result.totalWin, 0);
+  const cherry = result.lineWins.find((w) => w.symbol === SYMBOLS.CHERRY);
+  assert.ok(cherry, "expected corner-adjacent cherry path");
+  assert.equal(cherry.count, 3);
+  assert.equal(cherry.amount, 2000);
+});
+
+test("screenshot bananas pay via corner-adjacent path", () => {
+  // User board: bananas on reels 0/1/2 touching by corners (not same row).
+  const matrix = [
+    [SYMBOLS.PINEAPPLE, SYMBOLS.BANANA, SYMBOLS.BANANA],
+    [SYMBOLS.BANANA, SYMBOLS.GRAPES, SYMBOLS.GRAPES],
+    [SYMBOLS.PINEAPPLE, SYMBOLS.BANANA, SYMBOLS.BANANA],
+    [SYMBOLS.ORANGE, SYMBOLS.ORANGE, SYMBOLS.PINEAPPLE],
+    [SYMBOLS.CHERRY, SYMBOLS.ORANGE, SYMBOLS.ORANGE],
+  ];
+
+  const result = calculateWins(matrix, {}, 10000, { bonusMode: false });
+  const banana = result.lineWins.find((w) => w.symbol === SYMBOLS.BANANA);
+  assert.ok(banana, "expected banana win on adjacent path");
+  assert.ok(banana.count >= 3);
+  assert.ok(result.totalWin > 0);
 });
 
 test("horizontal 3 cherries on one row pay", () => {
@@ -479,8 +503,11 @@ test("seven above wild tree does NOT pay — vertical is not a win", () => {
   matrix[1][0] = SYMBOLS.SEVEN;
 
   const result = calculateWins(matrix, {}, 10000, { bonusMode: false });
-  assert.equal(result.totalWin, 0);
-  assert.equal(result.lineWins.length, 0);
+  // Same-reel vertical pair never forms a L→R path by itself.
+  assert.equal(
+    result.lineWins.filter((w) => w.symbol === SYMBOLS.SEVEN).length,
+    0,
+  );
 });
 
 test("wild connector in the middle completes a match (main)", () => {

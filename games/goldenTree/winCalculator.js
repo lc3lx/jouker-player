@@ -79,19 +79,20 @@ function wildMultiplierSum(positions, matrix, wildMultipliers) {
 }
 
 /**
- * Strict rule: positions stay on ONE row, consecutive reels from 0, no gaps.
- * (No diagonals, no mid-board starts, no “count anywhere”.)
+ * Contiguous L→R path from reel 0: each step lands on the next reel and
+ * touches the previous cell (same row, edge, or corner — |Δrow| ≤ 1).
  */
 function isContiguousFromCol0(positions) {
   if (!Array.isArray(positions) || positions.length === 0) return false;
-  const row0 = positions[0].row;
   for (let i = 0; i < positions.length; i += 1) {
     const p = positions[i];
     if (!p || p.col !== i) return false;
     if (!Number.isInteger(p.row) || p.row < 0 || p.row >= ROW_COUNT) {
       return false;
     }
-    if (p.row !== row0) return false;
+    if (i > 0 && Math.abs(p.row - positions[i - 1].row) > 1) {
+      return false;
+    }
   }
   return true;
 }
@@ -117,32 +118,44 @@ function cellContinues(sym, baseSymbol) {
 }
 
 /**
- * One horizontal run per row, starting at reel 0 only.
- * Stops at the first gap / foreign symbol. Needs ≥ MIN_CONSECUTIVE.
+ * Collect L→R adjacent paths (incl. corner touch) starting on reel 0.
+ * One candidate per discovered path; caller keeps the best per symbol.
  */
 function collectContiguousWins(evalMatrix) {
   const found = [];
 
-  for (let row = 0; row < ROW_COUNT; row += 1) {
-    let base = null;
-    const positions = [];
-
-    for (let col = 0; col < REEL_COUNT; col += 1) {
-      const sym = evalMatrix[col][row];
-      const step = cellContinues(sym, base);
-      if (!step.ok) break;
-      base = step.base;
-      positions.push({ col, row });
+  function walk(col, row, base, positions) {
+    if (positions.length >= MIN_CONSECUTIVE) {
+      const paySymbol = base || SYMBOLS.SEVEN;
+      if (positions.length >= minMatchCount(paySymbol)) {
+        found.push({
+          symbol: paySymbol,
+          count: positions.length,
+          positions: positions.slice(),
+        });
+      }
     }
 
-    const paySymbol = base || SYMBOLS.SEVEN;
-    if (positions.length < minMatchCount(paySymbol)) continue;
-    if (!pathMatchesMatrix(positions, paySymbol, evalMatrix)) continue;
-    found.push({
-      symbol: paySymbol,
-      count: positions.length,
-      positions: positions.slice(),
-    });
+    const nextCol = col + 1;
+    if (nextCol >= REEL_COUNT) return;
+
+    for (let dr = -1; dr <= 1; dr += 1) {
+      const nextRow = row + dr;
+      if (nextRow < 0 || nextRow >= ROW_COUNT) continue;
+      const sym = evalMatrix[nextCol][nextRow];
+      const step = cellContinues(sym, base);
+      if (!step.ok) continue;
+      positions.push({ col: nextCol, row: nextRow });
+      walk(nextCol, nextRow, step.base, positions);
+      positions.pop();
+    }
+  }
+
+  for (let row = 0; row < ROW_COUNT; row += 1) {
+    const sym = evalMatrix[0][row];
+    const step = cellContinues(sym, null);
+    if (!step.ok) continue;
+    walk(0, row, step.base, [{ col: 0, row }]);
   }
 
   return found;
@@ -182,7 +195,7 @@ function normalizeLandscapeMatrix(matrix) {
 }
 
 /**
- * Horizontal line wins (≥3 from reel 0, same row) + scatters.
+ * Adjacent-path wins (≥3 from reel 0, corner/edge touch OK) + scatters.
  * One best win kept per symbol. Backend is sole payout authority.
  */
 function calculateWins(matrix, wildMultipliers, betAmount, options = {}) {
@@ -190,15 +203,12 @@ function calculateWins(matrix, wildMultipliers, betAmount, options = {}) {
   const landed = normalizeLandscapeMatrix(matrix);
 
   let evalMatrix;
-  let expandedReels;
 
   if (bonusMode) {
     const expanded = applyExpandingWilds(landed, wildMultipliers);
     evalMatrix = expanded.matrix;
-    expandedReels = expanded.expandedReels;
   } else {
     evalMatrix = landed.map((col) => [...col]);
-    expandedReels = new Set();
   }
 
   const bestBySymbol = new Map();
@@ -212,11 +222,7 @@ function calculateWins(matrix, wildMultipliers, betAmount, options = {}) {
     const base = basePayout(symbol, count, betAmount);
     if (base <= 0) continue;
 
-    const mult = wildMultiplierSum(
-      positions,
-      evalMatrix,
-      wildMultipliers,
-    );
+    const mult = wildMultiplierSum(positions, evalMatrix, wildMultipliers);
     const amount = roundMoney(base * mult);
     const candidate = {
       symbol,

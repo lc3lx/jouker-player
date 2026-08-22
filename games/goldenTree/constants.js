@@ -2,9 +2,10 @@
  * Golden Tree — core game constants.
  * Matrix: 5 reels (columns) × 3 rows.
  *
- * ONLY win rule for line symbols (cherry, orange, seven, grapes, … identical):
- * ≥ MIN_CONSECUTIVE matching symbols on the SAME ROW, unbroken left→right,
- * starting on reel 0. No diagonals. No mid-board starts. No count-anywhere.
+ * Win rule for line symbols: ≥ MIN_CONSECUTIVE matching cells in a path
+ * starting on reel 0, stepping one reel right each time. Each step must
+ * touch the previous cell (same row, shared edge, or corner — |Δrow| ≤ 1).
+ * Wilds substitute. No mid-board starts.
  */
 
 /** Minimum run length for any line symbol (orange / seven included). */
@@ -31,8 +32,8 @@ const GAMBLE_MAX_WIN_MULTIPLIER = 35;
 
 const FREE_SPINS_PER_BONUS = 5;
 
-/** Same-row ≥3 from reel 0 only (no vertical / adjacent specials). */
-const WIN_RULES_VERSION = "horizontal-col0-min3-v5";
+/** Adjacent/corner paths from reel 0, min 3. */
+const WIN_RULES_VERSION = "adjacent-corner-col0-min3-v6";
 
 /**
  * @deprecated Removed — seven+tree adjacent pairs no longer pay.
