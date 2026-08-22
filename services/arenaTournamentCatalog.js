@@ -78,8 +78,47 @@ const SLOT_MS = 2 * 60 * 60 * 1000;
 const DURATIONS = [4, 8, 12];
 const ROUND_SAFETY_MS = 6 * 60 * 60 * 1000;
 
+/** Live admin overrides: { [tierId]: { nameAr?, entryFee? } } */
+let _overrides = {};
+
+function applyOverrides(overrides) {
+  _overrides = overrides && typeof overrides === "object" ? overrides : {};
+}
+
+function overridesFromSettings(doc) {
+  const map = {};
+  for (const row of doc?.tiers || []) {
+    if (!row?.id) continue;
+    map[row.id] = {
+      ...(row.nameAr ? { nameAr: String(row.nameAr).trim() } : {}),
+      ...(Number.isFinite(Number(row.entryFee)) ? { entryFee: Math.max(0, Math.trunc(Number(row.entryFee))) } : {}),
+    };
+  }
+  return map;
+}
+
+function resolvedTiers() {
+  return TIERS.map((t) => {
+    const over = _overrides[t.id] || {};
+    const entryFee = Number.isFinite(Number(over.entryFee)) ? Math.max(0, Math.trunc(over.entryFee)) : t.entryFee;
+    return {
+      ...t,
+      nameAr: over.nameAr && String(over.nameAr).trim() ? String(over.nameAr).trim() : t.nameAr,
+      entryFee,
+      guaranteedPrize: entryFee * t.maxPlayers,
+    };
+  });
+}
+
 function getTier(id) {
-  return TIERS.find((t) => t.id === id) || null;
+  return resolvedTiers().find((t) => t.id === id) || null;
+}
+
+async function loadFromDb() {
+  const ArenaTournamentSettings = require("../models/arenaTournamentSettingsModel");
+  const doc = await ArenaTournamentSettings.getDefaults();
+  applyOverrides(overridesFromSettings(doc));
+  return resolvedTiers();
 }
 
 function nextSlotStart(fromMs = Date.now()) {
@@ -124,7 +163,7 @@ function serializeCatalog() {
     durations: DURATIONS,
     rounds: DURATIONS,
     games: GAMES.map((id) => ({ id, nameAr: GAME_LABEL_AR[id] })),
-    tiers: TIERS.map((t) => ({
+    tiers: resolvedTiers().map((t) => ({
       ...t,
       rounds: t.durationMinutes,
       prizeHint: t.entryFee * t.maxPlayers,
@@ -141,6 +180,10 @@ module.exports = {
   DURATIONS,
   ROUND_SAFETY_MS,
   getTier,
+  resolvedTiers,
+  applyOverrides,
+  overridesFromSettings,
+  loadFromDb,
   nextSlotStart,
   slotKey,
   roundsOf,

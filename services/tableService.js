@@ -409,9 +409,9 @@ exports.getTables = asyncHandler(async (req, res) => {
   if (req.query.gameType === "trix") gameType = "trix";
   else if (req.query.gameType === "tarneeb41") gameType = "tarneeb41";
   const filter = { gameType };
-  // Private poker tables are reached through their explicit join flow; never
-  // advertise their identifiers and roster in the shared lobby listing.
-  if (gameType === "poker") filter.isPrivate = { $ne: true };
+  // Private / VIP-hosted tables are reached through invitation or the
+  // authenticated private listing — never advertise them in the public lobby.
+  filter.isPrivate = { $ne: true };
   if (req.query.tier) {
     filter.tier = req.query.tier;
   }
@@ -465,7 +465,7 @@ exports.getTables = asyncHandler(async (req, res) => {
     status: { $nin: LOBBY_EXCLUDED_STATUSES },
   };
   if (req.query.tier) summaryMatch.tier = req.query.tier;
-  if (gameType === "poker") summaryMatch.isPrivate = { $ne: true };
+  summaryMatch.isPrivate = { $ne: true };
 
   const stakeRows = await Table.aggregate([
     { $match: summaryMatch },

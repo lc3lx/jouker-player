@@ -80,6 +80,9 @@ const arenaTournamentSchema = new mongoose.Schema(
     /** Unique per house slot so the scheduler is idempotent. */
     slotKey: { type: String, default: null },
 
+    /** Admin locked this instance so the house scheduler will not overwrite name/fee. */
+    adminEdited: { type: Boolean, default: false },
+
     startedAt: { type: Date, default: null },
     finishedAt: { type: Date, default: null },
     cancelledAt: { type: Date, default: null },

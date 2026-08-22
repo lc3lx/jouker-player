@@ -91,6 +91,7 @@ exports.adminMe = asyncHandler(async (req, res) => {
         referrals: caps.includes(CAPABILITIES.REFERRALS),
         recharge: caps.includes(CAPABILITIES.RECHARGE),
         games: caps.includes(CAPABILITIES.GAMES),
+        tournaments: caps.includes(CAPABILITIES.GAMES) || caps.includes(CAPABILITIES.TABLES),
         settings: caps.includes(CAPABILITIES.SETTINGS),
         audit: caps.includes(CAPABILITIES.AUDIT),
         reports: caps.includes(CAPABILITIES.REPORTS),

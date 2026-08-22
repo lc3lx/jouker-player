@@ -232,6 +232,41 @@ async function listPendingRequests(userId) {
   return { incoming, outgoing };
 }
 
+/** Search players to add as friends — name, email, or Mongo user id. */
+async function searchUsers(viewerId, query) {
+  const q = String(query || "").trim();
+  if (q.length < 2) return [];
+
+  const base = {
+    _id: { $ne: viewerId },
+    active: { $ne: false },
+  };
+
+  const or = [];
+  const escaped = q.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  or.push({ name: { $regex: escaped, $options: "i" } });
+  or.push({ email: { $regex: escaped, $options: "i" } });
+
+  if (mongoose.Types.ObjectId.isValid(q)) {
+    const oid = new mongoose.Types.ObjectId(q);
+    if (String(oid) === q) {
+      or.push({ _id: oid });
+    }
+  }
+
+  const rows = await User.find({ ...base, $or: or })
+    .select("name profileImg email")
+    .limit(12)
+    .lean();
+
+  return rows.map((u) => ({
+    id: String(u._id),
+    name: u.name,
+    avatar: u.profileImg || null,
+    email: u.email || null,
+  }));
+}
+
 module.exports = {
   sendFriendRequest,
   acceptFriendRequest,
@@ -242,6 +277,7 @@ module.exports = {
   unblockUser,
   listFriends,
   listPendingRequests,
+  searchUsers,
   isBlocked,
   getRelationship,
 };

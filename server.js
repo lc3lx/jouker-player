@@ -456,6 +456,12 @@ async function startServer() {
   }
 
   try {
+    await require("./services/arenaTournamentCatalog").loadFromDb();
+  } catch (e) {
+    logger.warn("arena_tournament_catalog_load_failed", { reason: e?.message });
+  }
+
+  try {
     await require("./services/systemMonitorSettingsService").loadFromDb();
   } catch (e) {
     logger.warn("system_monitor_settings_load_failed", { reason: e?.message });

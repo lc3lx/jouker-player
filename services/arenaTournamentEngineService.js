@@ -678,9 +678,10 @@ async function cancelTournament(tournamentId, reason = "Cancelled", opts = {}) {
 async function ensureSchedule(nowMs = Date.now()) {
   const slot = nextSlotStart(nowMs);
   const slots = [slot, slot + catalog.SLOT_MS];
+  const tiers = catalog.resolvedTiers();
   for (const startMs of slots) {
     for (const game of GAMES) {
-      for (const tier of catalog.TIERS) {
+      for (const tier of tiers) {
         const key = slotKey(game, tier.id, startMs);
         try {
           await ArenaTournament.updateOne(
@@ -718,11 +719,25 @@ async function ensureSchedule(nowMs = Date.now()) {
     }
   }
 
-  for (const tier of catalog.TIERS) {
+  for (const tier of tiers) {
     for (const game of GAMES) {
       await ArenaTournament.updateMany(
-        { origin: "house", lifecycle: "registering", game, tierId: tier.id },
-        { $set: { name: houseName(game, tier), durationMinutes: tier.durationMinutes } }
+        {
+          origin: "house",
+          lifecycle: "registering",
+          game,
+          tierId: tier.id,
+          adminEdited: { $ne: true },
+          participants: { $size: 0 },
+        },
+        {
+          $set: {
+            name: houseName(game, tier),
+            durationMinutes: tier.durationMinutes,
+            entryFee: tier.entryFee,
+            guaranteedPrize: tier.guaranteedPrize,
+          },
+        }
       );
     }
   }

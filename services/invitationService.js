@@ -64,7 +64,7 @@ async function sendInvitation(fromId, {
 
   if (tableId) {
     const table = await Table.findById(tableId)
-      .select("isPrivate owner seats capacity gameType status tableNumber")
+      .select("isPrivate owner seats capacity gameType status tableNumber tableKind")
       .lean();
     if (!table) throw new ApiError("Table not found", 404);
 
@@ -80,17 +80,19 @@ async function sendInvitation(fromId, {
     }
 
     if (table.gameType === "trix" || table.gameType === "tarneeb41") {
-      if (!isSeated) {
+      // VIP hosts may invite immediately after creating the table, before they sit.
+      if (!isSeated && !isOwner) {
         throw new ApiError("You must be seated at the table to invite", 403);
       }
       if (!tableHasOpenOrBotSeat(table)) {
         throw new ApiError("No open seat or bot seat available to invite", 400);
       }
-      // Prefer the live table gameType / number for the invite payload.
-      gameType = table.gameType || gameType;
-      if (tableNumber == null && table.tableNumber != null) {
-        tableNumber = table.tableNumber;
-      }
+    }
+
+    // Prefer the live table gameType / number for the invite payload.
+    gameType = table.gameType || gameType;
+    if (tableNumber == null && table.tableNumber != null) {
+      tableNumber = table.tableNumber;
     }
   }
 
@@ -129,7 +131,7 @@ async function sendInvitation(fromId, {
     expiresAt: expiresAt.toISOString(),
     message: displayName
       ? `${displayName} دعاك للطاولة`
-      : `دعوتك للعب ${gameType === "trix" ? "تركس" : gameType === "tarneeb41" ? "طرنيب" : gameType}`,
+      : `دعوتك للعب ${gameType === "trix" ? "تركس" : gameType === "tarneeb41" ? "طرنيب" : gameType === "poker" ? "بوكر" : gameType}`,
   };
 
   emitToUser(toUserId, "invitation:received", payload);

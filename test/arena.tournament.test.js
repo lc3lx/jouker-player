@@ -65,6 +65,7 @@ test.after(async () => {
 });
 
 test.beforeEach(async () => {
+  catalog.applyOverrides({});
   await Promise.all([
     Wallet.deleteMany({}),
     User.deleteMany({}),

@@ -32,27 +32,8 @@ router.get("/requests", asyncHandler(async (req, res) => {
 }));
 
 router.get("/users/search", asyncHandler(async (req, res) => {
-  const q = String(req.query.q || "").trim();
-  if (q.length < 2) {
-    return res.json({ results: 0, data: [] });
-  }
-  const User = require("../models/userModel");
-  const rows = await User.find({
-    _id: { $ne: req.user._id },
-    active: { $ne: false },
-    name: { $regex: q.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"), $options: "i" },
-  })
-    .select("name profileImg")
-    .limit(12)
-    .lean();
-  res.json({
-    results: rows.length,
-    data: rows.map((u) => ({
-      id: String(u._id),
-      name: u.name,
-      avatar: u.profileImg || null,
-    })),
-  });
+  const data = await friendService.searchUsers(req.user._id, req.query.q);
+  res.json({ results: data.length, data });
 }));
 
 router.post("/friends/request", asyncHandler(async (req, res) => {

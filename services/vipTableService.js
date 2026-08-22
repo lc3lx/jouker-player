@@ -2,6 +2,7 @@
  * VipTableService — VIP owner controls for VIP tables.
  * All write functions verify that the requester is the table owner before acting.
  */
+const crypto = require("crypto");
 const asyncHandler = require("express-async-handler");
 const bcrypt = require("bcryptjs");
 const ApiError = require("../utils/apiError");
@@ -51,8 +52,14 @@ exports.createVipHandler = asyncHandler(async (req, res) => {
   if (!Number.isSafeInteger(Number(buyIn)) || Number(buyIn) <= 0) {
     throw new ApiError("buyIn must be a positive whole number", 400);
   }
-  if (isPrivate && (!password || String(password).trim().length < 4)) {
-    throw new ApiError("Private VIP tables require a password of at least 4 characters", 400);
+  // Invite-only VIP tables are private. A password is stored for the join
+  // gate, but invited friends enter through allowedUsers — generate one when
+  // the host does not supply it so the create UI stays invite-first.
+  const privateTable = isPrivate !== false;
+  let tablePassword = password;
+  if (privateTable) {
+    const trimmed = tablePassword != null ? String(tablePassword).trim() : "";
+    tablePassword = trimmed.length >= 4 ? trimmed : crypto.randomBytes(12).toString("base64url");
   }
   const doc = await tableFactory.createVipTable({
     gameType,
@@ -61,8 +68,8 @@ exports.createVipHandler = asyncHandler(async (req, res) => {
     capacity: capacity ? Number(capacity) : undefined,
     ownerId: req.user._id,
     displayName,
-    isPrivate: !!isPrivate,
-    password,
+    isPrivate: privateTable,
+    password: tablePassword,
     settings,
   });
   res.status(201).json({ status: "success", data: doc });
