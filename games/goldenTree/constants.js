@@ -105,8 +105,8 @@ const BONUS_WILD_MULTIPLIERS = [2, 3, 5];
 
 /**
  * Public buy-bonus identifier retained for API compatibility with existing
- * clients. It is not a promise of three trees: bonus spins use the bonus
- * reel strips and trees land randomly.
+ * clients. Bonus strips land trees often (high rate) but never guarantee
+ * one/two/three trees on every free spin.
  */
 const BUY_BONUS_TYPE = "Triple";
 const BUY_BONUS_COST = 350;

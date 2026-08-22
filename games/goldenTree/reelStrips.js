@@ -16,6 +16,16 @@ const { SYMBOLS, WILD_REELS } = require("./constants");
 const JACKPOT_REEL_WEIGHT = 1;
 const JACKPOT_WINDOW_ACTIVATION_ODDS = 6;
 
+/** Main game: sparse middle-row trees on reels 2–4. */
+const MAIN_WILD_COUNT = 1;
+/**
+ * Bonus / buy-bonus: frequent isolated trees (high chance, never guaranteed).
+ * Wilds are placed by replacing fruit stops (strip length unchanged) so
+ * jackpot rarity stays stable. Contiguous WWW clumps are avoided — the
+ * mixed-column picker rejects them and collapses effective tree rate.
+ */
+const BONUS_WILD_COUNT = 26;
+
 function buildStrip(entries) {
   const strip = [];
   for (const [symbol, weight] of entries) {
@@ -24,6 +34,39 @@ function buildStrip(entries) {
     }
   }
   return strip;
+}
+
+/**
+ * Replace fruit stops with isolated wilds (never adjacent, never on jackpot).
+ * [reelIndex] offsets the pattern so wild reels do not lock-step together.
+ */
+function placeIsolatedWilds(baseStrip, count, reelIndex = 0) {
+  if (count <= 0) return [...baseStrip];
+  const out = [...baseStrip];
+  const len = out.length;
+  const candidates = [];
+
+  for (let i = 0; i < len; i += 1) {
+    if (out[i] === SYMBOLS.JACKPOT || out[i] === SYMBOLS.WILD) continue;
+    candidates.push(i);
+  }
+  if (candidates.length === 0) return out;
+
+  const start = (reelIndex * 11) % candidates.length;
+  const step = Math.max(1, Math.floor(candidates.length / count));
+  let placed = 0;
+
+  for (let n = 0; n < candidates.length && placed < count; n += 1) {
+    const idx = candidates[(start + n * step) % candidates.length];
+    if (out[idx] === SYMBOLS.WILD || out[idx] === SYMBOLS.JACKPOT) continue;
+    const left = out[(idx - 1 + len) % len];
+    const right = out[(idx + 1) % len];
+    if (left === SYMBOLS.WILD || right === SYMBOLS.WILD) continue;
+    out[idx] = SYMBOLS.WILD;
+    placed += 1;
+  }
+
+  return out;
 }
 
 /** Base symbol mix shared by non-special reels. */
@@ -42,18 +85,15 @@ const BASE_MIX = [
 
 function stripForReel(reelIndex, mode) {
   const mix = BASE_MIX.map(([sym, w]) => [sym, w]);
-
-  if (WILD_REELS.has(reelIndex)) {
-    // Bonus spins make trees more frequent, but trees still land randomly;
-    // bought bonuses never inject or guarantee them.
-    const wildWeight = mode === "bonus" ? 10 : 1;
-    mix.push([SYMBOLS.WILD, wildWeight]);
-  }
-
   // Match-3 jackpot scatter (Zeus / Atlantis style) — all reels, low weight.
   mix.push([SYMBOLS.JACKPOT, JACKPOT_REEL_WEIGHT]);
 
-  return buildStrip(mix);
+  let strip = buildStrip(mix);
+  if (WILD_REELS.has(reelIndex)) {
+    const wildCount = mode === "bonus" ? BONUS_WILD_COUNT : MAIN_WILD_COUNT;
+    strip = placeIsolatedWilds(strip, wildCount, reelIndex);
+  }
+  return strip;
 }
 
 const MAIN_REEL_STRIPS = Array.from({ length: 5 }, (_, i) =>
@@ -68,6 +108,9 @@ module.exports = {
   MAIN_REEL_STRIPS,
   BONUS_REEL_STRIPS,
   buildStrip,
+  placeIsolatedWilds,
   JACKPOT_REEL_WEIGHT,
   JACKPOT_WINDOW_ACTIVATION_ODDS,
+  MAIN_WILD_COUNT,
+  BONUS_WILD_COUNT,
 };

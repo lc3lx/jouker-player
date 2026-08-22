@@ -93,9 +93,25 @@ function pickRareJackpotColumnWindow(strip, rng = secureRandomInt) {
   const activateJackpot =
     singleJackpotStops.length > 0 &&
     rng(JACKPOT_WINDOW_ACTIVATION_ODDS) === 0;
-  const eligibleStops = activateJackpot
-    ? [...normalStops, ...singleJackpotStops]
-    : normalStops;
+
+  let eligibleStops = normalStops;
+  if (activateJackpot) {
+    // Keep jackpot stop share ~stable as wild-dense strips grow more
+    // mixed normal windows (otherwise bonus jackpot rate collapses to ~0).
+    const targetShare = 0.15;
+    const boost = Math.max(
+      1,
+      Math.round(
+        (targetShare * normalStops.length) /
+          ((1 - targetShare) * singleJackpotStops.length),
+      ),
+    );
+    eligibleStops = normalStops.slice();
+    for (let i = 0; i < boost; i += 1) {
+      eligibleStops.push(...singleJackpotStops);
+    }
+  }
+
   const stop = eligibleStops[rng(eligibleStops.length)];
 
   return { column: windowAtStop(strip, stop), stop };
@@ -137,8 +153,8 @@ function assignWildMultipliers(matrix, multiplierPool, rng = secureRandomInt) {
 
 /**
  * Generate a 5×3 outcome matrix.
- * Bonus mode selects the richer bonus reel strip; it never injects or
- * guarantees wild trees.
+ * Bonus mode uses denser (isolated) wild stops so trees appear often;
+ * still never injects or guarantees a tree on every spin.
  * @returns {{ matrix: string[][], wildMultipliers: Record<number, number>, stopIndices: number[] }}
  */
 function generateSpin({ bonusMode = false, rng = secureRandomInt } = {}) {

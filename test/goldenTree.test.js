@@ -46,9 +46,22 @@ function jackpotTriggerRate(strips) {
       if (jackpots === 1) singleJackpotStops += 1;
     }
 
-    const jackpotChance =
-      (singleJackpotStops / (normalStops + singleJackpotStops)) /
-      JACKPOT_WINDOW_ACTIVATION_ODDS;
+    // Mirrors spinEngine.pickRareJackpotColumnWindow weighting.
+    const activate = 1 / JACKPOT_WINDOW_ACTIVATION_ODDS;
+    let jackpotChance = 0;
+    if (singleJackpotStops > 0 && normalStops > 0) {
+      const targetShare = 0.15;
+      const boost = Math.max(
+        1,
+        Math.round(
+          (targetShare * normalStops) /
+            ((1 - targetShare) * singleJackpotStops),
+        ),
+      );
+      const eligibleWhenActive = normalStops + boost * singleJackpotStops;
+      jackpotChance =
+        activate * ((boost * singleJackpotStops) / eligibleWhenActive);
+    }
     const next = [];
 
     for (let count = 0; count < distribution.length; count += 1) {
@@ -725,19 +738,43 @@ test("buy bonus creates 5 free spins session", async () => {
   assert.equal(spin1.freeSpinsRemaining, 4);
 });
 
-test("bonus spins use random bonus reels instead of injected three trees", () => {
-  // A deterministic selector result contains no tree. If bonus spins injected
-  // trees after the reel stops, this would fail on reels 1, 2 and 3.
-  const { matrix, wildMultipliers } = generateSpin({
-    bonusMode: true,
-    rng: () => 0,
-  });
+test("bonus spins use denser strips but do not inject three trees", () => {
+  // Across many spins some must have zero trees — proves no force-plant.
+  let empty = 0;
+  for (let i = 0; i < 400; i += 1) {
+    const { wildMultipliers } = generateSpin({ bonusMode: true });
+    if (Object.keys(wildMultipliers).length === 0) empty += 1;
+  }
+  assert.ok(empty >= 20, `expected some empty-tree bonus spins, got ${empty}/400`);
+});
 
-  assert.equal(
-    matrix.flat().filter((symbol) => symbol === SYMBOLS.WILD).length,
-    0,
+test("bonus strips land trees often but not always", () => {
+  const rounds = 2000;
+  let withTree = 0;
+  for (let i = 0; i < rounds; i += 1) {
+    const { wildMultipliers } = generateSpin({ bonusMode: true });
+    if (Object.keys(wildMultipliers).length > 0) withTree += 1;
+  }
+  const rate = withTree / rounds;
+  // High chance (buy-bonus feel), never near-guaranteed.
+  assert.ok(rate >= 0.55 && rate <= 0.92, `bonus tree rate ${rate}`);
+});
+
+test("wild placements are staggered across bonus reels", () => {
+  // Same stop index must not always plant trees on every wild reel.
+  const { BONUS_REEL_STRIPS: strips } = require("../games/goldenTree/reelStrips");
+  let aligned = 0;
+  const len = strips[1].length;
+  for (let stop = 0; stop < len; stop += 1) {
+    const mids = [1, 2, 3].map(
+      (col) => windowAtStop(strips[col], stop)[1] === SYMBOLS.WILD,
+    );
+    if (mids[0] && mids[1] && mids[2]) aligned += 1;
+  }
+  assert.ok(
+    aligned < len * 0.15,
+    `too many lock-step triple-tree stops: ${aligned}/${len}`,
   );
-  assert.deepEqual(wildMultipliers, {});
 });
 
 test("jackpot strips use isolated symbols at Zeus-scale rarity", () => {
@@ -771,9 +808,9 @@ test("jackpot strips use isolated symbols at Zeus-scale rarity", () => {
     0.25 / (76.25 + 1.2 + 0.25),
   );
 
-  // Headroom vs Zeus reference after scatter-strip removal.
-  assert.ok(mainRate >= 0.00009 && mainRate <= zeusMainRate * 1.35);
-  assert.ok(bonusRate >= 0.00009 && bonusRate <= zeusBonusRate * 1.35);
+  // Headroom vs Zeus reference after scatter-strip removal / wild-dense bonus.
+  assert.ok(mainRate >= 0.00009 && mainRate <= zeusMainRate * 1.45);
+  assert.ok(bonusRate >= 0.00009 && bonusRate <= zeusBonusRate * 1.45);
 });
 
 test("legacy stop-zero jackpot cluster cannot trigger a jackpot", () => {

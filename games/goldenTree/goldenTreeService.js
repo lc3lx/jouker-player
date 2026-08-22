@@ -120,8 +120,8 @@ async function executeSpin(userId, betAmountInput) {
     throw new ApiError("No bonus spins remaining", 400);
   }
 
-  // Purchased and triggered free spins use the richer bonus strips. A tree
-  // may land and expand, but no trees are injected or guaranteed per spin.
+  // Purchased free spins use denser bonus strips — trees land often and
+  // expand, but are never forced onto every spin.
   const { matrix, wildMultipliers } = generateSpin({
     bonusMode: isBonusSpin,
   });
