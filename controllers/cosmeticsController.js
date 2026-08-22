@@ -72,6 +72,18 @@ exports.postBuy = async (req, res, next) => {
   }
 };
 
+exports.postEquip = async (req, res, next) => {
+  try {
+    const cosmeticId = req.body?.cosmeticId;
+    await equipCosmetic(req.user._id, cosmeticId);
+    await refreshCosmeticsForUserOnTables(req.user._id);
+    const data = await getMe(req.user._id);
+    res.status(200).json({ status: "success", data });
+  } catch (e) {
+    next(e);
+  }
+};
+
 exports.postUnequip = async (req, res, next) => {
   try {
     const slot = req.body?.slot || "avatar_frame";

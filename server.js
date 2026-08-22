@@ -83,10 +83,22 @@ app.post(
 // Middlewares
 app.use(express.json({ limit: "20kb" }));
 const ALLOWED_UPLOAD_EXTS = new Set([
-  ".jpg", ".jpeg", ".png", ".gif", ".webp", ".avif",
-  ".mp4", ".webm", ".mov", ".avi",
-  ".mp3", ".ogg", ".wav", ".aac",
-  ".pdf", ".svg",
+  ".jpg",
+  ".jpeg",
+  ".png",
+  ".gif",
+  ".webp",
+  ".avif",
+  ".mp4",
+  ".webm",
+  ".mov",
+  ".avi",
+  ".mp3",
+  ".ogg",
+  ".wav",
+  ".aac",
+  ".pdf",
+  ".svg",
 ]);
 const uploadExtGuard = (req, res, next) => {
   const ext = path.extname(req.path).toLowerCase();
@@ -96,7 +108,10 @@ const uploadExtGuard = (req, res, next) => {
 app.use(
   "/uploads",
   uploadExtGuard,
-  express.static(path.join(__dirname, "uploads"), { dotfiles: "deny", index: false }),
+  express.static(path.join(__dirname, "uploads"), {
+    dotfiles: "deny",
+    index: false,
+  }),
 );
 // Legacy avatar path used by older clients: /users/<file> → uploads/users/<file>
 app.use(
@@ -130,26 +145,44 @@ if (process.env.NODE_ENV === "development") {
   console.log(`mode: ${process.env.NODE_ENV}`);
 }
 
-const API_RATE_LIMIT_WINDOW_SEC = Math.max(10, Number(process.env.API_RATE_LIMIT_WINDOW_SEC || 900));
-const API_RATE_LIMIT_MAX = Math.max(60, Number(process.env.API_RATE_LIMIT_MAX || 600));
+const API_RATE_LIMIT_WINDOW_SEC = Math.max(
+  10,
+  Number(process.env.API_RATE_LIMIT_WINDOW_SEC || 900),
+);
+const API_RATE_LIMIT_MAX = Math.max(
+  60,
+  Number(process.env.API_RATE_LIMIT_MAX || 600),
+);
 const apiLimiter = async (req, res, next) => {
   const redis = realtimeRedis?.commandClient;
   if (!redis) {
-    if (isProduction()) return res.status(503).json({ status: "error", message: "Rate limiter unavailable" });
+    if (isProduction())
+      return res
+        .status(503)
+        .json({ status: "error", message: "Rate limiter unavailable" });
     return next();
   }
   try {
-    const bucket = `api:rate:${req.ip || req.socket?.remoteAddress || "unknown"}:${Math.floor(Date.now() / (API_RATE_LIMIT_WINDOW_SEC * 1000))}`;
+    const bucket = `api:rate:${
+      req.ip || req.socket?.remoteAddress || "unknown"
+    }:${Math.floor(Date.now() / (API_RATE_LIMIT_WINDOW_SEC * 1000))}`;
     const count = Number(await redis.incr(bucket));
     if (count === 1) await redis.expire(bucket, API_RATE_LIMIT_WINDOW_SEC + 5);
     if (count > API_RATE_LIMIT_MAX) {
       res.set("Retry-After", String(API_RATE_LIMIT_WINDOW_SEC));
-      return res.status(429).json({ status: "error", message: "Too many requests" });
+      return res
+        .status(429)
+        .json({ status: "error", message: "Too many requests" });
     }
     return next();
   } catch (err) {
-    logger.error("api_rate_limit_failed", { reason: err?.message || "unknown" });
-    if (isProduction()) return res.status(503).json({ status: "error", message: "Rate limiter unavailable" });
+    logger.error("api_rate_limit_failed", {
+      reason: err?.message || "unknown",
+    });
+    if (isProduction())
+      return res
+        .status(503)
+        .json({ status: "error", message: "Rate limiter unavailable" });
     return next();
   }
 };
@@ -168,7 +201,9 @@ mountRoutes(app);
 app.get("/api/health", async (req, res) => {
   const mongoose = require("mongoose");
   const dbReady = mongoose.connection.readyState === 1;
-  const redisReady = !isProduction() || !!(realtimeRedis?.enabled && realtimeRedis.commandClient?.isReady);
+  const redisReady =
+    !isProduction() ||
+    !!(realtimeRedis?.enabled && realtimeRedis.commandClient?.isReady);
   let failedJobs = 0;
   let escalatedJobs = 0;
   if (dbReady) {
@@ -176,16 +211,23 @@ app.get("/api/health", async (req, res) => {
       const PokerPostSettlementJob = require("./models/pokerPostSettlementJobModel");
       [failedJobs, escalatedJobs] = await Promise.all([
         PokerPostSettlementJob.countDocuments({ status: "failed" }),
-        PokerPostSettlementJob.countDocuments({ status: "pending", attempts: { $gte: 20 } }),
+        PokerPostSettlementJob.countDocuments({
+          status: "pending",
+          attempts: { $gte: 20 },
+        }),
       ]);
       metrics.pokerPostSettlementJobs.set({ status: "failed" }, failedJobs);
-      metrics.pokerPostSettlementJobs.set({ status: "escalated" }, escalatedJobs);
+      metrics.pokerPostSettlementJobs.set(
+        { status: "escalated" },
+        escalatedJobs,
+      );
     } catch (_) {
       failedJobs = -1;
       escalatedJobs = -1;
     }
   }
-  const ready = dbReady && redisReady && failedJobs === 0 && escalatedJobs === 0;
+  const ready =
+    dbReady && redisReady && failedJobs === 0 && escalatedJobs === 0;
   res.status(ready ? 200 : 503).json({
     status: ready ? "ok" : "degraded",
     checks: {
@@ -199,7 +241,10 @@ app.get("/api/health", async (req, res) => {
 
 app.get("/metrics", async (req, res) => {
   const metricsToken = process.env.METRICS_TOKEN;
-  if (isProduction() && (!metricsToken || req.get("authorization") !== `Bearer ${metricsToken}`)) {
+  if (
+    isProduction() &&
+    (!metricsToken || req.get("authorization") !== `Bearer ${metricsToken}`)
+  ) {
     return res.status(403).json({ status: "forbidden" });
   }
   try {
@@ -227,7 +272,9 @@ app.get("/", (req, res) => {
 });
 
 app.get("/invite/:code", async (req, res) => {
-  const code = String(req.params.code || "").trim().toUpperCase();
+  const code = String(req.params.code || "")
+    .trim()
+    .toUpperCase();
   const resolved = await referralInviteService.resolveInviteCode(code);
   const deepLink = `${SCHEME}://invite/${code}`;
   const playStore = process.env.ANDROID_STORE_URL || "";
@@ -264,11 +311,23 @@ app.get("/invite/:code", async (req, res) => {
 <body>
   <div class="card">
     <h1>${valid ? `دعوة من ${referrerName}` : "كود دعوة"}</h1>
-    ${valid ? "<p>انضم الآن واحصل على مكافآت الترحيب</p>" : '<p class="err">كود غير صالح</p>'}
+    ${
+      valid
+        ? "<p>انضم الآن واحصل على مكافآت الترحيب</p>"
+        : '<p class="err">كود غير صالح</p>'
+    }
     <div class="code">${code}</div>
     <a class="btn primary" href="${deepLink}">فتح التطبيق</a>
-    ${playStore ? `<a class="btn secondary" href="${playStore}">تحميل من Google Play</a>` : ""}
-    ${appStore ? `<a class="btn secondary" href="${appStore}">تحميل من App Store</a>` : ""}
+    ${
+      playStore
+        ? `<a class="btn secondary" href="${playStore}">تحميل من Google Play</a>`
+        : ""
+    }
+    ${
+      appStore
+        ? `<a class="btn secondary" href="${appStore}">تحميل من App Store</a>`
+        : ""
+    }
   </div>
 </body>
 </html>`);
@@ -313,7 +372,9 @@ const io = new Server(httpServer, {
 });
 
 const { setMainIo } = require("./utils/lobbyRealtime");
-const { setMainIo: setIslandJackpotIo } = require("./utils/islandJackpotRealtime");
+const {
+  setMainIo: setIslandJackpotIo,
+} = require("./utils/islandJackpotRealtime");
 setMainIo(io);
 setIslandJackpotIo(io);
 
@@ -322,15 +383,25 @@ let realtimeRedis = null;
 
 async function startServer() {
   await dbConnection();
-  const { ensurePokerProductionIndexes } = require("./services/pokerProductionSchemaService");
+  const {
+    ensurePokerProductionIndexes,
+  } = require("./services/pokerProductionSchemaService");
   await ensurePokerProductionIndexes();
-  const { resumePendingPermanentLeaves } = require("./services/pokerVacateService");
+  const {
+    resumePendingPermanentLeaves,
+  } = require("./services/pokerVacateService");
   await resumePendingPermanentLeaves();
-  const { resumePokerPostSettlementJobs } = require("./services/pokerPostSettlementJobService");
+  const {
+    resumePokerPostSettlementJobs,
+  } = require("./services/pokerPostSettlementJobService");
   await resumePokerPostSettlementJobs();
-  const { registerDomainListeners } = require("./domain/listeners/registerDomainListeners");
+  const {
+    registerDomainListeners,
+  } = require("./domain/listeners/registerDomainListeners");
   registerDomainListeners();
-  const { assertTransactionsAvailableOrThrow } = require("./services/walletLedgerService");
+  const {
+    assertTransactionsAvailableOrThrow,
+  } = require("./services/walletLedgerService");
   // C-4: fail fast if transactions are required (production) but unavailable.
   await assertTransactionsAvailableOrThrow();
   await runProductionChecks({ skipSmoke: true });
@@ -351,7 +422,9 @@ async function startServer() {
     socketPresenceService.setRedisClient(realtimeRedis.commandClient);
     systemHealthMonitorService.setRedisClient(realtimeRedis.commandClient);
     userJoinLock.setRedisClient(realtimeRedis.commandClient);
-    const { migrateLegacyPokerQueues } = require("./services/pokerWaitingQueueService");
+    const {
+      migrateLegacyPokerQueues,
+    } = require("./services/pokerWaitingQueueService");
     const queueMigration = await migrateLegacyPokerQueues();
     if (queueMigration.migrated || queueMigration.remaining) {
       logger.info("poker_legacy_queue_migration", queueMigration);
@@ -409,10 +482,14 @@ async function startServer() {
   // repairs/refunds anything, so there's no reason to run it while disabled.
   // The engine code itself is left intact for a future proper fix.
 
-  const { startEngine: startClanTournamentEngine } = require("./services/clanTournamentEngineService");
+  const {
+    startEngine: startClanTournamentEngine,
+  } = require("./services/clanTournamentEngineService");
   startClanTournamentEngine();
 
-  const { startEngine: startArenaTournamentEngine } = require("./services/arenaTournamentEngineService");
+  const {
+    startEngine: startArenaTournamentEngine,
+  } = require("./services/arenaTournamentEngineService");
   startArenaTournamentEngine();
 
   // Production monitoring + self-healing sweep — starts after every engine
@@ -451,27 +528,30 @@ async function startServer() {
     // #region agent log
     try {
       const { isAgentDebugEnabled } = require("./utils/agentDebugEnabled");
-      fetch("http://127.0.0.1:7937/ingest/b9a00eef-7143-4edb-b1d5-038072464bf7", {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          "X-Debug-Session-Id": "4de1a0",
-        },
-        body: JSON.stringify({
-          sessionId: "4de1a0",
-          hypothesisId: "A",
-          location: "server.js:listen",
-          message: "prod hardening boot gates",
-          data: {
-            agentDebugEnabled: isAgentDebugEnabled(),
-            nodeEnv: process.env.NODE_ENV || null,
-            appMode: process.env.APP_MODE || "beta",
-            sideGamesPlayDisabled: true,
+      fetch(
+        "http://127.0.0.1:7937/ingest/b9a00eef-7143-4edb-b1d5-038072464bf7",
+        {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            "X-Debug-Session-Id": "4de1a0",
           },
-          timestamp: Date.now(),
-          runId: "prod-hardening",
-        }),
-      }).catch(() => {});
+          body: JSON.stringify({
+            sessionId: "4de1a0",
+            hypothesisId: "A",
+            location: "server.js:listen",
+            message: "prod hardening boot gates",
+            data: {
+              agentDebugEnabled: isAgentDebugEnabled(),
+              nodeEnv: process.env.NODE_ENV || null,
+              appMode: process.env.APP_MODE || "beta",
+              sideGamesPlayDisabled: true,
+            },
+            timestamp: Date.now(),
+            runId: "prod-hardening",
+          }),
+        },
+      ).catch(() => {});
     } catch (_) {}
     // #endregion
   });
@@ -518,7 +598,9 @@ async function gracefulShutdown(signal) {
     const { shutdownTableGame } = require("./sockets/tableGame");
     await shutdownTableGame();
   } catch (e) {
-    logger.warn("graceful_shutdown_tablegame_failed", { reason: e?.message || "unknown" });
+    logger.warn("graceful_shutdown_tablegame_failed", {
+      reason: e?.message || "unknown",
+    });
   }
   try {
     if (realtimeRedis && realtimeRedis.close) await realtimeRedis.close();

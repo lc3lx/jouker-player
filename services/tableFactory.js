@@ -269,21 +269,58 @@ async function destroyOrArchiveTable(tableId, { reason = "idle", session } = {})
  * Safe to call from scheduler ticks — covers tables created before the lock
  * and any accidental default=true settings. Vacate-replace still works because
  * it calls createBotSeat / convertHumanToBot directly (not addBotsForMissingSeats).
+ *
+ * IMPORTANT: never use `{ field: { $ne: null } }` alone — in Mongo that also
+ * matches documents where `field` is missing, which disabled bots on almost
+ * every cash table after the 2026-08-22 hardening commit.
  */
 async function lockTournamentBotsOnOpenTables() {
-  const filter = {
+  const tournamentFilter = {
     $or: [
       { tableKind: "tournament" },
-      { clanTournamentMatch: { $ne: null } },
-      { arenaTournament: { $ne: null } },
+      {
+        clanTournamentMatch: { $exists: true, $ne: null },
+      },
+      {
+        arenaTournament: { $exists: true, $ne: null },
+      },
     ],
     status: { $nin: ["archived", "closed"] },
     "settings.botsEnabled": { $ne: false },
   };
-  const result = await Table.updateMany(filter, {
+  const locked = await Table.updateMany(tournamentFilter, {
     $set: { "settings.botsEnabled": false },
   });
-  return { matched: result.matchedCount, modified: result.modifiedCount };
+
+  // Repair collateral damage from the bad `$ne: null` filter (cash tables).
+  const repaired = await Table.updateMany(
+    {
+      status: { $nin: ["archived", "closed"] },
+      "settings.botsEnabled": false,
+      tableKind: { $nin: ["tournament"] },
+      $and: [
+        {
+          $or: [
+            { clanTournamentMatch: { $exists: false } },
+            { clanTournamentMatch: null },
+          ],
+        },
+        {
+          $or: [
+            { arenaTournament: { $exists: false } },
+            { arenaTournament: null },
+          ],
+        },
+      ],
+    },
+    { $set: { "settings.botsEnabled": true } }
+  );
+
+  return {
+    matched: locked.matchedCount,
+    modified: locked.modifiedCount,
+    repaired: repaired.modifiedCount,
+  };
 }
 
 module.exports = {
