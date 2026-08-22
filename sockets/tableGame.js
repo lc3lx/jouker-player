@@ -4,8 +4,10 @@ const crypto = require("crypto");
 const fs = require("fs");
 const path = require("path");
 const Table = require("../models/tableModel");
+const { isAgentDebugEnabled } = require("../utils/agentDebugEnabled");
 // #region agent log
 function _agentDbg(hypothesisId, location, message, data = {}) {
+  if (!isAgentDebugEnabled()) return;
   try {
     fs.appendFileSync(
       path.join(__dirname, "..", "..", "debug-b181d7.log"),
@@ -1618,6 +1620,14 @@ class PokerTable {
     this.minimumBet = deriveMinimumBet(this.buyIn, table.minimumBet ?? this.minimumBet);
     this.rakePolicy = resolveRakePolicy(table);
     this.botsEnabled = table.settings?.botsEnabled !== false;
+    // Tournament tables: never lobby-fill empty seats with bots (vacate-replace still OK).
+    if (
+      table.tableKind === "tournament" ||
+      table.clanTournamentMatch ||
+      table.arenaTournament
+    ) {
+      this.botsEnabled = false;
+    }
     this.botFillTarget = clampInt(this.botFillTarget || 2, 2, Math.max(2, this.capacity));
 
     const isHandRunning = this.running && this.round && String(this.round) !== "idle";
@@ -1773,6 +1783,13 @@ class PokerTable {
     });
     if (!table) return false;
     this.botsEnabled = table.settings?.botsEnabled !== false;
+    if (
+      table.tableKind === "tournament" ||
+      table.clanTournamentMatch ||
+      table.arenaTournament
+    ) {
+      this.botsEnabled = false;
+    }
 
     if (handActive) {
       const mongoIds = new Set(table.seats.map((s) => String(s.user?._id || s.user)));

@@ -310,6 +310,8 @@ function countActiveVacating(table) {
 function _agentDbg(hypothesisId, location, message, data = {}) {
   // #region agent log
   try {
+    const { isAgentDebugEnabled } = require("../utils/agentDebugEnabled");
+    if (!isAgentDebugEnabled()) return;
     const fs = require("fs");
     const path = require("path");
     fs.appendFileSync(

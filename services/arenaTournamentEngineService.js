@@ -735,6 +735,11 @@ async function tick() {
   } catch (e) {
     logger.warn("arena_schedule_failed", { reason: e?.message });
   }
+  try {
+    await tableFactory.lockTournamentBotsOnOpenTables();
+  } catch (e) {
+    logger.warn("arena_tournament_bots_lock_failed", { reason: e?.message });
+  }
 
   const toStart = await ArenaTournament.find({ lifecycle: "registering", startAt: { $lte: now } })
     .select("_id")

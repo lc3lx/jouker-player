@@ -1140,14 +1140,7 @@ function registerGameHandlers(nsp, jwtVerify) {
           return;
         }
 
-        if (!isFreeSpin) {
-          await wallet.addTransaction(
-            "debit",
-            stake,
-            `Dice / King Arth bet (${tableId})`
-          );
-        }
-
+        // Pure RNG first — money moves atomically after outcome is known.
         const outcome = DiceEngine.spin(bet, {
           doubleChance,
           serverSeed,
@@ -1174,13 +1167,73 @@ function registerGameHandlers(nsp, jwtVerify) {
           if (capResult.capReached) roundCapReached = true;
         }
 
-        if (payout > 0) {
-          await wallet.addTransaction(
-            "credit",
-            payout,
-            `King Earth win (${tableId}) ${outcome.winType}`
-          );
+        const {
+          withMongoTransaction,
+          ledgerWithdraw,
+          ledgerDeposit,
+        } = require("../../services/walletLedgerService");
+
+        try {
+          await withMongoTransaction(async (session) => {
+            if (!isFreeSpin) {
+              await ledgerWithdraw({
+                session,
+                userId,
+                amount: Math.round(stake),
+                ledgerType: "game_loss",
+                meta: { tableId, source: "king_arth_spin" },
+              });
+            }
+            if (payout > 0) {
+              await ledgerDeposit({
+                session,
+                userId,
+                amount: Math.round(payout),
+                ledgerType: "game_win",
+                meta: {
+                  tableId,
+                  source: "king_arth_spin",
+                  winType: outcome.winType,
+                },
+              });
+            }
+          });
+        } catch (err) {
+          if (err && err.message === "INSUFFICIENT_BALANCE") {
+            await kingArthRoundState.releaseLock(userId, tableId);
+            socket.emit("dice_result", { ok: false, code: "insufficient_balance" });
+            return;
+          }
+          throw err;
         }
+
+        wallet = await Wallet.findOne({ user: userId });
+
+        // #region agent log
+        try {
+          fetch("http://127.0.0.1:7937/ingest/b9a00eef-7143-4edb-b1d5-038072464bf7", {
+            method: "POST",
+            headers: {
+              "Content-Type": "application/json",
+              "X-Debug-Session-Id": "4de1a0",
+            },
+            body: JSON.stringify({
+              sessionId: "4de1a0",
+              hypothesisId: "D",
+              location: "game.handlers.js:dice_spin",
+              message: "king_arth settled via ledger txn",
+              data: {
+                isFreeSpin,
+                stake,
+                payout,
+                balance: wallet?.balance,
+              },
+              timestamp: Date.now(),
+              runId: "prod-hardening",
+            }),
+          }).catch(() => {});
+        } catch (_) {}
+        // #endregion
 
         await kingArthSeedRotation.recordSpinCompleted(userId);
         await recordSpin(stake, payout);
@@ -1397,11 +1450,27 @@ function registerGameHandlers(nsp, jwtVerify) {
           return;
         }
 
-        await wallet.addTransaction(
-          "debit",
-          cost,
-          `King Earth buy free spins (${tableId})`
-        );
+        const {
+          withMongoTransaction,
+          ledgerWithdraw,
+        } = require("../../services/walletLedgerService");
+        try {
+          await withMongoTransaction(async (session) => {
+            await ledgerWithdraw({
+              session,
+              userId,
+              amount: Math.round(cost),
+              ledgerType: "game_loss",
+              meta: { tableId, source: "king_arth_buy_bonus", bet },
+            });
+          });
+        } catch (err) {
+          if (err && err.message === "INSUFFICIENT_BALANCE") {
+            socket.emit("dice_buy_result", { ok: false, code: "insufficient_balance" });
+            return;
+          }
+          throw err;
+        }
 
         await kingArthRoundState.startFreeSpinSession(userId, tableId, {
           lockedBaseBet: bet,
@@ -1644,13 +1713,31 @@ function registerGameHandlers(nsp, jwtVerify) {
       }
     });
 
-    // fill_with_bots — client requests AI fill after waiting (no humans available)
+    // fill_with_bots — client requests AI fill after waiting (no humans available).
+    // Tournament tables must never lobby-fill; bots only via leave/vacate conversion.
     socket.on("fill_with_bots", async (payload) => {
       const { roomId } = payload || {};
       const t41 = roomManager.getTarneeb41TableIdForUser(userId);
       if (!t41 || (roomId && String(t41) !== String(roomId))) {
         emitInvalidMove(socket, "not_in_tarneeb41_room" );
         return;
+      }
+      try {
+        const Table = require("../../models/tableModel");
+        const tableMeta = await Table.findById(t41)
+          .select("tableKind clanTournamentMatch arenaTournament settings")
+          .lean();
+        const isTournament =
+          tableMeta?.tableKind === "tournament" ||
+          !!tableMeta?.clanTournamentMatch ||
+          !!tableMeta?.arenaTournament;
+        if (isTournament || tableMeta?.settings?.botsEnabled === false) {
+          emitInvalidMove(socket, "bots_disabled_on_tournament");
+          broadcastTarneeb41TableState(nsp, t41);
+          return;
+        }
+      } catch (_) {
+        /* fall through to normal fill if meta lookup fails */
       }
       const game = roomManager.getTarneeb41GameForTable(t41);
       if (!game) {

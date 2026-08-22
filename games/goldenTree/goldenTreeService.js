@@ -134,30 +134,33 @@ async function executeSpin(userId, betAmountInput) {
 
   // #region agent log
   try {
-    const fs = require("fs");
-    fs.appendFileSync(
-      "D:/work/play/debug-4de1a0.log",
-      `${JSON.stringify({
-        sessionId: "4de1a0",
-        hypothesisId: "A",
-        location: "goldenTreeService.js:executeSpin",
-        message: "server win calc",
-        data: {
-          isBonusSpin,
-          totalWin: payable.totalWin,
-          lineWins: (payable.lineWins || []).map((w) => ({
-            symbol: w.symbol,
-            count: w.count,
-            amount: w.amount,
-            positions: w.positions,
-          })),
-          matrix,
-          wildMultipliers,
-        },
-        timestamp: Date.now(),
-        runId: "pre-fix",
-      })}\n`,
-    );
+    const { isAgentDebugEnabled } = require("../../utils/agentDebugEnabled");
+    if (isAgentDebugEnabled()) {
+      const fs = require("fs");
+      fs.appendFileSync(
+        "D:/work/play/debug-4de1a0.log",
+        `${JSON.stringify({
+          sessionId: "4de1a0",
+          hypothesisId: "A",
+          location: "goldenTreeService.js:executeSpin",
+          message: "server win calc",
+          data: {
+            isBonusSpin,
+            totalWin: payable.totalWin,
+            lineWins: (payable.lineWins || []).map((w) => ({
+              symbol: w.symbol,
+              count: w.count,
+              amount: w.amount,
+              positions: w.positions,
+            })),
+            matrix,
+            wildMultipliers,
+          },
+          timestamp: Date.now(),
+          runId: "pre-fix",
+        })}\n`,
+      );
+    }
   } catch (_) {}
   // #endregion
 

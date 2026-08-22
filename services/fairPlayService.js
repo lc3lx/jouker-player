@@ -9,9 +9,11 @@ const PokerHandCommit = require("../models/pokerHandCommitModel");
 const { verifyRecordedPokerHand } = require("../utils/poker/fairnessVerifier");
 const { newDeck, shuffleDeterministic } = require("../utils/poker/deck");
 const { buildDeckCommitment } = require("../utils/poker/fairnessCommitment");
+const { isAgentDebugEnabled } = require("../utils/agentDebugEnabled");
 
 // #region agent log
 function _agentDbg(hypothesisId, location, message, data = {}) {
+  if (!isAgentDebugEnabled()) return;
   try {
     fs.appendFileSync(
       path.join(__dirname, "..", "..", "debug-b181d7.log"),

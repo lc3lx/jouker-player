@@ -448,6 +448,32 @@ async function startServer() {
   const PORT = process.env.PORT || 1099;
   server = httpServer.listen(PORT, () => {
     logger.info("server_started", { port: PORT });
+    // #region agent log
+    try {
+      const { isAgentDebugEnabled } = require("./utils/agentDebugEnabled");
+      fetch("http://127.0.0.1:7937/ingest/b9a00eef-7143-4edb-b1d5-038072464bf7", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "X-Debug-Session-Id": "4de1a0",
+        },
+        body: JSON.stringify({
+          sessionId: "4de1a0",
+          hypothesisId: "A",
+          location: "server.js:listen",
+          message: "prod hardening boot gates",
+          data: {
+            agentDebugEnabled: isAgentDebugEnabled(),
+            nodeEnv: process.env.NODE_ENV || null,
+            appMode: process.env.APP_MODE || "beta",
+            sideGamesPlayDisabled: true,
+          },
+          timestamp: Date.now(),
+          runId: "prod-hardening",
+        }),
+      }).catch(() => {});
+    } catch (_) {}
+    // #endregion
   });
 }
 

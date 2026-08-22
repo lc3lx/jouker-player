@@ -93,15 +93,59 @@ exports.topupByAgent = asyncHandler(async (req, res, next) => {
   if (!agentWallet.hasSufficientBalance(amount)) return next(new ApiError("Insufficient balance", 400));
   const targetUser = await User.findById(targetUserId);
   if (!targetUser) return next(new ApiError("Target user not found", 404));
-  let targetWallet = await Wallet.findOne({ user: targetUser._id });
-  if (!targetWallet) targetWallet = await Wallet.create({ user: targetUser._id });
-  await agentWallet.addTransaction("debit", amount, description || `Agent topup to ${targetUser.email}`);
-  await targetWallet.addTransaction("credit", amount, description || `Topup by agent ${req.user.email || req.user._id}`);
-  const percent = profile.salesCommissionPercent != null ? profile.salesCommissionPercent : (await SystemSettings.getDefaults()).defaultSalesCommissionPercent;
+  const percent =
+    profile.salesCommissionPercent != null
+      ? profile.salesCommissionPercent
+      : (await SystemSettings.getDefaults()).defaultSalesCommissionPercent;
   const commission = Math.floor(amount * percent);
-  if (commission > 0) {
-    await agentWallet.addTransaction("credit", commission, "Agent topup commission");
+
+  const {
+    withMongoTransaction,
+    ledgerWithdraw,
+    ledgerDeposit,
+  } = require("./walletLedgerService");
+
+  try {
+    await withMongoTransaction(async (session) => {
+      await ledgerWithdraw({
+        session,
+        userId: req.user._id,
+        amount: Math.round(amount),
+        ledgerType: "agent_deposit_out",
+        meta: {
+          source: "agent_topup",
+          targetUserId: String(targetUser._id),
+          description: description || undefined,
+        },
+      });
+      await ledgerDeposit({
+        session,
+        userId: targetUser._id,
+        amount: Math.round(amount),
+        ledgerType: "agent_deposit_in",
+        meta: {
+          source: "agent_topup",
+          agentId: String(req.user._id),
+          description: description || undefined,
+        },
+      });
+      if (commission > 0) {
+        await ledgerDeposit({
+          session,
+          userId: req.user._id,
+          amount: Math.round(commission),
+          ledgerType: "admin_agent_credit",
+          meta: { source: "agent_topup_commission", targetUserId: String(targetUser._id) },
+        });
+      }
+    });
+  } catch (err) {
+    if (err && err.message === "INSUFFICIENT_BALANCE") {
+      return next(new ApiError("Insufficient balance", 400));
+    }
+    throw err;
   }
+
   profile.stats.totalTopups += 1;
   profile.stats.totalVolume += amount;
   profile.stats.totalCommission += commission;

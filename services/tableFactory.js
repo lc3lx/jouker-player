@@ -174,6 +174,14 @@ async function createTournamentTable({ gameType, matchId, capacity, session }) {
         status: gameType === "poker" ? "waiting" : "open",
         clanTournamentMatch: matchId,
         seats: [],
+        // Never lobby-fill with bots — only vacate/leave may convert a seat to a bot.
+        settings: {
+          allowSpectators: true,
+          botsEnabled: false,
+          minPlayers: gameType === "poker" ? 2 : 4,
+          maxPlayers: cap,
+          isLocked: false,
+        },
       },
     ],
     createOpts
@@ -256,6 +264,28 @@ async function destroyOrArchiveTable(tableId, { reason = "idle", session } = {})
   return archiveTableDocument(tid, { reason, session });
 }
 
+/**
+ * Force botsEnabled=false on every open tournament table.
+ * Safe to call from scheduler ticks — covers tables created before the lock
+ * and any accidental default=true settings. Vacate-replace still works because
+ * it calls createBotSeat / convertHumanToBot directly (not addBotsForMissingSeats).
+ */
+async function lockTournamentBotsOnOpenTables() {
+  const filter = {
+    $or: [
+      { tableKind: "tournament" },
+      { clanTournamentMatch: { $ne: null } },
+      { arenaTournament: { $ne: null } },
+    ],
+    status: { $nin: ["archived", "closed"] },
+    "settings.botsEnabled": { $ne: false },
+  };
+  const result = await Table.updateMany(filter, {
+    $set: { "settings.botsEnabled": false },
+  });
+  return { matched: result.matchedCount, modified: result.modifiedCount };
+}
+
 module.exports = {
   createStaticTable,
   createDynamicTable,
@@ -263,4 +293,5 @@ module.exports = {
   createTournamentTable,
   createArenaTournamentTable,
   destroyOrArchiveTable,
+  lockTournamentBotsOnOpenTables,
 };

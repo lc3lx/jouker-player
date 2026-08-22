@@ -14,9 +14,11 @@ const XP_PER_LEVEL = 2500;
 const WIN_TX_TYPES = ["win", "game_win", "island_jackpot_win"];
 const fs = require("fs");
 const path = require("path");
+const { isAgentDebugEnabled } = require("../utils/agentDebugEnabled");
 
 // #region agent log
 function agentTaskLog(hypothesisId, message, data) {
+  if (!isAgentDebugEnabled()) return;
   try {
     fs.appendFileSync(
       path.join("D:", "work", "play", "debug-9f6022.log"),

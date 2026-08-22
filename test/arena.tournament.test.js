@@ -282,3 +282,34 @@ test("insufficient coins cannot create or register", async () => {
   });
   await assert.rejects(() => engine.register(broke, t.id), (e) => e.statusCode === 402);
 });
+
+test("tournament tables never lobby-fill bots (arena + clan factories)", async () => {
+  const tableFactory = require("../services/tableFactory");
+  const Table = require("../models/tableModel");
+  const oid = new mongoose.Types.ObjectId();
+
+  const clanTable = await tableFactory.createTournamentTable({
+    gameType: "poker",
+    matchId: oid,
+    capacity: 2,
+  });
+  const arenaTable = await tableFactory.createArenaTournamentTable({
+    gameType: "poker",
+    tournamentId: oid,
+    capacity: 6,
+  });
+  assert.equal(clanTable.settings.botsEnabled, false);
+  assert.equal(arenaTable.settings.botsEnabled, false);
+
+  // Simulate a stale doc that still had botsEnabled=true — repair must lock it.
+  await Table.updateOne(
+    { _id: clanTable._id },
+    { $set: { "settings.botsEnabled": true } }
+  );
+  const repaired = await tableFactory.lockTournamentBotsOnOpenTables();
+  assert.ok(repaired.modified >= 1);
+  const after = await Table.findById(clanTable._id).lean();
+  assert.equal(after.settings.botsEnabled, false);
+
+  await Table.deleteMany({ _id: { $in: [clanTable._id, arenaTable._id] } });
+});

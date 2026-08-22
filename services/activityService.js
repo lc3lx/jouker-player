@@ -22,8 +22,11 @@ const FEED_CATEGORIES = {
 const WIN_TX_TYPES = ["win", "game_win", "island_jackpot_win"];
 const LOSS_TX_TYPES = ["game_loss", "bet", "game_buyin"];
 
+const { isAgentDebugEnabled } = require("../utils/agentDebugEnabled");
+
 // #region agent log
 function agentActLog(hypothesisId, message, data) {
+  if (!isAgentDebugEnabled()) return;
   try {
     fs.appendFileSync(
       path.join("D:", "work", "play", "debug-9f6022.log"),

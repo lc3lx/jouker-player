@@ -731,6 +731,11 @@ async function cancelTournament(actorId, tournamentId, reason = "Cancelled", opt
 // ─── scheduler tick ─────────────────────────────────────────────────────────
 async function tick() {
   const now = new Date();
+  try {
+    await tableFactory.lockTournamentBotsOnOpenTables();
+  } catch (e) {
+    logger.warn("clan_tournament_bots_lock_failed", { reason: e?.message });
+  }
   const toStart = await ClanTournament.find({ lifecycle: "registering", startAt: { $lte: now } })
     .select("_id")
     .limit(20)
