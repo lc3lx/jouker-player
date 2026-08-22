@@ -572,6 +572,26 @@ async function equipCosmetic(userId, cosmeticIdRaw) {
   return getMe(userId);
 }
 
+async function unequipCosmetic(userId, slotRaw) {
+  const slot = String(slotRaw || "").trim();
+  if (!slot) throw new ApiError("Invalid slot", 400);
+
+  const row = await getOrCreateUserRow(userId, null);
+  row.equipped = row.equipped || {};
+  if (!(row.equippedBySlot instanceof Map)) row.equippedBySlot = new Map();
+
+  row.equippedBySlot.delete(slot);
+  const legacyField = LEGACY_SLOT_FIELD[slot];
+  if (legacyField) {
+    row.equipped[legacyField] = undefined;
+    row.markModified("equipped");
+  }
+
+  await row.save();
+  invalidateEquippedCache(userId);
+  return getMe(userId);
+}
+
 /**
  * Equip newly purchased item(s): single cosmetic, or first table_theme + first card_skin from a bundle.
  */
@@ -639,6 +659,7 @@ module.exports = {
   getProfileCosmetics,
   buyCosmetic,
   equipCosmetic,
+  unequipCosmetic,
   autoEquipAfterBuy,
   resolveEquippedPayloadForUsers,
   mergeCosmeticsIntoPublicState,

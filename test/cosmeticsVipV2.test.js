@@ -111,10 +111,18 @@ test("equip: new slot kind works with no code change + legacy mirror for old slo
   assert.equal(me1.equipped.avatarFrame, "af1", "legacy mirror populated");
   assert.equal(me1.equipped.skin, "af1", "skin alias mirrors avatar_frame");
 
-  // Legacy DB mirror field written for backward-compatible reads.
+  const rowOn = await UserCosmetics.findOne({ user: userId }).lean();
+  assert.ok(rowOn.equipped.avatarFrame, "legacy equipped.avatarFrame set");
+
+  const meOff = await cosmeticsService.unequipCosmetic(userId, "avatar_frame");
+  assert.equal(meOff.equipped.bySlot.avatar_frame, undefined);
+  assert.equal(meOff.equipped.avatarFrame, null);
+  assert.equal(meOff.equipped.skin, null);
+  assert.equal(meOff.equipped.bySlot.chat_badge, "cb1", "other slots stay equipped");
+
   const row = await UserCosmetics.findOne({ user: userId }).lean();
-  assert.ok(row.equipped.avatarFrame, "legacy equipped.avatarFrame set");
   assert.equal(row.equippedBySlot.chat_badge?.toString(), String(badge._id));
+  assert.ok(!row.equipped.avatarFrame, "legacy avatarFrame cleared on unequip");
 });
 
 test("resolveEquippedPayloadForUsers: bulk read includes bySlot + legacy keys", async () => {

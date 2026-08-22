@@ -13,5 +13,6 @@ router.get("/recommended", authService.allowedTo("user"), cosmeticsController.ge
 router.get("/me", authService.allowedTo("user"), cosmeticsController.getMe);
 router.post("/buy", authService.allowedTo("user"), cosmeticsController.postBuy);
 router.post("/equip", authService.allowedTo("user"), cosmeticsController.postEquip);
+router.post("/unequip", authService.allowedTo("user"), cosmeticsController.postUnequip);
 
 module.exports = router;
