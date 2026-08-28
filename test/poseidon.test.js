@@ -13,6 +13,7 @@ const {
   FREE_SPINS_NATURAL,
   FREE_SPINS_BOUGHT,
   BUY_BONUS_COST,
+  SUPER_BUY_BONUS_COST,
   MAX_WIN_MULTIPLIER,
   MULTIPLIER_VALUES,
   payoutFor,
@@ -134,6 +135,44 @@ test("bonus plaques are richer than base; stacking suppression keeps mid+ rare",
     suppressedHigh / draws < 0.03,
     `stacking suppression should rarely land mid+, got ${suppressedHigh / draws}`,
   );
+});
+
+test("super buy-bonus plaques are always x20+ even when stacking suppresses", () => {
+  const rng = mulberry32(7);
+  const draws = 40000;
+  for (let i = 0; i < draws; i += 1) {
+    const open = pickMultiplierValue(rng, { bonus: true, superBonus: true });
+    const stacked = pickMultiplierValue(rng, {
+      bonus: true,
+      superBonus: true,
+      bigAlready: true,
+    });
+    assert.ok(open >= 20, `super open plaque ${open}`);
+    assert.ok(stacked >= 20, `super stacked plaque ${stacked}`);
+  }
+
+  for (let seed = 1; seed <= 250; seed += 1) {
+    const spin = resolveSpin({
+      bonusMode: true,
+      superBonus: true,
+      rng: mulberry32(seed),
+    });
+    const scan = (matrix) => {
+      for (const col of matrix) {
+        for (const cell of col) {
+          if (!isMultiplier(cell)) continue;
+          const value = Number(String(cell).slice(1));
+          assert.ok(value >= 20, `super spin plaque ${cell}`);
+        }
+      }
+    };
+    scan(spin.initialMatrix);
+    scan(spin.finalMatrix);
+    for (const step of spin.steps) {
+      scan(step.matrixAfter);
+      for (const col of step.refills) scan([col]);
+    }
+  }
 });
 
 // --- win calculator ---------------------------------------------------------
@@ -289,6 +328,30 @@ test("buy bonus charges the fixed cost and opens a 10-spin session — no trigge
     () => poseidonService.executeBuyBonus("user-4", bet),
     (err) => err.statusCode === 409,
   );
+});
+
+test("super buy bonus flags the session and only deals x20+ plaques", async () => {
+  wallet.seedStubBalance("user-super", 100000000);
+  const bet = 10000;
+  const res = await poseidonService.executeBuyBonus("user-super", bet, {
+    superBonus: true,
+  });
+
+  assert.equal(res.superBonus, true);
+  assert.equal(res.cost, bet * SUPER_BUY_BONUS_COST);
+  assert.equal(roundManager.getBonusSession("user-super").superBonus, true);
+
+  while (roundManager.hasActiveBonusSession("user-super")) {
+    const spin = await poseidonService.executeSpin("user-super", bet);
+    for (const matrix of [spin.initialMatrix, spin.finalMatrix]) {
+      for (const col of matrix) {
+        for (const cell of col) {
+          if (!isMultiplier(cell)) continue;
+          assert.ok(Number(String(cell).slice(1)) >= 20, `super plaque ${cell}`);
+        }
+      }
+    }
+  }
 });
 
 test("getActiveSession restores bonus after memory cache drop (reconnect)", async () => {

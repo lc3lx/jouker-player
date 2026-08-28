@@ -82,6 +82,7 @@ function sessionSnapshot(session) {
     betAmount: session.betAmount,
     freeSpinsRemaining: session.freeSpinsRemaining,
     totalWon: session.totalWon,
+    superBonus: !!session.superBonus,
     createdAt: session.createdAt,
   };
 }
@@ -99,6 +100,7 @@ async function persistSession(session) {
         betAmount: session.betAmount,
         freeSpinsRemaining: session.freeSpinsRemaining,
         totalWon: session.totalWon,
+        superBonus: !!session.superBonus,
         createdAt: session.createdAt,
         updatedAt: now,
       },
@@ -142,6 +144,7 @@ async function ensureLoaded(userId) {
       betAmount: roundMoney(doc.betAmount),
       freeSpinsRemaining: Number(doc.freeSpinsRemaining) || 0,
       totalWon: roundMoney(doc.totalWon || 0),
+      superBonus: !!doc.superBonus,
       createdAt: doc.createdAt || Date.now(),
     };
     if (session.freeSpinsRemaining <= 0) return null;
@@ -153,13 +156,18 @@ async function ensureLoaded(userId) {
   }
 }
 
-function createBonusSession(userId, { betAmount, freeSpins = FREE_SPINS_NATURAL }) {
+function createBonusSession(userId, {
+  betAmount,
+  freeSpins = FREE_SPINS_NATURAL,
+  superBonus = false,
+}) {
   const session = {
     sessionId: uuidv4(),
     userId: String(userId),
     betAmount: roundMoney(betAmount),
     freeSpinsRemaining: freeSpins,
     totalWon: 0,
+    superBonus: !!superBonus,
     createdAt: Date.now(),
   };
   bonusSessions.set(String(userId), session);

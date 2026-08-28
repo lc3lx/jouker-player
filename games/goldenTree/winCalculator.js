@@ -117,9 +117,47 @@ function cellContinues(sym, baseSymbol) {
   return { ok: false, base: baseSymbol };
 }
 
+function pathKey(symbol, positions) {
+  return `${symbol}:${positions.map((p) => `${p.col},${p.row}`).join(">")}`;
+}
+
+function isPrefixPath(shortPos, longPos) {
+  if (shortPos.length >= longPos.length) return false;
+  for (let i = 0; i < shortPos.length; i += 1) {
+    if (
+      shortPos[i].col !== longPos[i].col ||
+      shortPos[i].row !== longPos[i].row
+    ) {
+      return false;
+    }
+  }
+  return true;
+}
+
+/** Drop 3-in-a-row prefixes of a longer 4/5 run so a 5-oak is not also a 3+4. */
+function keepMaximalPaths(found) {
+  const seen = new Set();
+  const unique = [];
+  for (const hit of found) {
+    const key = pathKey(hit.symbol, hit.positions);
+    if (seen.has(key)) continue;
+    seen.add(key);
+    unique.push(hit);
+  }
+  return unique.filter(
+    (a) =>
+      !unique.some(
+        (b) =>
+          a !== b &&
+          a.symbol === b.symbol &&
+          isPrefixPath(a.positions, b.positions),
+      ),
+  );
+}
+
 /**
  * Collect L→R adjacent paths (incl. corner touch) starting on reel 0.
- * One candidate per discovered path; caller keeps the best per symbol.
+ * Every geometrically distinct maximal path is a separate win.
  */
 function collectContiguousWins(evalMatrix) {
   const found = [];
@@ -196,7 +234,8 @@ function normalizeLandscapeMatrix(matrix) {
 
 /**
  * Adjacent-path wins (≥3 from reel 0, corner/edge touch OK) + scatters.
- * One best win kept per symbol. Backend is sole payout authority.
+ * Every maximal L→R path pays (middle row, 45° diagonal, zig-zag, …).
+ * Backend is sole payout authority.
  */
 function calculateWins(matrix, wildMultipliers, betAmount, options = {}) {
   const bonusMode = options.bonusMode === true;
@@ -211,8 +250,8 @@ function calculateWins(matrix, wildMultipliers, betAmount, options = {}) {
     evalMatrix = landed.map((col) => [...col]);
   }
 
-  const bestBySymbol = new Map();
-  const candidates = collectContiguousWins(evalMatrix);
+  const candidates = keepMaximalPaths(collectContiguousWins(evalMatrix));
+  const payable = [];
 
   for (let i = 0; i < candidates.length; i += 1) {
     const { symbol, count, positions } = candidates[i];
@@ -224,28 +263,28 @@ function calculateWins(matrix, wildMultipliers, betAmount, options = {}) {
 
     const mult = wildMultiplierSum(positions, evalMatrix, wildMultipliers);
     const amount = roundMoney(base * mult);
-    const candidate = {
+    payable.push({
       symbol,
       count,
       positions,
       baseAmount: base,
       wildMultiplier: mult,
       amount,
-    };
-
-    const prev = bestBySymbol.get(symbol);
-    if (
-      !prev ||
-      candidate.amount > prev.amount ||
-      (candidate.amount === prev.amount && candidate.count > prev.count)
-    ) {
-      bestBySymbol.set(symbol, candidate);
-    }
+    });
   }
+
+  payable.sort((a, b) => {
+    const rowA = a.positions[0]?.row ?? 0;
+    const rowB = b.positions[0]?.row ?? 0;
+    if (rowA !== rowB) return rowA - rowB;
+    const keyA = pathKey(a.symbol, a.positions);
+    const keyB = pathKey(b.symbol, b.positions);
+    return keyA < keyB ? -1 : keyA > keyB ? 1 : 0;
+  });
 
   const lineWins = [];
   let lineTotal = 0;
-  for (const win of bestBySymbol.values()) {
+  for (const win of payable) {
     lineTotal = roundMoney(lineTotal + win.amount);
     lineWins.push({
       lineIndex: lineWins.length,
@@ -288,6 +327,7 @@ module.exports = {
   matchPayline,
   basePayout,
   collectContiguousWins,
+  keepMaximalPaths,
   isContiguousFromCol0,
   pathMatchesMatrix,
   normalizeLandscapeMatrix,

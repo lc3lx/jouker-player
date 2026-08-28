@@ -17,6 +17,7 @@ const {
   BONUS_MULTIPLIER_WEIGHTS,
   SUPPRESSED_MULTIPLIER_WEIGHTS,
   BIG_MULTIPLIER_THRESHOLD,
+  SUPER_MULTIPLIER_MIN,
   multiplierValue,
 } = require("./constants");
 const { findWins, collectMultipliers } = require("./winCalculator");
@@ -46,27 +47,43 @@ function buildPicker(weightTable, rng) {
   };
 }
 
-function pickFromWeights(weights, rng) {
+function pickFromWeights(weights, rng, values = MULTIPLIER_VALUES) {
   const total = weights.reduce((sum, w) => sum + w, 0);
   let roll = rng() * total;
   for (let i = 0; i < weights.length; i += 1) {
     roll -= weights[i];
-    if (roll < 0) return MULTIPLIER_VALUES[i];
+    if (roll < 0) return values[i];
   }
-  return MULTIPLIER_VALUES[0];
+  return values[0];
+}
+
+function plaqueTable({ bonus = false, bigAlready = false, superBonus = false } = {}) {
+  const weights = bigAlready
+    ? SUPPRESSED_MULTIPLIER_WEIGHTS
+    : bonus || superBonus
+      ? BONUS_MULTIPLIER_WEIGHTS
+      : BASE_MULTIPLIER_WEIGHTS;
+  if (!superBonus) return { values: MULTIPLIER_VALUES, weights };
+  const start = MULTIPLIER_VALUES.findIndex((v) => v >= SUPER_MULTIPLIER_MIN);
+  return {
+    values: MULTIPLIER_VALUES.slice(start),
+    weights: weights.slice(start),
+  };
 }
 
 /**
  * Weighted plaque value. Bonus mode uses a richer table.
+ * Super buy-bonus never deals below x20 (win or lose).
  * When [bigAlready] is true (x20+ already on the grid), further draws
  * collapse toward small plaques so huge stacks stay rare.
  */
-function pickMultiplierValue(rng, { bonus = false, bigAlready = false } = {}) {
-  if (bigAlready) return pickFromWeights(SUPPRESSED_MULTIPLIER_WEIGHTS, rng);
-  return pickFromWeights(
-    bonus ? BONUS_MULTIPLIER_WEIGHTS : BASE_MULTIPLIER_WEIGHTS,
-    rng,
-  );
+function pickMultiplierValue(rng, {
+  bonus = false,
+  bigAlready = false,
+  superBonus = false,
+} = {}) {
+  const { values, weights } = plaqueTable({ bonus, bigAlready, superBonus });
+  return pickFromWeights(weights, rng, values);
 }
 
 function countBigMultipliers(matrix) {
@@ -88,14 +105,14 @@ function countBigInCells(cells) {
 }
 
 /** Draw one cell; "mult" placeholder resolves to a concrete `x<value>`. */
-function drawCell(pick, rng, { bonus = false, bigAlready = false } = {}) {
+function drawCell(pick, rng, { bonus = false, bigAlready = false, superBonus = false } = {}) {
   const symbol = pick();
   return symbol === "mult"
-    ? `x${pickMultiplierValue(rng, { bonus, bigAlready })}`
+    ? `x${pickMultiplierValue(rng, { bonus, bigAlready, superBonus })}`
     : symbol;
 }
 
-function generateGrid(pick, rng, { bonus = false } = {}) {
+function generateGrid(pick, rng, { bonus = false, superBonus = false } = {}) {
   const matrix = [];
   let bigAlready = 0;
   for (let col = 0; col < REEL_COUNT; col += 1) {
@@ -103,6 +120,7 @@ function generateGrid(pick, rng, { bonus = false } = {}) {
     for (let row = 0; row < ROW_COUNT; row += 1) {
       const cell = drawCell(pick, rng, {
         bonus,
+        superBonus,
         bigAlready: bigAlready > 0,
       });
       if (multiplierValue(cell) >= BIG_MULTIPLIER_THRESHOLD) bigAlready += 1;
@@ -117,7 +135,7 @@ function generateGrid(pick, rng, { bonus = false } = {}) {
  * Remove the given positions, slide survivors down, refill from the top.
  * Returns { matrix, refills } where refills[col] lists new symbols top-down.
  */
-function tumble(matrix, removedPositions, pick, rng, { bonus = false } = {}) {
+function tumble(matrix, removedPositions, pick, rng, { bonus = false, superBonus = false } = {}) {
   const removed = new Set(removedPositions.map(([c, r]) => `${c}:${r}`));
   const next = [];
   const refills = [];
@@ -142,6 +160,7 @@ function tumble(matrix, removedPositions, pick, rng, { bonus = false } = {}) {
     while (survivors.length + incoming.length < ROW_COUNT) {
       const cell = drawCell(pick, rng, {
         bonus,
+        superBonus,
         bigAlready: bigSoFar > 0,
       });
       if (multiplierValue(cell) >= BIG_MULTIPLIER_THRESHOLD) bigSoFar += 1;
@@ -165,10 +184,10 @@ function tumble(matrix, removedPositions, pick, rng, { bonus = false } = {}) {
  *   multiplierSum,
  * }
  */
-function resolveSpin({ bonusMode = false, rng = secureRandom } = {}) {
+function resolveSpin({ bonusMode = false, superBonus = false, rng = secureRandom } = {}) {
   const weights = bonusMode ? BONUS_WEIGHTS : BASE_WEIGHTS;
   const pick = buildPicker(weights, rng);
-  const drawOpts = { bonus: bonusMode };
+  const drawOpts = { bonus: bonusMode, superBonus: !!superBonus && bonusMode };
 
   let matrix = generateGrid(pick, rng, drawOpts);
   const initialMatrix = matrix.map((col) => [...col]);

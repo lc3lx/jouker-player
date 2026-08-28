@@ -71,7 +71,8 @@ async function executeSpin(userId, betAmountInput) {
     }
   }
 
-  const spin = spinEngine.resolveSpin({ bonusMode: isFreeSpin });
+  const superBonus = !!(isFreeSpin && bonusSession.superBonus);
+  const spin = spinEngine.resolveSpin({ bonusMode: isFreeSpin, superBonus });
 
   // --- win math (bet multiples) ---
   // Plaques multiply the sequence win when it exists — per spin, in both
@@ -220,6 +221,7 @@ async function executeBuyBonus(userId, currentBetInput, { superBonus = false } =
   const session = roundManager.createBonusSession(userKey, {
     betAmount,
     freeSpins: FREE_SPINS_BOUGHT,
+    superBonus: !!superBonus,
   });
   await roundManager.touchSession(userKey);
 
@@ -251,6 +253,7 @@ async function getActiveSession(userId) {
     betAmount: session.betAmount,
     freeSpinsRemaining: session.freeSpinsRemaining,
     bonusTotalWon: session.totalWon,
+    superBonus: !!session.superBonus,
   };
 }
 

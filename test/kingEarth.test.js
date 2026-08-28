@@ -10,6 +10,7 @@ test("uses the eight supplied symbols and multiplier plaque values", () => {
   assert.equal(engine.FREE_SPINS_AWARD, 5);
   assert.equal(engine.FREE_SPINS_BOUGHT, 10);
   assert.equal(engine.BUY_COST_MULT, 30);
+  assert.equal(engine.SUPER_BUY_COST_MULT, 90);
   assert.equal(engine.MAX_WIN_MULTIPLIER, 5000);
 });
 
@@ -68,7 +69,35 @@ test("natural free spins start with five spins", async () => {
   try {
     const session = await roundState.awardFreeSpins(uid, "test", 4, 1, false);
     assert.equal(session.remaining, 5);
+    assert.equal(session.superBonus, false);
   } finally {
     await roundState.deleteFreeSpinSession(uid, "test");
+  }
+});
+
+test("super buy-bonus plaques are always x20+ on every drop and tumble", () => {
+  for (let n = 0; n < 180; n += 1) {
+    const outcome = engine.spin(10000, {
+      serverSeed: "srv-super",
+      clientSeed: "client-super",
+      nonce: String(n),
+      isFreeSpin: true,
+      superBonus: true,
+    });
+    const scan = (grid) => {
+      for (const col of grid) {
+        for (const symbol of col) {
+          if (symbol < engine.MULTIPLIER || symbol >= engine.JACKPOT) continue;
+          const value = engine.MULTIPLIER_VALUES[symbol - engine.MULTIPLIER];
+          assert.ok(value >= engine.SUPER_MULTIPLIER_MIN, `super plaque ${value}`);
+        }
+      }
+    };
+    scan(outcome.initialGrid);
+    scan(outcome.finalGrid);
+    for (const step of outcome.cascadeSteps || []) {
+      if (step.grid) scan(step.grid);
+      if (step.afterGrid) scan(step.afterGrid);
+    }
   }
 });

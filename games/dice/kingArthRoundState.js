@@ -199,7 +199,7 @@ async function deleteFreeSpinSession(userId, tableId) {
 async function startFreeSpinSession(
   userId,
   tableId,
-  { lockedBaseBet, lockedDoubleChance, spins = FREE_SPINS_AWARD, roundCap = 0, initialWin = 0 } = {}
+  { lockedBaseBet, lockedDoubleChance, spins = FREE_SPINS_AWARD, roundCap = 0, initialWin = 0, superBonus = false } = {}
 ) {
   const session = {
     remaining: capFsRemaining(spins),
@@ -208,6 +208,7 @@ async function startFreeSpinSession(
     totalMultiplier: 0,
     roundCap: Math.max(0, roundMoney(roundCap)),
     roundWon: Math.max(0, roundMoney(initialWin)),
+    superBonus: !!superBonus,
   };
   await setFreeSpinSession(userId, tableId, session);
   return session;

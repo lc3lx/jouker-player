@@ -1147,6 +1147,7 @@ function registerGameHandlers(nsp, jwtVerify) {
           clientSeed,
           nonce: nonceStr,
           isFreeSpin,
+          superBonus: !!(isFreeSpin && fsBefore.superBonus),
           freeSpinMultiplier: isFreeSpin
             ? Number(fsBefore.totalMultiplier || 0)
             : 0,
@@ -1403,7 +1404,7 @@ function registerGameHandlers(nsp, jwtVerify) {
       }
     });
 
-    // King Earth — buy free spins (30× bet; disabled while ante is on)
+    // King Earth — buy free spins (30× / 90× bet; disabled while ante is on)
     socket.on("dice_buy_bonus", async (payload) => {
       const tableId = (payload && payload.tableId) || "king-arth";
       if (!(await kingArthRoundState.tryAcquireLock(userId, tableId))) {
@@ -1413,6 +1414,7 @@ function registerGameHandlers(nsp, jwtVerify) {
       try {
         const rawBet = Number(payload && payload.bet);
         const doubleChance = !!(payload && payload.doubleChance);
+        const superBonus = !!(payload && payload.superBonus);
         if (Number.isNaN(rawBet) || !Number.isFinite(rawBet)) {
           socket.emit("dice_buy_result", { ok: false, code: "invalid_bet" });
           return;
@@ -1435,7 +1437,10 @@ function registerGameHandlers(nsp, jwtVerify) {
 
         const bet = rawBet;
         const stake = Math.round(bet * 100) / 100;
-        const cost = Math.round(bet * DiceEngine.BUY_COST_MULT * 100) / 100;
+        const costMult = superBonus
+          ? DiceEngine.SUPER_BUY_COST_MULT
+          : DiceEngine.BUY_COST_MULT;
+        const cost = Math.round(bet * costMult * 100) / 100;
 
         const user = await User.findById(userId);
         if (!user) {
@@ -1461,7 +1466,7 @@ function registerGameHandlers(nsp, jwtVerify) {
               userId,
               amount: Math.round(cost),
               ledgerType: "game_loss",
-              meta: { tableId, source: "king_arth_buy_bonus", bet },
+              meta: { tableId, source: "king_arth_buy_bonus", bet, superBonus },
             });
           });
         } catch (err) {
@@ -1478,6 +1483,7 @@ function registerGameHandlers(nsp, jwtVerify) {
           spins: DiceEngine.FREE_SPINS_BOUGHT,
           roundCap: DiceEngine.MAX_WIN_MULTIPLIER * stake,
           initialWin: 0,
+          superBonus,
         });
 
         await recordSpin(cost, 0);
@@ -1494,6 +1500,7 @@ function registerGameHandlers(nsp, jwtVerify) {
             buyFreeSpins: true,
             betPerSpin: bet,
             cost,
+            superBonus,
             tableId,
           }),
         });
@@ -1515,6 +1522,7 @@ function registerGameHandlers(nsp, jwtVerify) {
           tableId,
           cost,
           betPerSpin: bet,
+          superBonus,
           freeSpinsRemaining,
           freeSpinsAwarded: DiceEngine.FREE_SPINS_BOUGHT,
           balance: wallet.balance,

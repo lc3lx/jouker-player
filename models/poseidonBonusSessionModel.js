@@ -16,6 +16,7 @@ const poseidonBonusSessionSchema = new mongoose.Schema(
     betAmount: { type: Number, required: true, min: 0 },
     freeSpinsRemaining: { type: Number, required: true, min: 0 },
     totalWon: { type: Number, required: true, default: 0, min: 0 },
+    superBonus: { type: Boolean, default: false },
     createdAt: { type: Number, required: true },
     updatedAt: { type: Number, required: true },
   },

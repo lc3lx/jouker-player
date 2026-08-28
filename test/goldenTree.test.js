@@ -314,7 +314,7 @@ test("screenshot Aug9 — mid-board 3 sevens → 0 (not 1× bet / anywhere-count
   assert.notEqual(result.totalWin, 40000000);
 });
 
-test("orange cluster — one best path only (not 10× multi-way)", () => {
+test("orange cluster — every maximal path pays", () => {
   // Dense oranges on reels 0–2 used to stack ~10 paths × 0.2× bet → 80M+.
   const matrix = [
     [SYMBOLS.ORANGE, SYMBOLS.ORANGE, SYMBOLS.ORANGE],
@@ -325,14 +325,37 @@ test("orange cluster — one best path only (not 10× multi-way)", () => {
   ];
   const bet = 40000000;
   const result = calculateWins(matrix, {}, bet, { bonusMode: false });
-  assert.equal(result.lineWins.length, 1);
-  assert.equal(result.lineWins[0].symbol, SYMBOLS.ORANGE);
-  assert.equal(result.lineWins[0].count, 3);
-  assert.equal(result.totalWin, bet * 0.2); // single 3-orange pay
-  assert.ok(result.totalWin < bet); // never the old multi-way 80M/160M
-  // Flattest path among equal pays (same rules / beam look as other fruits).
-  const rows = result.lineWins[0].positions.map((p) => p.row);
-  assert.equal(new Set(rows).size, 1);
+  assert.ok(result.lineWins.length > 1);
+  assert.ok(result.lineWins.every((w) => w.symbol === SYMBOLS.ORANGE));
+  assert.equal(result.totalWin, result.lineWins.length * bet * 0.2);
+  const mid = result.lineWins.some(
+    (w) =>
+      w.positions.length === 3 &&
+      w.positions[0].row === 1 &&
+      w.positions[1].row === 1 &&
+      w.positions[2].row === 1,
+  );
+  assert.ok(mid, "middle-row 3 oranges must pay");
+});
+
+test("screenshot oranges — mid row, 45° and L-path all pay", () => {
+  const matrix = [
+    [SYMBOLS.ORANGE, SYMBOLS.ORANGE, SYMBOLS.PINEAPPLE],
+    [SYMBOLS.ORANGE, SYMBOLS.ORANGE, SYMBOLS.PINEAPPLE],
+    [SYMBOLS.ORANGE, SYMBOLS.ORANGE, SYMBOLS.ORANGE],
+    [SYMBOLS.GRAPES, SYMBOLS.GRAPES, SYMBOLS.WATERMELON],
+    [SYMBOLS.ORANGE, SYMBOLS.ORANGE, SYMBOLS.PINEAPPLE],
+  ];
+  const bet = 10000;
+  const result = calculateWins(matrix, {}, bet, { bonusMode: false });
+  const key = (w) => w.positions.map((p) => `${p.col},${p.row}`).join(">");
+  const keys = new Set(result.lineWins.map(key));
+  assert.ok(keys.has("0,0>1,0>2,0"), "top row");
+  assert.ok(keys.has("0,1>1,1>2,1"), "middle row");
+  assert.ok(keys.has("0,0>1,1>2,2"), "45 degree");
+  assert.ok(keys.has("0,1>1,1>2,2"), "L path");
+  assert.equal(result.lineWins.length, 10);
+  assert.equal(result.totalWin, 10 * bet * 0.2);
 });
 
 test("orange and cherry use identical match rules on the same shape", () => {
@@ -393,7 +416,7 @@ test("screenshot 02:41 — gapped 4 sevens + mid oranges → 0 (not 5× bet)", (
   assert.notEqual(result.totalWin, bet * 5);
 });
 
-test("seven cluster — one best path only (not 6× multi-way)", () => {
+test("seven cluster — every maximal seven path pays", () => {
   const matrix = [
     [SYMBOLS.SEVEN, SYMBOLS.SEVEN, SYMBOLS.ORANGE],
     [SYMBOLS.SEVEN, SYMBOLS.SEVEN, SYMBOLS.ORANGE],
@@ -403,12 +426,9 @@ test("seven cluster — one best path only (not 6× multi-way)", () => {
   ];
   const bet = 40000000;
   const result = calculateWins(matrix, {}, bet, { bonusMode: false });
-  assert.equal(result.lineWins.length, 1);
-  assert.equal(result.lineWins[0].symbol, SYMBOLS.SEVEN);
-  assert.equal(result.lineWins[0].count, 3);
-  assert.equal(result.totalWin, bet * 1); // single 3-seven pay
-  assert.notEqual(result.totalWin, bet * 4); // old stacked / remote 160M
-  assert.notEqual(result.totalWin, bet * 6);
+  assert.ok(result.lineWins.length > 1);
+  assert.ok(result.lineWins.every((w) => w.symbol === SYMBOLS.SEVEN));
+  assert.equal(result.totalWin, result.lineWins.length * bet);
 });
 
 test("two sevens do not pay across missing reels", () => {

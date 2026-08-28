@@ -82,6 +82,8 @@ const MULTIPLIER_GATES = Object.freeze([
 
 /** Plaques at/above this count as "big" for stacking suppression. */
 const BIG_MULTIPLIER_THRESHOLD = 20;
+/** Super buy-bonus: every plaque face (win or lose) is at least this. */
+const SUPER_MULTIPLIER_MIN = 20;
 
 /**
  * Plaque face values multiply the win in full (no soft-cap on applied).
@@ -227,6 +229,7 @@ module.exports = {
   BONUS_MULTIPLIER_WEIGHTS,
   SUPPRESSED_MULTIPLIER_WEIGHTS,
   BIG_MULTIPLIER_THRESHOLD,
+  SUPER_MULTIPLIER_MIN,
   APPLIED_MULTIPLIER_CAP_BASE,
   APPLIED_MULTIPLIER_CAP_BONUS,
   appliedMultiplierFor,
