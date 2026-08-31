@@ -123,6 +123,15 @@ function collapseGrid(grid, removed, rng, volatility, doubleChance, isFreeSpin, 
   return next;
 }
 function appliedMultiplierFor(sum, isBonus) { return sum > 0 ? sum : 1; }
+function resolvePayoutMultiplier({ baseWin = 0, plaqueSum = 0, carried = 0, isFreeSpin = false } = {}) {
+  const win = Number(baseWin) > 0;
+  const plaques = win ? Math.max(0, Number(plaqueSum) || 0) : 0;
+  const prev = Math.max(0, Number(carried) || 0);
+  const nextCarried = isFreeSpin ? prev + plaques : 0;
+  const pool = isFreeSpin ? nextCarried : plaques;
+  const applied = win && pool > 0 ? pool : 1;
+  return { applied, nextCarried, plaques };
+}
 function classifyWinType(total, stake) { const r = total / Math.max(stake, 1); return r >= 50 ? "mega" : r >= 12 ? "big" : "normal"; }
 function runTumbles(initialGrid, rng, options) {
   let grid = cloneGrid(initialGrid), baseWin = 0; const lineWins = [], winningCells = new Set(), cascadeSteps = [];
@@ -137,20 +146,23 @@ function runTumbles(initialGrid, rng, options) {
   }
   const plaques = multiplierCells(grid), collected = plaques.reduce((sum, p) => sum + p.value, 0);
   // Same as Poseidon: plaques only multiply a tumble win — never a zero-win spin.
-  // Applied = full face-value plaque sum (no soft-cap); MAX_WIN still hard-caps payout.
-  const applied = baseWin > 0 && collected > 0
-    ? appliedMultiplierFor(collected, options.isFreeSpin)
-    : 1;
-  return { finalGrid: grid, baseWin, collectedMultiplier: collected, appliedMultiplier: applied, nextFreeSpinMultiplier: applied, multipliedWin: roundMoney(baseWin * applied), lineWins, winningCells, cascadeSteps };
+  // Bonus: winning plaques bank into the session total and carry forward.
+  const resolved = resolvePayoutMultiplier({
+    baseWin,
+    plaqueSum: collected,
+    carried: options.isFreeSpin ? Number(options.freeSpinMultiplier) || 0 : 0,
+    isFreeSpin: !!options.isFreeSpin,
+  });
+  return { finalGrid: grid, baseWin, collectedMultiplier: collected, appliedMultiplier: resolved.applied, nextFreeSpinMultiplier: resolved.nextCarried, multipliedWin: roundMoney(baseWin * resolved.applied), lineWins, winningCells, cascadeSteps };
 }
 function calculateWins(grid, stake, freeSpinMultiplier = 0) { const { wins, winningCells } = findPayAnywhereWins(grid, stake); const totalWin = wins.reduce((sum, w) => sum + w.win, 0); return { totalWin: roundMoney(totalWin), winningCells: [...winningCells].map((key) => { const [col, row] = key.split(",").map(Number); return { col, row }; }), lineWins: wins, scatterCount: multiplierCells(grid).length }; }
 function spin(baseBet, options = {}) {
   const rng = createSeededRng(options.serverSeed, options.clientSeed, options.nonce), isFreeSpin = !!options.isFreeSpin, superBonus = !!(isFreeSpin && options.superBonus), stake = roundMoney(baseBet);
   const initialGrid = generateGrid(rng, options.volatility, false, isFreeSpin, superBonus);
-  const tumble = runTumbles(initialGrid, rng, { stake, volatility: normalizeVolatility(options.volatility), doubleChance: false, isFreeSpin, superBonus });
+  const tumble = runTumbles(initialGrid, rng, { stake, volatility: normalizeVolatility(options.volatility), doubleChance: false, isFreeSpin, superBonus, freeSpinMultiplier: options.freeSpinMultiplier });
   const scatterCount = multiplierCells(tumble.finalGrid).length, winCap = roundMoney(MAX_WIN_MULTIPLIER * stake);
   const totalWin = Math.min(tumble.multipliedWin, winCap);
   const jackpotSymbolCount = countJackpotSymbols(tumble.finalGrid);
   return { grid: initialGrid, initialGrid, finalGrid: tumble.finalGrid, stake, baseBet: stake, doubleChance: false, isFreeSpin, freeSpinPayoutMult: 1, volatility: normalizeVolatility(options.volatility), nearMiss: false, almostBonus: !isFreeSpin && scatterCount === 3, capped: tumble.multipliedWin > winCap, maxWin: winCap, totalWin, baseWin: tumble.baseWin, winningCells: [...tumble.winningCells].map((key) => { const [col, row] = key.split(",").map(Number); return { col, row }; }), lineWins: tumble.lineWins, scatterCount, jackpotSymbolCount, jackpotTriggered: jackpotSymbolCount >= JACKPOT_MIN_SYMBOLS, winType: classifyWinType(totalWin, stake), cascadeSteps: tumble.cascadeSteps, multipliers: { collected: tumble.collectedMultiplier, applied: tumble.appliedMultiplier, freeSpinTotal: tumble.nextFreeSpinMultiplier }, freeSpinsAwarded: !isFreeSpin && scatterCount >= 4 ? FREE_SPINS_AWARD : 0 };
 }
-module.exports = { COLS, ROWS, REGULAR_SYMBOLS, SYMBOL_COUNT, SCATTER, MULTIPLIER, JACKPOT, JACKPOT_WEIGHT, JACKPOT_MIN_SYMBOLS, GEM_SYMBOLS, FREE_SPINS_AWARD, FREE_SPINS_BOUGHT, RETRIGGER_AWARD, RETRIGGER_MIN_SCATTER, BUY_COST_MULT, SUPER_BUY_COST_MULT, SUPER_MULTIPLIER_MIN, MAX_WIN_MULTIPLIER, BET_MIN, BET_MAX, PAYTABLE, MULTIPLIER_VALUES, BASE_WEIGHTS, FREESPIN_WEIGHTS, MULTIPLIER_GATES, BASE_MULTIPLIER_WEIGHTS, BONUS_MULTIPLIER_WEIGHTS, SUPPRESSED_MULTIPLIER_WEIGHTS, BIG_MULTIPLIER_THRESHOLD, APPLIED_MULTIPLIER_CAP_BASE, APPLIED_MULTIPLIER_CAP_BONUS, appliedMultiplierFor, normalizeVolatility, pickMultiplierValue, symbolMultiplier, isJackpot, countJackpotSymbols, generateGrid, calculateWins, spin, classifyWinType };
+module.exports = { COLS, ROWS, REGULAR_SYMBOLS, SYMBOL_COUNT, SCATTER, MULTIPLIER, JACKPOT, JACKPOT_WEIGHT, JACKPOT_MIN_SYMBOLS, GEM_SYMBOLS, FREE_SPINS_AWARD, FREE_SPINS_BOUGHT, RETRIGGER_AWARD, RETRIGGER_MIN_SCATTER, BUY_COST_MULT, SUPER_BUY_COST_MULT, SUPER_MULTIPLIER_MIN, MAX_WIN_MULTIPLIER, BET_MIN, BET_MAX, PAYTABLE, MULTIPLIER_VALUES, BASE_WEIGHTS, FREESPIN_WEIGHTS, MULTIPLIER_GATES, BASE_MULTIPLIER_WEIGHTS, BONUS_MULTIPLIER_WEIGHTS, SUPPRESSED_MULTIPLIER_WEIGHTS, BIG_MULTIPLIER_THRESHOLD, APPLIED_MULTIPLIER_CAP_BASE, APPLIED_MULTIPLIER_CAP_BONUS, appliedMultiplierFor, resolvePayoutMultiplier, normalizeVolatility, pickMultiplierValue, symbolMultiplier, isJackpot, countJackpotSymbols, generateGrid, calculateWins, spin, classifyWinType };

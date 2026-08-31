@@ -14,8 +14,18 @@ const tableFactory = require("./tableFactory");
 const catalog = require("./arenaTournamentCatalog");
 const logger = require("../utils/logger");
 
-const { GAMES, CREATE_FEE, getTier, nextSlotStart, slotKey, houseName, defaultPrizeDistribution } =
-  catalog;
+const {
+  GAMES,
+  CREATE_FEE,
+  getTier,
+  nextSlotStart,
+  slotKey,
+  houseName,
+  defaultPrizeDistribution,
+  isPokerFreezeout,
+  pokerStartingChips,
+  pokerBlindsForHand,
+} = catalog;
 
 function toInt(v) {
   return Math.floor(Number(v) || 0);
@@ -65,6 +75,14 @@ function serializeTournament(t, { viewerId } = {}) {
     durationMinutes: t.durationMinutes,
     rounds: catalog.roundsOf(t),
     gamesCompleted: toInt(t.gamesCompleted),
+    mode: isPokerFreezeout(t) ? "freezeout" : "rounds",
+    currentBet: isPokerFreezeout(t)
+      ? pokerBlindsForHand(t.startingChips, t.gamesCompleted).bigBlind
+      : 0,
+    blindLevel: isPokerFreezeout(t)
+      ? pokerBlindsForHand(t.startingChips, t.gamesCompleted).level
+      : 0,
+    aliveCount: (t.participants || []).filter((p) => !p.eliminated).length,
     endsAt: t.endsAt,
     maxPlayers: t.maxPlayers,
     minPlayers: t.minPlayers,
@@ -119,7 +137,9 @@ async function createTournament(actorId, payload = {}) {
   const name = String(payload.name || `${catalog.GAME_LABEL_AR[game]} · بطولة`)
     .trim()
     .slice(0, 80);
-  const startingChips = Math.max(500, toInt(payload.startingChips) || 2000);
+  const startingChips = isPokerFreezeout(game)
+    ? pokerStartingChips({ entryFee, startingChips: payload.startingChips })
+    : Math.max(500, toInt(payload.startingChips) || 2000);
   const inviteCode = visibility === "private" ? makeInviteCode() : null;
 
   let created;
@@ -312,12 +332,14 @@ async function startTournament(tournamentId) {
 
   for (const group of groups) {
     try {
+      const blinds = isPokerFreezeout(t) ? pokerBlindsForHand(t.startingChips, 0) : null;
       const table = await tableFactory.createArenaTournamentTable({
         gameType: t.game,
         tournamentId: t._id,
         capacity: t.game === "poker" ? Math.max(group.length, 2) : cap,
         displayName: t.name,
         allowedUsers: group.map((p) => p.user),
+        blinds,
       });
       tableIds.push(table._id);
       for (const p of group) p.tableId = table._id;
@@ -439,6 +461,93 @@ async function joinRunningTable({ req, res, next, table }) {
   }
 }
 
+function markPokerEliminations(t) {
+  const stillIn = t.participants.filter((p) => !p.eliminated);
+  const busted = stillIn
+    .filter((p) => toInt(p.chips) <= 0)
+    .sort((a, b) => toInt(a.tournamentScore) - toInt(b.tournamentScore));
+  let place = stillIn.length;
+  for (const p of busted) {
+    p.eliminated = true;
+    p.chips = 0;
+    p.finishPlace = place;
+    place -= 1;
+  }
+}
+
+async function applyPokerBlinds(t) {
+  const blinds = pokerBlindsForHand(t.startingChips, t.gamesCompleted);
+  const ids = (t.tableIds || []).filter(Boolean);
+  if (!ids.length) return blinds;
+  await Table.updateMany(
+    { _id: { $in: ids } },
+    {
+      $set: {
+        smallBlind: blinds.smallBlind,
+        bigBlind: blinds.bigBlind,
+        minimumBet: blinds.minimumBet,
+      },
+    }
+  );
+  try {
+    const tableGame = require("../sockets/tableGame");
+    for (const tid of ids) {
+      if (typeof tableGame.applyLivePokerBlinds === "function") {
+        await tableGame.applyLivePokerBlinds(tid, blinds);
+      }
+    }
+  } catch (_) {
+    /* live table may not be in memory */
+  }
+  return blinds;
+}
+
+async function consolidatePokerTables(t) {
+  const alive = t.participants.filter((p) => !p.eliminated && toInt(p.chips) > 0 && p.tableId);
+  if (alive.length < 2 || alive.length > 6) return;
+  const destId = String(alive[0].tableId);
+  const split = alive.some((p) => String(p.tableId) !== destId);
+  if (!split) return;
+
+  const dest = await Table.findById(destId);
+  if (!dest) return;
+  for (const p of alive) {
+    if (String(p.tableId) === destId) continue;
+    const src = await Table.findById(p.tableId);
+    if (src) {
+      src.seats = (src.seats || []).filter((s) => String(s.user) !== String(p.user));
+      await src.save();
+    }
+    const already = (dest.seats || []).some((s) => String(s.user) === String(p.user));
+    if (!already) {
+      const player = await Player.getOrCreateByUser(p.user);
+      const used = new Set((dest.seats || []).map((s) => s.seatPosition).filter((n) => n != null));
+      let seatPosition = 0;
+      while (used.has(seatPosition)) seatPosition += 1;
+      dest.seats.push({
+        user: p.user,
+        player: player._id,
+        chips: toInt(p.chips),
+        seatPosition,
+      });
+    }
+    if (Array.isArray(dest.allowedUsers) && !dest.allowedUsers.some((u) => String(u) === String(p.user))) {
+      dest.allowedUsers.push(p.user);
+    }
+    p.tableId = dest._id;
+  }
+  await dest.save();
+  await t.save();
+  try {
+    const tableGame = require("../sockets/tableGame");
+    if (typeof tableGame.syncLivePokerTableAfterJoin === "function") {
+      await tableGame.syncLivePokerTableAfterJoin(dest._id);
+    }
+  } catch (_) {
+    /* live table optional */
+  }
+}
+
 // ─── in-heat scoring ──────────────────────────────────────────────────────────
 async function onGameFinished({ table, gameType, gameResult, gamePlayers }) {
   try {
@@ -475,6 +584,30 @@ async function onGameFinished({ table, gameType, gameResult, gamePlayers }) {
       if (seat) p.chips = toInt(seat.chips);
     }
     t.gamesCompleted = toInt(t.gamesCompleted) + 1;
+
+    if (isPokerFreezeout(t)) {
+      markPokerEliminations(t);
+      await applyPokerBlinds(t);
+      await t.save();
+      const alive = t.participants.filter((p) => !p.eliminated && toInt(p.chips) > 0);
+      if (alive.length <= 1) {
+        finishTournament(t._id).catch((err) => {
+          logger.warn("arena_poker_finish_failed", {
+            id: String(t._id),
+            reason: err?.message,
+          });
+        });
+      } else {
+        await consolidatePokerTables(t).catch((err) => {
+          logger.warn("arena_poker_consolidate_failed", {
+            id: String(t._id),
+            reason: err?.message,
+          });
+        });
+      }
+      return { handled: true };
+    }
+
     await t.save();
     const target = catalog.roundsOf(t);
     if (toInt(t.gamesCompleted) >= target) {
@@ -524,6 +657,15 @@ async function finishTournament(tournamentId) {
   }
 
   const ranked = [...t.participants].sort((a, b) => {
+    if (isPokerFreezeout(t)) {
+      const aAlive = !a.eliminated && toInt(a.chips) > 0;
+      const bAlive = !b.eliminated && toInt(b.chips) > 0;
+      if (aAlive !== bAlive) return aAlive ? -1 : 1;
+      if (aAlive && bAlive) return toInt(b.chips) - toInt(a.chips);
+      const ap = a.finishPlace == null ? 999 : toInt(a.finishPlace);
+      const bp = b.finishPlace == null ? 999 : toInt(b.finishPlace);
+      if (ap !== bp) return ap - bp;
+    }
     const scoreDelta = toInt(b.tournamentScore) - toInt(a.tournamentScore);
     if (scoreDelta !== 0) return scoreDelta;
     return toInt(b.chips) - toInt(a.chips);
@@ -696,7 +838,12 @@ async function ensureSchedule(nowMs = Date.now()) {
                 type: "paid",
                 entryFee: tier.entryFee,
                 createFee: 0,
-                startingChips: tier.startingChips,
+                startingChips: game === "poker"
+                  ? pokerStartingChips({
+                      entryFee: tier.entryFee,
+                      startingChips: tier.startingChips,
+                    })
+                  : tier.startingChips,
                 prizePool: 0,
                 guaranteedPrize: tier.guaranteedPrize,
                 prizeDistribution: defaultPrizeDistribution(tier.maxPlayers),
@@ -772,7 +919,10 @@ async function tick() {
     lifecycle: "running",
     $or: [
       { endsAt: { $lte: now } },
-      { $expr: { $gte: ["$gamesCompleted", "$durationMinutes"] } },
+      {
+        game: { $ne: "poker" },
+        $expr: { $gte: ["$gamesCompleted", "$durationMinutes"] },
+      },
     ],
   })
     .select("_id")

@@ -5,10 +5,11 @@
  * anywhere on screen pay, winners explode and symbols tumble in until no new
  * win forms (cascade continues while any type still has 7+). Multiplier
  * plaques (x2 → x1000) stay on screen for the whole tumbling sequence; when
- * the sequence ends with a win, their sum multiplies it — in the base game
- * AND in free spins (per-spin, no accumulation). Plaques are also the
- * free-spins trigger: 4+ plaques in base game award free spins; during free
- * spins (natural or bought) 3+ plaques add more spins.
+ * the sequence ends with a win, their sum multiplies it. Base game is
+ * per-spin. During free spins, plaques from winning spins bank into a
+ * session total that multiplies later wins (a losing spin does not add).
+ * Plaques are also the free-spins trigger: 4+ plaques in base game award
+ * free spins; during free spins (natural or bought) 3+ plaques add more.
  *
  * RTP was originally tuned for MIN_MATCH=8; lowering to 7 raises hit rate.
  * Re-tune with the seeded sim in test/poseidon.test.js if needed.
@@ -97,6 +98,27 @@ const APPLIED_MULTIPLIER_CAP_BONUS = Number.POSITIVE_INFINITY;
 function appliedMultiplierFor(sum, isBonus = false) {
   if (!(sum > 0)) return 1;
   return sum;
+}
+
+/**
+ * Plaques only bank on a winning spin.
+ * Base: this spin's plaques multiply the win.
+ * Bonus: banked total + this spin's plaques (if win) multiplies the win, and
+ * that new total carries to later winning free spins.
+ */
+function resolvePayoutMultiplier({
+  baseWin = 0,
+  plaqueSum = 0,
+  carried = 0,
+  isFreeSpin = false,
+} = {}) {
+  const win = Number(baseWin) > 0;
+  const plaques = win ? Math.max(0, Number(plaqueSum) || 0) : 0;
+  const prev = Math.max(0, Number(carried) || 0);
+  const nextCarried = isFreeSpin ? prev + plaques : 0;
+  const pool = isFreeSpin ? nextCarried : plaques;
+  const applied = win && pool > 0 ? pool : 1;
+  return { applied, nextCarried, plaques };
 }
 
 const PAYING_SYMBOLS = Object.freeze([
@@ -233,6 +255,7 @@ module.exports = {
   APPLIED_MULTIPLIER_CAP_BASE,
   APPLIED_MULTIPLIER_CAP_BONUS,
   appliedMultiplierFor,
+  resolvePayoutMultiplier,
   PAYING_SYMBOLS,
   PAYTABLE,
   BASE_WEIGHTS,

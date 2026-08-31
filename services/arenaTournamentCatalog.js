@@ -78,6 +78,10 @@ const SLOT_MS = 2 * 60 * 60 * 1000;
 const DURATIONS = [4, 8, 12];
 const ROUND_SAFETY_MS = 6 * 60 * 60 * 1000;
 
+/** First-hand big blind is this fraction of the table stake (10M → 1M). */
+const POKER_OPENING_FRACTION = 10;
+const POKER_BLIND_CAP_SHIFT = 20;
+
 /** Live admin overrides: { [tierId]: { nameAr?, entryFee? } } */
 let _overrides = {};
 
@@ -134,7 +138,48 @@ function roundsOf(tierOrDoc) {
   return DURATIONS.includes(n) ? n : 4;
 }
 
+function isPokerFreezeout(gameOrDoc) {
+  const game = typeof gameOrDoc === "string" ? gameOrDoc : gameOrDoc?.game;
+  return game === "poker";
+}
+
+/** Table scale for poker: paid entry, else requested chips. 10M table → 10M stack. */
+function pokerTableStake({ entryFee = 0, startingChips = 0 } = {}) {
+  const fee = Math.max(0, Math.floor(Number(entryFee) || 0));
+  const chips = Math.max(0, Math.floor(Number(startingChips) || 0));
+  return Math.max(fee, chips, 1000);
+}
+
+function pokerStartingChips(entryFeeOrOpts, maybeChips) {
+  if (entryFeeOrOpts && typeof entryFeeOrOpts === "object") {
+    return pokerTableStake(entryFeeOrOpts);
+  }
+  return pokerTableStake({ entryFee: entryFeeOrOpts, startingChips: maybeChips });
+}
+
+/** Opening big blind = 10% of the table stake, then doubles each hand. */
+function pokerOpeningBet(startingChips) {
+  return Math.max(100, Math.floor(pokerTableStake({ startingChips }) / POKER_OPENING_FRACTION));
+}
+
+function pokerBlindsForHand(startingChips, gamesCompleted = 0) {
+  const opening = pokerOpeningBet(startingChips);
+  const level = Math.max(0, Math.floor(Number(gamesCompleted) || 0));
+  const shift = Math.min(level, POKER_BLIND_CAP_SHIFT);
+  const bigBlind = opening * 2 ** shift;
+  return {
+    smallBlind: Math.max(1, Math.floor(bigBlind / 2)),
+    bigBlind,
+    minimumBet: bigBlind,
+    level: level + 1,
+    openingBet: opening,
+  };
+}
+
 function houseName(game, tier) {
+  if (isPokerFreezeout(game)) {
+    return `${GAME_LABEL_AR[game] || game} · ${tier.nameAr} · حتى الفوز`;
+  }
   return `${GAME_LABEL_AR[game] || game} · ${tier.nameAr} · ${roundsOf(tier)} جولات`;
 }
 
@@ -168,6 +213,8 @@ function serializeCatalog() {
       rounds: t.durationMinutes,
       prizeHint: t.entryFee * t.maxPlayers,
     })),
+    pokerOpeningFraction: POKER_OPENING_FRACTION,
+    pokerMode: "freezeout",
   };
 }
 
@@ -188,6 +235,12 @@ module.exports = {
   slotKey,
   roundsOf,
   houseName,
+  isPokerFreezeout,
+  pokerTableStake,
+  pokerStartingChips,
+  pokerOpeningBet,
+  pokerBlindsForHand,
+  POKER_OPENING_FRACTION,
   defaultPrizeDistribution,
   serializeCatalog,
 };

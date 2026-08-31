@@ -21,6 +21,7 @@ const {
   isMultiplier,
   roundMoney,
   appliedMultiplierFor,
+  resolvePayoutMultiplier,
 } = require("../games/poseidon/constants");
 const { findWins, collectMultipliers } = require("../games/poseidon/winCalculator");
 const {
@@ -301,6 +302,95 @@ test("multiplier applies only when the spin wins", async () => {
     while (roundManager.hasActiveBonusSession("user-2b")) {
       await poseidonService.executeSpin("user-2b", 10000);
     }
+  }
+});
+
+test("resolvePayoutMultiplier banks plaques only on winning free spins", () => {
+  assert.deepEqual(
+    resolvePayoutMultiplier({ baseWin: 0, plaqueSum: 10, isFreeSpin: true }),
+    { applied: 1, nextCarried: 0, plaques: 0 },
+  );
+  assert.deepEqual(
+    resolvePayoutMultiplier({ baseWin: 2, plaqueSum: 10, isFreeSpin: true }),
+    { applied: 10, nextCarried: 10, plaques: 10 },
+  );
+  assert.deepEqual(
+    resolvePayoutMultiplier({
+      baseWin: 3,
+      plaqueSum: 5,
+      carried: 10,
+      isFreeSpin: true,
+    }),
+    { applied: 15, nextCarried: 15, plaques: 5 },
+  );
+  assert.deepEqual(
+    resolvePayoutMultiplier({
+      baseWin: 4,
+      plaqueSum: 0,
+      carried: 15,
+      isFreeSpin: true,
+    }),
+    { applied: 15, nextCarried: 15, plaques: 0 },
+  );
+  assert.deepEqual(
+    resolvePayoutMultiplier({
+      baseWin: 0,
+      plaqueSum: 20,
+      carried: 15,
+      isFreeSpin: true,
+    }),
+    { applied: 1, nextCarried: 15, plaques: 0 },
+  );
+  assert.deepEqual(
+    resolvePayoutMultiplier({ baseWin: 2, plaqueSum: 10, isFreeSpin: false }),
+    { applied: 10, nextCarried: 0, plaques: 10 },
+  );
+});
+
+test("bought bonus accumulates winning plaques across free spins", async () => {
+  const engine = require("../games/poseidon/spinEngine");
+  const original = engine.resolveSpin;
+  const emptyCol = () => Array.from({ length: ROW_COUNT }, () => SYMBOLS.A);
+  const blank = () => ({
+    initialMatrix: Array.from({ length: REEL_COUNT }, emptyCol),
+    finalMatrix: Array.from({ length: REEL_COUNT }, emptyCol),
+    steps: [],
+    multipliers: [],
+    multiplierSum: 0,
+    baseWin: 0,
+  });
+  const spins = [
+    { ...blank(), baseWin: 1, multiplierSum: 10, multipliers: [{ col: 0, row: 0, value: 10 }] },
+    { ...blank(), baseWin: 1, multiplierSum: 5, multipliers: [{ col: 1, row: 0, value: 5 }] },
+    { ...blank(), baseWin: 1, multiplierSum: 0 },
+    { ...blank(), baseWin: 0, multiplierSum: 20, multipliers: [{ col: 2, row: 0, value: 20 }] },
+    { ...blank(), baseWin: 1, multiplierSum: 0 },
+  ];
+  let i = 0;
+  engine.resolveSpin = () => spins[Math.min(i++, spins.length - 1)];
+  try {
+    wallet.seedStubBalance("user-bank", 100000000);
+    await poseidonService.executeBuyBonus("user-bank", 10000);
+    const a = await poseidonService.executeSpin("user-bank", 10000);
+    assert.equal(a.appliedMultiplier, 10);
+    assert.equal(a.bonusMultiplier, 10);
+    assert.equal(a.totalWin, roundMoney(10000 * 10));
+    const b = await poseidonService.executeSpin("user-bank", 10000);
+    assert.equal(b.appliedMultiplier, 15);
+    assert.equal(b.bonusMultiplier, 15);
+    assert.equal(b.totalWin, roundMoney(10000 * 15));
+    const c = await poseidonService.executeSpin("user-bank", 10000);
+    assert.equal(c.appliedMultiplier, 15);
+    assert.equal(c.totalWin, roundMoney(10000 * 15));
+    const d = await poseidonService.executeSpin("user-bank", 10000);
+    assert.equal(d.totalWin, 0);
+    assert.equal(d.appliedMultiplier, 1);
+    assert.equal(d.bonusMultiplier, 15);
+    const e = await poseidonService.executeSpin("user-bank", 10000);
+    assert.equal(e.appliedMultiplier, 15);
+    assert.equal(e.totalWin, roundMoney(10000 * 15));
+  } finally {
+    engine.resolveSpin = original;
   }
 });
 

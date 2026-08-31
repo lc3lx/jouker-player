@@ -200,6 +200,7 @@ async function createArenaTournamentTable({
   capacity,
   displayName,
   allowedUsers,
+  blinds,
   session,
 }) {
   const maxDoc = await Table.findOne({ gameType, tier: "private" })
@@ -216,8 +217,9 @@ async function createArenaTournamentTable({
         tableNumber,
         tableKind: "tournament",
         displayName: displayName || "Arena Tournament",
-        smallBlind: 0,
-        bigBlind: 0,
+        smallBlind: Number(blinds?.smallBlind) || 0,
+        bigBlind: Number(blinds?.bigBlind) || 0,
+        minimumBet: Number(blinds?.minimumBet) || Number(blinds?.bigBlind) || 0,
         minBuyIn: 0,
         maxBuyIn: 0,
         capacity: cap,

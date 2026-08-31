@@ -83,6 +83,7 @@ function sessionSnapshot(session) {
     freeSpinsRemaining: session.freeSpinsRemaining,
     totalWon: session.totalWon,
     superBonus: !!session.superBonus,
+    bonusMultiplier: Number(session.bonusMultiplier || 0),
     createdAt: session.createdAt,
   };
 }
@@ -101,6 +102,7 @@ async function persistSession(session) {
         freeSpinsRemaining: session.freeSpinsRemaining,
         totalWon: session.totalWon,
         superBonus: !!session.superBonus,
+        bonusMultiplier: Number(session.bonusMultiplier || 0),
         createdAt: session.createdAt,
         updatedAt: now,
       },
@@ -145,6 +147,7 @@ async function ensureLoaded(userId) {
       freeSpinsRemaining: Number(doc.freeSpinsRemaining) || 0,
       totalWon: roundMoney(doc.totalWon || 0),
       superBonus: !!doc.superBonus,
+      bonusMultiplier: Number(doc.bonusMultiplier || 0),
       createdAt: doc.createdAt || Date.now(),
     };
     if (session.freeSpinsRemaining <= 0) return null;
@@ -168,6 +171,7 @@ function createBonusSession(userId, {
     freeSpinsRemaining: freeSpins,
     totalWon: 0,
     superBonus: !!superBonus,
+    bonusMultiplier: 0,
     createdAt: Date.now(),
   };
   bonusSessions.set(String(userId), session);
@@ -197,6 +201,14 @@ function addBonusWin(userId, amount) {
   const session = getBonusSession(userId);
   if (!session) return null;
   session.totalWon = roundMoney(session.totalWon + amount);
+  void persistSession(session);
+  return session;
+}
+
+function setBonusMultiplier(userId, value) {
+  const session = getBonusSession(userId);
+  if (!session) return null;
+  session.bonusMultiplier = Math.max(0, Number(value) || 0);
   void persistSession(session);
   return session;
 }
@@ -252,6 +264,7 @@ module.exports = {
   hasActiveBonusSession,
   addRetriggerSpins,
   addBonusWin,
+  setBonusMultiplier,
   consumeBonusSpin,
   ensureLoaded,
   touchSession,

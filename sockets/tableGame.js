@@ -460,6 +460,9 @@ class PokerTable {
     this.buyIn = toSafeInt(table.buyIn ?? table.minBuyIn, this.minBuyIn);
     this.minimumBet = deriveMinimumBet(this.buyIn, table.minimumBet);
     this.rakePolicy = resolveRakePolicy(table);
+    this.tableKind = table.tableKind || null;
+    this.arenaTournament = table.arenaTournament || null;
+    this.clanTournamentMatch = table.clanTournamentMatch || null;
     this.capacity = normalizeCapacity(toSafeInt(table.capacity, 9));
     this.dealerIndex = 0;
     this.running = false;
@@ -1333,7 +1336,23 @@ class PokerTable {
    * from their wallet for one table buy-in so the next hand can start.
    * Bots are replaced separately via addBotsForMissingSeats.
    */
+  isTournamentTable() {
+    return (
+      this.tableKind === "tournament" ||
+      !!this.arenaTournament ||
+      !!this.clanTournamentMatch
+    );
+  }
+
+  applyBlindLevel({ smallBlind, bigBlind, minimumBet } = {}) {
+    if (smallBlind != null) this.smallBlind = toSafeInt(smallBlind, this.smallBlind);
+    if (bigBlind != null) this.bigBlind = toSafeInt(bigBlind, this.bigBlind);
+    if (minimumBet != null) this.minimumBet = toSafeInt(minimumBet, this.minimumBet);
+    else if (bigBlind != null) this.minimumBet = toSafeInt(bigBlind, this.minimumBet);
+  }
+
   async autoRebuyBustedHumans() {
+    if (this.isTournamentTable()) return 0;
     if (this.frozen) {
       logger.warn("poker_auto_rebuy_skipped_frozen", {
         tableId: this.tableId,
@@ -1613,6 +1632,9 @@ class PokerTable {
   resetStateFromTable(table) {
     this.smallBlind = toSafeInt(table.smallBlind, this.smallBlind);
     this.bigBlind = toSafeInt(table.bigBlind, this.bigBlind);
+    this.tableKind = table.tableKind || this.tableKind;
+    this.arenaTournament = table.arenaTournament || this.arenaTournament;
+    this.clanTournamentMatch = table.clanTournamentMatch || this.clanTournamentMatch;
     this.capacity = normalizeCapacity(toSafeInt(table.capacity, this.capacity || POKER_CAPACITY));
     this.minBuyIn = toSafeInt(table.minBuyIn, this.minBuyIn || this.bigBlind * 100);
     this.maxBuyIn = toSafeInt(table.maxBuyIn, this.maxBuyIn || this.minBuyIn);
@@ -6385,6 +6407,13 @@ async function getLiveTableGameForAdmin(tableId) {
   return activeRegistry.get(String(tableId));
 }
 
+async function applyLivePokerBlinds(tableId, blinds) {
+  const game = await getLiveTableGameForAdmin(tableId);
+  if (!game || typeof game.applyBlindLevel !== "function") return false;
+  game.applyBlindLevel(blinds);
+  return true;
+}
+
 /** Diagnostic: tableIds of every poker table this instance currently owns in memory. */
 function listActivePokerTableIds() {
   if (!activeRegistry) return [];
@@ -6432,6 +6461,7 @@ module.exports = {
   restoreLiveEngineSeat,
   buildAdminRealtimeTablePayload,
   getLiveTableGameForAdmin,
+  applyLivePokerBlinds,
   listActivePokerTableIds,
   adminForceEndHandTable,
   refreshCosmeticsForUserOnTables,

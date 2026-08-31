@@ -101,3 +101,41 @@ test("super buy-bonus plaques are always x20+ on every drop and tumble", () => {
     }
   }
 });
+
+test("bonus payout multiplier banks only on winning free spins", () => {
+  assert.deepEqual(
+    engine.resolvePayoutMultiplier({
+      baseWin: 0,
+      plaqueSum: 10,
+      carried: 8,
+      isFreeSpin: true,
+    }),
+    { applied: 1, nextCarried: 8, plaques: 0 },
+  );
+  assert.deepEqual(
+    engine.resolvePayoutMultiplier({
+      baseWin: 2,
+      plaqueSum: 5,
+      carried: 10,
+      isFreeSpin: true,
+    }),
+    { applied: 15, nextCarried: 15, plaques: 5 },
+  );
+  assert.deepEqual(
+    engine.resolvePayoutMultiplier({
+      baseWin: 4,
+      plaqueSum: 0,
+      carried: 15,
+      isFreeSpin: true,
+    }),
+    { applied: 15, nextCarried: 15, plaques: 0 },
+  );
+  assert.deepEqual(
+    engine.resolvePayoutMultiplier({
+      baseWin: 2,
+      plaqueSum: 10,
+      isFreeSpin: false,
+    }),
+    { applied: 10, nextCarried: 0, plaques: 10 },
+  );
+});

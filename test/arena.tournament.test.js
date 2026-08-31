@@ -90,6 +90,18 @@ test("catalog exposes 5 tiers and 4/8/12 round lengths", () => {
   assert.equal(data.createFee, catalog.CREATE_FEE);
   assert.equal(data.slotMs, 2 * 60 * 60 * 1000);
   assert.ok(data.tiers.every((t) => t.guaranteedPrize > 0 && t.entryFee > 0));
+  assert.equal(data.pokerOpeningFraction, 10);
+  assert.equal(data.pokerMode, "freezeout");
+});
+
+test("poker opening bet is 10% of the table stake and doubles each hand", () => {
+  assert.equal(catalog.pokerTableStake({ entryFee: 10_000_000 }), 10_000_000);
+  assert.equal(catalog.pokerOpeningBet(10_000_000), 1_000_000);
+  assert.equal(catalog.pokerBlindsForHand(10_000_000, 0).bigBlind, 1_000_000);
+  assert.equal(catalog.pokerBlindsForHand(10_000_000, 1).bigBlind, 2_000_000);
+  assert.equal(catalog.pokerBlindsForHand(10_000_000, 2).bigBlind, 4_000_000);
+  assert.equal(catalog.pokerBlindsForHand(10_000, 0).bigBlind, 1_000);
+  assert.equal(catalog.pokerStartingChips({ entryFee: 10_000_000 }), 10_000_000);
 });
 
 test("creating a tournament charges the create fee", async () => {
@@ -108,6 +120,21 @@ test("creating a tournament charges the create fee", async () => {
   const doc = await ArenaTournament.findById(t.id).lean();
   assert.equal(doc.createFee, catalog.CREATE_FEE);
   assert.equal(doc.lifecycle, "registering");
+});
+
+test("poker table stake follows the entry fee (10M → 1M opening bet)", async () => {
+  const owner = await makeUser("Owner", OWNER_BAL);
+  const t = await engine.createTournament(owner, {
+    game: "poker",
+    type: "paid",
+    entryFee: 10_000_000,
+    maxPlayers: 8,
+    startAt: startSoon(),
+  });
+  const doc = await ArenaTournament.findById(t.id).lean();
+  assert.equal(doc.startingChips, 10_000_000);
+  assert.equal(t.currentBet, 1_000_000);
+  assert.equal(catalog.pokerBlindsForHand(doc.startingChips, 1).bigBlind, 2_000_000);
 });
 
 test("register / unregister refunds the entry fee transactionally", async () => {
@@ -198,12 +225,12 @@ test("paid finish pays the whole escrow and conserves coins", async () => {
   assert.equal(prizeSum, FEE * 4);
 });
 
-test("heat ends after target rounds, not after a few minutes", async () => {
+test("card-game heat ends after target rounds, not after a few minutes", async () => {
   const owner = await makeUser("Owner", OWNER_BAL);
   const players = [];
   for (let i = 0; i < 4; i++) players.push(await makeUser("R" + i, 10_000));
   const t = await engine.createTournament(owner, {
-    game: "poker",
+    game: "trix",
     type: "paid",
     entryFee: 500,
     maxPlayers: 8,
@@ -225,11 +252,71 @@ test("heat ends after target rounds, not after a few minutes", async () => {
   assert.equal(finished.lifecycle, "finished");
 });
 
-test("house names use round labels", () => {
-  const name = catalog.houseName("poker", catalog.TIERS[0]);
-  assert.match(name, /جولات/);
-  assert.match(name, /صغيرة/);
-  assert.equal(name.includes(" د"), false);
+test("poker freezeout keeps going after 4 hands and ends when one stack remains", async () => {
+  const owner = await makeUser("Owner", OWNER_BAL);
+  const players = [];
+  for (let i = 0; i < 4; i++) players.push(await makeUser("F" + i, 10_000));
+  const t = await engine.createTournament(owner, {
+    game: "poker",
+    type: "paid",
+    entryFee: 500,
+    maxPlayers: 8,
+    minPlayers: 4,
+    rounds: 4,
+    startAt: startSoon(),
+  });
+  for (const p of players) await engine.register(p, t.id);
+  await engine.startTournament(t.id);
+  const started = await ArenaTournament.findById(t.id).lean();
+  assert.equal(started.startingChips, 1000);
+  assert.equal(started.tableIds.length, 1);
+  const Table = require("../models/tableModel");
+  const table = await Table.findById(started.tableIds[0]);
+  assert.equal(table.bigBlind, 100);
+  assert.equal(table.smallBlind, 50);
+
+  await ArenaTournament.updateOne({ _id: t.id }, { $set: { gamesCompleted: 4 } });
+  await engine.tick();
+  const still = await ArenaTournament.findById(t.id).lean();
+  assert.equal(still.lifecycle, "running", "poker must not end on round count");
+
+  table.seats = players.map((u, i) => ({
+    user: u,
+    chips: i === 0 ? 400_000 : 0,
+    seatPosition: i,
+  }));
+  await table.save();
+  const doc = await ArenaTournament.findById(t.id);
+  doc.participants.forEach((p, i) => {
+    p.chips = i === 0 ? 400_000 : 0;
+  });
+  await doc.save();
+
+  await engine.onGameFinished({
+    table: table.toObject(),
+    gameType: "poker",
+    gameResult: { winnerSeatIndices: [0] },
+    gamePlayers: players.map((u, i) => ({ userId: String(u), seatIndex: i })),
+  });
+  let ended = null;
+  for (let i = 0; i < 40; i += 1) {
+    ended = await ArenaTournament.findById(t.id).lean();
+    const champ = ended.participants.find((p) => String(p.user) === String(players[0]));
+    if (ended.lifecycle === "finished" && champ?.finishPlace === 1) break;
+    await new Promise((r) => setTimeout(r, 80));
+  }
+  assert.equal(ended.lifecycle, "finished");
+  const champ = ended.participants.find((p) => String(p.user) === String(players[0]));
+  assert.equal(champ.finishPlace, 1);
+});
+
+test("house names use freezeout label for poker and rounds for cards", () => {
+  const poker = catalog.houseName("poker", catalog.TIERS[0]);
+  assert.match(poker, /حتى الفوز/);
+  assert.match(poker, /صغيرة/);
+  const trix = catalog.houseName("trix", catalog.TIERS[0]);
+  assert.match(trix, /جولات/);
+  assert.equal(trix.includes(" د"), false);
 });
 
 test("house schedule is idempotent across 3 games × 5 tiers", async () => {

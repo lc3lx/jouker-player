@@ -1153,6 +1153,20 @@ function registerGameHandlers(nsp, jwtVerify) {
             : 0,
           volatility,
         });
+        const carried = isFreeSpin ? Number(fsBefore.totalMultiplier || 0) : 0;
+        const resolved = DiceEngine.resolvePayoutMultiplier({
+          baseWin: outcome.baseWin,
+          plaqueSum: outcome.multipliers.collected,
+          carried,
+          isFreeSpin,
+        });
+        const multiplied = Math.round(outcome.baseWin * resolved.applied * 100) / 100;
+        const winCap = outcome.maxWin;
+        outcome.totalWin = Math.min(multiplied, winCap);
+        outcome.capped = multiplied > winCap;
+        outcome.multipliers.applied = resolved.applied;
+        outcome.multipliers.freeSpinTotal = resolved.nextCarried;
+        outcome.winType = DiceEngine.classifyWinType(outcome.totalWin, stake);
         let payout = outcome.totalWin;
         let roundCapReached = outcome.capped;
 

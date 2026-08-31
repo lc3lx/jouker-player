@@ -10,7 +10,7 @@ const {
   RETRIGGER_AWARD,
   TRIGGER_NATURAL_MIN,
   TRIGGER_RETRIGGER_MIN,
-  appliedMultiplierFor,
+  resolvePayoutMultiplier,
   winTierFor,
   roundMoney,
 } = require("./constants");
@@ -75,14 +75,20 @@ async function executeSpin(userId, betAmountInput) {
   const spin = spinEngine.resolveSpin({ bonusMode: isFreeSpin, superBonus });
 
   // --- win math (bet multiples) ---
-  // Plaques multiply the sequence win when it exists — per spin, in both
-  // modes. Applied multiplier equals the face-value plaque sum (no soft-cap).
+  // Base: this spin's plaques multiply a winning sequence. Bonus: plaques from
+  // winning spins bank into a session total that multiplies later wins.
   // Losing spins ignore plaques for payout (they still count for the free-spins
   // trigger below). Overall win is still hard-capped by MAX_WIN_MULTIPLIER.
-  const appliedMultiplier =
-    spin.baseWin > 0 && spin.multiplierSum > 0
-      ? appliedMultiplierFor(spin.multiplierSum, isFreeSpin)
-      : 1;
+  const carried = isFreeSpin ? Number(bonusSession.bonusMultiplier || 0) : 0;
+  const { applied: appliedMultiplier, nextCarried } = resolvePayoutMultiplier({
+    baseWin: spin.baseWin,
+    plaqueSum: spin.multiplierSum,
+    carried,
+    isFreeSpin,
+  });
+  if (isFreeSpin) {
+    roundManager.setBonusMultiplier(userKey, nextCarried);
+  }
 
   let totalWinX = spin.baseWin * appliedMultiplier;
   const winCapped = totalWinX > MAX_WIN_MULTIPLIER;
@@ -177,6 +183,7 @@ async function executeSpin(userId, betAmountInput) {
     multiplierSum: spin.multiplierSum,
     multiplierCount,
     appliedMultiplier,
+    bonusMultiplier: isFreeSpin ? nextCarried : 0,
     baseWinAmount: roundMoney(spin.baseWin * betAmount),
     totalWin,
     winCapped,
@@ -254,6 +261,7 @@ async function getActiveSession(userId) {
     freeSpinsRemaining: session.freeSpinsRemaining,
     bonusTotalWon: session.totalWon,
     superBonus: !!session.superBonus,
+    bonusMultiplier: Number(session.bonusMultiplier || 0),
   };
 }
 
