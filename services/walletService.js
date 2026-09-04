@@ -96,20 +96,25 @@ function formatTxRow(tx, now = new Date()) {
   };
 }
 
-// @desc    Get user wallet
+function publicWalletBalances(wallet) {
+  const balance = Math.floor(Number(wallet?.balance) || 0);
+  const locked = Math.floor(Number(wallet?.lockedBalance) || 0);
+  return {
+    balance: Number.isFinite(balance) ? balance : 0,
+    lockedBalance: Number.isFinite(locked) ? locked : 0,
+    currency: wallet?.currency || "CHIPS",
+  };
+}
+
+// @desc    Get user wallet balances (HUD). Never ship the embedded
+//          transactions array — that payload grew until Flutter OOM-crashed.
 // @route   GET /api/v1/wallet
 // @access  Protected/User
-exports.getUserWallet = asyncHandler(async (req, res, next) => {
-  let wallet = await Wallet.findOne({ user: req.user._id }).populate("user", "name email");
-  if (!wallet) {
-    wallet = await Wallet.create({ user: req.user._id });
-    await User.findByIdAndUpdate(req.user._id, { wallet: wallet._id });
-    wallet = await Wallet.findById(wallet._id).populate("user", "name email");
-  }
-
+exports.getUserWallet = asyncHandler(async (req, res) => {
+  const wallet = await getOrCreateWallet(req.user._id);
   res.status(200).json({
     status: "success",
-    data: wallet,
+    data: publicWalletBalances(wallet),
   });
 });
 
@@ -382,9 +387,15 @@ exports.getWalletSummary = asyncHandler(async (req, res) => {
   ]);
 
   const now = new Date();
-  const currency = await getPublicCurrencySummary();
-  const balance = Math.floor(wallet.balance || 0);
-  const locked = Math.floor(wallet.lockedBalance || 0);
+  let currency = { currencyName: "رقاقة", currencyCode: "CHIPS", packages: [] };
+  try {
+    currency = await getPublicCurrencySummary();
+  } catch (_) {
+    // Balance must still load even if chip packages fail.
+  }
+  const balances = publicWalletBalances(wallet);
+  const balance = balances.balance;
+  const locked = balances.lockedBalance;
 
   res.status(200).json({
     status: "success",
@@ -395,7 +406,13 @@ exports.getWalletSummary = asyncHandler(async (req, res) => {
       currency: currency.currencyCode,
       currencyName: currency.currencyName,
       packages: currency.packages,
-      transactions: txs.map((t) => formatTxRow(t, now)),
+      transactions: txs.flatMap((t) => {
+        try {
+          return [formatTxRow(t, now)];
+        } catch {
+          return [];
+        }
+      }),
       pagination: {
         total: totalTx,
         limit,
@@ -408,18 +425,15 @@ exports.getWalletSummary = asyncHandler(async (req, res) => {
 // @desc    Check wallet balance
 // @route   GET /api/v1/wallet/balance
 // @access  Protected/User
-exports.checkWalletBalance = asyncHandler(async (req, res, next) => {
-  const wallet = await Wallet.findOne({ user: req.user._id });
-
-  if (!wallet) {
-    return next(new ApiError("Wallet not found", 404));
-  }
-
+exports.checkWalletBalance = asyncHandler(async (req, res) => {
+  const wallet = await getOrCreateWallet(req.user._id);
+  const balances = publicWalletBalances(wallet);
   res.status(200).json({
     status: "success",
     data: {
-      balance: wallet.balance,
-      currency: wallet.currency,
+      balance: balances.balance,
+      lockedBalance: balances.lockedBalance,
+      currency: balances.currency,
     },
   });
 });
