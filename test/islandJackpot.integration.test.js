@@ -20,21 +20,22 @@ for (const [name, cards] of Object.entries(ISLAND_HANDS)) {
 }
 
 describe("Island Jackpot — integration (MongoDB replica set)", () => {
-  test("join twice — already a member returns 200 and does not double-charge", async () => {
+  test("join twice — second buy adds another entry fee to the pool", async () => {
     await withHarness(async (h) => {
       const user = await h.createUser({ balance: 500_000 });
       await h.configurePool({ minTriggerAmount: 100_000, entryFee: 50_000, poolBalance: 0 });
 
       const first = await h.joinMember(user);
       assert.equal(first.statusCode, 200);
+      h.service.resetJoinCooldownForTests();
       const second = await h.joinMember(user);
       assert.equal(second.statusCode, 200);
       assert.equal(second.data.data.isMember, true);
-      assert.equal(second.data.data.alreadyMember, true);
+      assert.equal(second.data.data.poolBalance, 100_000);
 
-      assert.equal(await h.getWalletBalance(user._id), 450_000);
+      assert.equal(await h.getWalletBalance(user._id), 400_000);
       const pool = await h.getPool();
-      assert.equal(pool.poolBalance, 50_000);
+      assert.equal(pool.poolBalance, 100_000);
       assert.equal(await IslandMember.countDocuments({ userId: user._id, active: true }), 1);
     });
   });

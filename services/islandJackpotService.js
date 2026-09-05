@@ -258,15 +258,6 @@ exports.joinIslandJackpot = asyncHandler(async (req, res) => {
     }
   }
 
-  const existing = await IslandMember.findOne({ userId, active: true }).lean();
-  if (existing) {
-    const snapshot = await buildStatusSnapshot(userId);
-    return res.status(200).json({
-      status: "success",
-      data: { ...snapshot, alreadyMember: true },
-    });
-  }
-
   const lastJoin = _joinCooldown.get(uid) || 0;
   if (Date.now() - lastJoin < JOIN_COOLDOWN_MS) {
     throw new ApiError("Please wait before joining again", 429);
@@ -317,16 +308,14 @@ exports.joinIslandJackpot = asyncHandler(async (req, res) => {
       session ? { session } : undefined
     );
 
-    await IslandMember.create(
-      [
-        {
-          userId,
-          active: true,
-          totalContributed: fee,
-          lastEntryTxnId: txnId,
-        },
-      ],
-      session ? { session } : undefined
+    await IslandMember.findOneAndUpdate(
+      { userId },
+      {
+        $set: { active: true, lastEntryTxnId: txnId },
+        $inc: { totalContributed: fee },
+        $setOnInsert: { joinedAt: new Date() },
+      },
+      { upsert: true, new: true, ...(session ? { session } : {}) }
     );
 
     await JackpotTransaction.create(
