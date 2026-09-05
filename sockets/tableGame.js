@@ -2675,7 +2675,19 @@ class PokerTable {
     try {
       const table = await Table.findById(this.tableId).select("seats capacity status gameType pokerOwnerFence");
       if (!table || table.gameType !== "poker") return;
-      if (this.ownershipFence > 0 && toSafeInt(table.pokerOwnerFence, 0) > this.ownershipFence) {
+      const clusterFencing = !!(this.stateStore && this.stateStore.isEnabled());
+      if (
+        clusterFencing &&
+        this.ownershipFence > 0 &&
+        toSafeInt(table.pokerOwnerFence, 0) > this.ownershipFence
+      ) {
+        // #region agent log
+        _dbg7("G", "tableGame.js:syncMongoTableStatus", "fence_demote", {
+          tableId: String(this.tableId),
+          localFence: this.ownershipFence,
+          mongoFence: toSafeInt(table.pokerOwnerFence, 0),
+        });
+        // #endregion
         this.isOwner = false;
         this.disposeTimers();
         return;
@@ -2956,6 +2968,19 @@ class PokerTable {
         this._ensureDealerAtSeatPosition(0);
       }
       await this.startHand();
+      if (this.round === "idle") {
+        // #region agent log
+        _dbg7("G", "tableGame.js:startIfReady", "startHand_left_idle", {
+          tableId: String(this.tableId),
+          isOwner: !!this.isOwner,
+          running: !!this.running,
+          frozen: !!this.frozen,
+          active: this.activeSeatCount(),
+          seatedHumans: this.seatedHumanCount(),
+        });
+        // #endregion
+        this.running = false;
+      }
     } catch (err) {
       // A throw during the deal must NOT strand running=true with no armed timer
       // (watchdog-blind, F3). Reset to a clean idle so the next start / heal /
@@ -3177,7 +3202,16 @@ class PokerTable {
   }
 
   async startHand() {
-    if (!this.isOwner) return; // H-3: only the owner deals hands
+    if (!this.isOwner) {
+      // #region agent log
+      _dbg7("G", "tableGame.js:startHand", "abort_not_owner", {
+        tableId: String(this.tableId),
+        fence: this.ownershipFence,
+        round: this.round,
+      });
+      // #endregion
+      return;
+    }
     this.clearActionScheduling();
     promoteWaitingToSeated(this.seats);
     this.reindexSeatsByPosition();
@@ -3203,7 +3237,15 @@ class PokerTable {
     // Reset
     this.community = [];
     this.pot = 0;
-    if (!this.setRound("preflop")) return;
+    if (!this.setRound("preflop")) {
+      // #region agent log
+      _dbg7("I", "tableGame.js:startHand", "abort_setRound", {
+        tableId: String(this.tableId),
+        round: this.round,
+      });
+      // #endregion
+      return;
+    }
     this.currentBet = 0;
     this.minRaise = this.openingRaiseSize();
     this.lastRaiseAmount = this.openingRaiseSize();
@@ -4625,7 +4667,12 @@ class PokerTable {
         const tableQuery = Table.findById(this.tableId);
         const table = session ? await tableQuery.session(session) : await tableQuery;
         if (table) {
-          if (this.ownershipFence > 0 && toSafeInt(table.pokerOwnerFence, 0) > this.ownershipFence) {
+          if (
+            this.stateStore &&
+            this.stateStore.isEnabled() &&
+            this.ownershipFence > 0 &&
+            toSafeInt(table.pokerOwnerFence, 0) > this.ownershipFence
+          ) {
             throw new Error("POKER_FENCE_LOST");
           }
           let humanNetDelta = 0;
@@ -5819,6 +5866,17 @@ function initTableGame(io, options = {}) {
    */
   async function ownerRunOrForward(tableId, forwardCmd, runLocal) {
     const game = await registry.get(String(tableId));
+    // #region agent log
+    _dbg7("F", "tableGame.js:ownerRunOrForward", "resolve", {
+      tableId: String(tableId),
+      type: forwardCmd?.type || "",
+      hasGame: !!game,
+      isOwner: !!(game && game.isOwner),
+      running: !!(game && game.running),
+      round: game ? game.round : null,
+      fence: game ? game.ownershipFence : null,
+    });
+    // #endregion
     if (!game) return;
     if (game.isOwner) {
       await runLocal(game);
