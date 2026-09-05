@@ -327,28 +327,44 @@ exports.refreshTrixGameSeats = refreshTrixGameSeats;
 exports.markTrixTablePlaying = markTrixTablePlaying;
 exports.markTarneeb41TablePlaying = markTarneeb41TablePlaying;
 
+function countVisibleLobbySeats(tableObj) {
+  const pending = new Set(
+    (tableObj.pendingPermanentLeaves || []).map((entry) =>
+      String(entry?.user?._id || entry?.user || "")
+    )
+  );
+  return (tableObj.seats || []).filter((seat) => {
+    const uid = String(seat?.user?._id || seat?.user || "");
+    return uid && !pending.has(uid);
+  }).length;
+}
+
 function enrichPokerTableRow(tableObj, live) {
-  const seatedCount = countMongoSeats(tableObj.seats);
+  const seatedCount = countVisibleLobbySeats(tableObj);
   const cap = normalizeCapacity(tableObj.capacity);
+  const ghostEmpty = seatedCount <= 0;
+  const liveUse = ghostEmpty ? null : live;
   const playing =
-    live &&
-    live.running === true &&
-    live.round &&
-    String(live.round) !== "idle";
-  const tableStatus =
-    tableObj.status && ["waiting", "ready", "playing", "full"].includes(tableObj.status)
+    !ghostEmpty &&
+    liveUse &&
+    liveUse.running === true &&
+    liveUse.round &&
+    String(liveUse.round) !== "idle";
+  const tableStatus = ghostEmpty
+    ? "waiting"
+    : tableObj.status && ["waiting", "ready", "playing", "full"].includes(tableObj.status)
       ? tableObj.status
       : derivePokerTableStatus({
           mongoSeatCount: seatedCount,
           capacity: cap,
-          running: live?.running,
-          round: live?.round,
+          running: liveUse?.running,
+          round: liveUse?.round,
         });
   const lobby = buildPokerLobbyFields({
     mongoSeatCount: seatedCount,
     capacity: cap,
-    running: live?.running,
-    round: live?.round,
+    running: liveUse?.running,
+    round: liveUse?.round,
   });
   return {
     ...tableObj,
@@ -358,8 +374,8 @@ function enrichPokerTableRow(tableObj, live) {
     tableStatus,
     canStart: lobby.canStart,
     liveStatus: playing ? "playing" : tableStatus,
-    liveRound: live?.round || null,
-    livePot: live?.pot ?? null,
+    liveRound: liveUse?.round || null,
+    livePot: liveUse?.pot ?? null,
   };
 }
 
@@ -771,6 +787,25 @@ exports.joinTable = asyncHandler(async (req, res, next) => {
     }
   }
 
+  if (table.gameType === "poker") {
+    const { userCannotRejoinPokerTable } = require("./pokerVacateService");
+    const { findAvailablePokerTable } = require("./pokerTableAllocationService");
+    const liveSnap = getTableGameDebugSnapshot(String(id));
+    const abandoning = (liveSnap?.abandoningUserIds || []).some(
+      (u) => String(u) === String(req.user._id)
+    );
+    if (userCannotRejoinPokerTable(table, req.user._id) || abandoning) {
+      const alt = await findAvailablePokerTable(
+        table.tier,
+        Number(buyIn) > 0 ? Number(buyIn) : table.minBuyIn,
+        null,
+        { excludeIds: [String(id)], excludeUserId: req.user._id }
+      );
+      id = String(alt._id);
+      table = alt;
+    }
+  }
+
   // One table per player: reject if the user is active (seated, mid-vacate
   // grace, or queued) anywhere else — any game type, any tier. Excludes the
   // target table itself so the reconnect-anchor branches below still work.
@@ -802,18 +837,6 @@ exports.joinTable = asyncHandler(async (req, res, next) => {
           rtcRoom: { roomId: String(id), type: "table" },
         },
       });
-    }
-  }
-
-  // Reconnect anchor: user already seated at an active table for this tier — skip re-join.
-  if (table.gameType === "poker") {
-    const { userCannotRejoinPokerTable } = require("./pokerVacateService");
-    if (userCannotRejoinPokerTable(table, req.user._id)) {
-      return next(new ApiError("لا يمكنك العودة إلى هذه الطاولة بعد المغادرة", 403));
-    }
-    const liveSnap = getTableGameDebugSnapshot(String(id));
-    if ((liveSnap?.abandoningUserIds || []).some((u) => String(u) === String(req.user._id))) {
-      return next(new ApiError("لا يمكنك العودة إلى هذه الطاولة بعد المغادرة", 403));
     }
   }
 
@@ -853,26 +876,28 @@ exports.joinTable = asyncHandler(async (req, res, next) => {
         });
       }
     } else {
-      if (existingSeatTable.gameType === "poker") {
-        const { userCannotRejoinPokerTable } = require("./pokerVacateService");
-        if (userCannotRejoinPokerTable(existingSeatTable, req.user._id)) {
-          return next(new ApiError("لا يمكنك العودة إلى هذه الطاولة بعد المغادرة", 403));
-        }
+      const pokerBlocked =
+        existingSeatTable.gameType === "poker" &&
+        require("./pokerVacateService").userCannotRejoinPokerTable(
+          existingSeatTable,
+          req.user._id
+        );
+      if (!pokerBlocked) {
+        const seat = existingSeatTable.seats.find(
+          (s) => String(s.user) === String(req.user._id)
+        );
+        return res.status(200).json({
+          status: "success",
+          message: "Reconnected to existing seat",
+          data: {
+            tableId: String(existingSeatTable._id),
+            tableNumber: existingSeatTable.tableNumber,
+            chips: seat?.chips ?? buyIn,
+            reconnect: true,
+            rtcRoom: { roomId: String(existingSeatTable._id), type: "table" },
+          },
+        });
       }
-      const seat = existingSeatTable.seats.find(
-        (s) => String(s.user) === String(req.user._id)
-      );
-      return res.status(200).json({
-        status: "success",
-        message: "Reconnected to existing seat",
-        data: {
-          tableId: String(existingSeatTable._id),
-          tableNumber: existingSeatTable.tableNumber,
-          chips: seat?.chips ?? buyIn,
-          reconnect: true,
-          rtcRoom: { roomId: String(existingSeatTable._id), type: "table" },
-        },
-      });
     }
   }
 
@@ -1126,6 +1151,9 @@ exports.joinTable = asyncHandler(async (req, res, next) => {
     if (e.message === "TABLE_CREATE_FAILED") {
       throw new ApiError("Could not allocate a table — try again", 503);
     }
+    if (e.message === "REJOIN_BLOCKED") {
+      throw new ApiError("تعذر إيجاد طاولة أخرى بعد المغادرة", 409);
+    }
     if (e.message === "INVALID_BUYIN") {
       throw new ApiError("Invalid buy-in for this table", 400);
     }
@@ -1363,7 +1391,10 @@ exports.leaveTable = asyncHandler(async (req, res, next) => {
   const livePoker = table.gameType === "poker"
     ? getTableGameDebugSnapshot(String(id))
     : null;
-  const pokerHandInProgress = table.gameType === "poker" && (
+  const { remainingHumansAfterLeave } = require("./pokerVacateService");
+  const lastHuman =
+    table.gameType === "poker" && remainingHumansAfterLeave(table, req.user._id) === 0;
+  const pokerHandInProgress = table.gameType === "poker" && !lastHuman && (
     table.status === "playing" ||
     (livePoker?.running === true && String(livePoker?.round || "idle") !== "idle")
   );

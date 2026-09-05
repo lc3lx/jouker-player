@@ -11,6 +11,22 @@ test("removeLiveHumanSeat is exported from table game bridge", () => {
   assert.equal(typeof bridge.removeLiveHumanSeat, "function");
 });
 
+test("remainingHumansAfterLeave is 0 when the leaver is the only seated human", () => {
+  const { remainingHumansAfterLeave } = require("../services/pokerVacateService");
+  const uid = "6a355901480bec8d89f85847";
+  assert.equal(
+    remainingHumansAfterLeave({ seats: [{ user: uid }], vacatingPlayers: [] }, uid),
+    0
+  );
+  assert.equal(
+    remainingHumansAfterLeave(
+      { seats: [{ user: uid }, { user: "6a355901480bec8d89f85848" }], vacatingPlayers: [] },
+      uid
+    ),
+    1
+  );
+});
+
 test("userCannotRejoinPokerTable is true after a permanent leave block", () => {
   const { userCannotRejoinPokerTable, isUserRejoinBlocked } = require("../services/pokerVacateService");
   const uid = "6a355901480bec8d89f85847";

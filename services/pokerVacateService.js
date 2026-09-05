@@ -48,6 +48,15 @@ function userCannotRejoinPokerTable(table, userId) {
   return hasPendingPermanentLeave(table, userId) || isUserRejoinBlocked(table, userId);
 }
 
+function remainingHumansAfterLeave(table, userId) {
+  const uid = String(userId);
+  const seats = (table?.seats || []).filter((s) => String(s.user) !== uid).length;
+  const vacating = (table?.vacatingPlayers || []).filter(
+    (v) => String(v.user) !== uid && isVacateActive(v)
+  ).length;
+  return seats + vacating;
+}
+
 /** Persist a voluntary in-hand leave before folding the engine seat. */
 async function markPendingPermanentLeave({ tableId, userId }) {
   const tid = String(tableId);
@@ -315,12 +324,11 @@ async function permanentLeavePokerTable({
     await withMongoTransaction(async (session) => {
       const table = await Table.findById(tid).session(session);
       if (!table || table.gameType !== "poker") throw new Error("NOT_POKER");
-      // Seat balances are persisted at hand settlement, not on each action.
-      // Returning one while a hand is live would race the pot settlement.
-      if (table.status === "playing") throw new Error("HAND_IN_PROGRESS");
-      // N-1: never cash out a seat while the engine is mid-settlement for this
-      // table — the two writes to table.seats[].chips must not interleave.
-      if (table.activeSettlementId) throw new Error("SETTLEMENT_IN_PROGRESS");
+      const lastHuman = remainingHumansAfterLeave(table, uid) === 0;
+      // Last real player: cash out and reset immediately, even mid-hand.
+      // With other humans still seated, wait for settlement so pot chips stay consistent.
+      if (!lastHuman && table.status === "playing") throw new Error("HAND_IN_PROGRESS");
+      if (!lastHuman && table.activeSettlementId) throw new Error("SETTLEMENT_IN_PROGRESS");
 
       const vacEntry = findActiveVacatingEntry(table, uid);
       if (vacEntry) {
@@ -411,6 +419,7 @@ async function permanentLeavePokerTable({
     userId: uid,
     cashedOut,
     remainingHumans: afterLeave?.seats?.length || 0,
+    lastHumanReset: (afterLeave?.seats?.length || 0) === 0,
   });
 
   return { left: true, cashedOut };
@@ -521,6 +530,7 @@ module.exports = {
   permanentLeavePokerTable,
   isUserRejoinBlocked,
   userCannotRejoinPokerTable,
+  remainingHumansAfterLeave,
   hasPendingPermanentLeave,
   markPendingPermanentLeave,
   clearPendingPermanentLeave,
