@@ -2275,6 +2275,51 @@ class PokerTable {
     void this.resyncTurnAfterReconnect(userId);
   }
 
+  async healSeatsMissingSockets(exceptUserId = null) {
+    try {
+      const nsp = this.nsp;
+      if (!nsp) return 0;
+      const sockets = await nsp.in(`tg:${this.tableId}`).fetchSockets();
+      const online = new Set(
+        sockets
+          .map((s) => String(s.data?.userId || s.userId || ""))
+          .filter(Boolean)
+      );
+      if (exceptUserId) online.add(String(exceptUserId));
+      let healed = 0;
+      for (const seat of this.seats) {
+        if (!seat || seat.isBot) continue;
+        const uid = String(seat.userId || "");
+        if (!uid || online.has(uid)) continue;
+        const st = seat.playerState || PLAYER_STATE.SEATED;
+        if (
+          st === PLAYER_STATE.DISCONNECTED ||
+          st === PLAYER_STATE.SITTING_OUT ||
+          st === PLAYER_STATE.LEAVE_PENDING
+        ) {
+          continue;
+        }
+        this.onPlayerSocketDisconnected(uid);
+        healed += 1;
+      }
+      // #region agent log
+      if (healed > 0) {
+        try {
+          require("../utils/agentDebugLog").sessionDebugLog(
+            "C",
+            "tableGame.js:healSeatsMissingSockets",
+            "healed zombie seats",
+            { tableId: String(this.tableId), healed }
+          );
+        } catch (_) {}
+      }
+      // #endregion
+      return healed;
+    } catch (_) {
+      return 0;
+    }
+  }
+
   /**
    * Unstick turn timer after app kill / socket drop: enforce overdue timeout or reschedule.
    */
@@ -2699,6 +2744,7 @@ class PokerTable {
 
   async bootstrapLobbyStart() {
     if (!this.isOwner) return; // H-3: followers never start the loop
+    await this.healSeatsMissingSockets();
     if (this.frozen && !this.running) {
       this._tryUnfreezeFromChipProbe("bootstrap");
     }
@@ -2742,6 +2788,7 @@ class PokerTable {
   async startIfReady({ refreshFromDb = true, allowBotFill = false } = {}) {
     if (!this.isOwner) return; // H-3
     if (this.frozen) return;
+    await this.healSeatsMissingSockets();
     if (this.running || this.starting) return;
     if (this.round !== "idle") {
       if (!this.running) this.healStaleRoundIfNotRunning();
@@ -5869,9 +5916,14 @@ function initTableGame(io, options = {}) {
               game.seats[idx].clientSeed = clientSeed.trim().slice(0, 128);
             }
             if (game.round === "idle" && !game.running && !game.frozen) {
+              await game.healSeatsMissingSockets(socket.userId);
               await game.bootstrapLobbyStart();
             } else {
+              await game.healSeatsMissingSockets(socket.userId);
               await game.refreshSeatsFromDb();
+              if (game.running) {
+                await game.resyncTurnAfterReconnect(socket.userId);
+              }
               await game.broadcastState();
             }
             const p = game.getPublicState(null);
