@@ -22,6 +22,30 @@ function _agentDbg(hypothesisId, location, message, data = {}) {
     );
   } catch (_) {}
 }
+function _dbg7(hypothesisId, location, message, data = {}) {
+  const payload = {
+    sessionId: "7d1f00",
+    hypothesisId,
+    location,
+    message,
+    data,
+    timestamp: Date.now(),
+    runId: "pre-fix",
+  };
+  try {
+    logger.info("AGENT_DEBUG_7d1f00", payload);
+  } catch (_) {}
+  try {
+    fs.appendFileSync(path.join(__dirname, "..", "..", "debug-7d1f00.log"), `${JSON.stringify(payload)}\n`);
+  } catch (_) {}
+  try {
+    fetch("http://127.0.0.1:7937/ingest/b9a00eef-7143-4edb-b1d5-038072464bf7", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", "X-Debug-Session-Id": "7d1f00" },
+      body: JSON.stringify(payload),
+    }).catch(() => {});
+  } catch (_) {}
+}
 // #endregion
 const HandHistory = require("../models/handHistoryModel");
 const { newDeck, shuffleDeterministic, draw, sha256Hex, randomInt: secureRandomInt } = require("../utils/poker/deck");
@@ -2743,17 +2767,37 @@ class PokerTable {
   }
 
   async bootstrapLobbyStart() {
-    if (!this.isOwner) return; // H-3: followers never start the loop
+    if (!this.isOwner) {
+      // #region agent log
+      _dbg7("B", "tableGame.js:bootstrapLobbyStart", "abort", { reason: "not_owner", tableId: String(this.tableId), round: this.round });
+      // #endregion
+      return;
+    }
     await this.healSeatsMissingSockets();
     if (this.frozen && !this.running) {
       this._tryUnfreezeFromChipProbe("bootstrap");
     }
-    if (this.frozen) return;
-    if (this.running) return;
+    if (this.frozen) {
+      // #region agent log
+      _dbg7("B", "tableGame.js:bootstrapLobbyStart", "abort", { reason: "frozen", tableId: String(this.tableId), round: this.round });
+      // #endregion
+      return;
+    }
+    if (this.running) {
+      // #region agent log
+      _dbg7("B", "tableGame.js:bootstrapLobbyStart", "abort", { reason: "running", tableId: String(this.tableId), round: this.round });
+      // #endregion
+      return;
+    }
     if (this.round !== "idle") {
       this.healStaleRoundIfNotRunning();
     }
-    if (this.round !== "idle") return;
+    if (this.round !== "idle") {
+      // #region agent log
+      _dbg7("E", "tableGame.js:bootstrapLobbyStart", "abort", { reason: "non_idle", tableId: String(this.tableId), round: this.round });
+      // #endregion
+      return;
+    }
 
     await this.refreshSeatsFromDb();
     await this.autoRebuyBustedHumans();
@@ -2830,6 +2874,16 @@ class PokerTable {
       // #endregion
 
       if (humans < POKER_MIN_PLAYERS && !canStartWithBots) {
+        // #region agent log
+        _dbg7("C", "tableGame.js:startIfReady", "wait_not_start", {
+          tableId: String(this.tableId),
+          botsEnabled: this.botsEnabled,
+          seatedHumans: this.seatedHumanCount(),
+          eligible: humans,
+          active: this.activeSeatCount(),
+          canStartWithBots,
+        });
+        // #endregion
         this.running = false;
         this.clearActionScheduling();
         this.clearBotFillTimer();
@@ -5917,6 +5971,17 @@ function initTableGame(io, options = {}) {
             }
             if (game.round === "idle" && !game.running && !game.frozen) {
               await game.healSeatsMissingSockets(socket.userId);
+              // #region agent log
+              _dbg7("A", "tableGame.js:join_table", "bootstrap_path", {
+                tableId: String(tableId),
+                seatIdx: idx,
+                round: game.round,
+                running: game.running,
+                seatedHumans: game.seatedHumanCount(),
+                active: game.activeSeatCount(),
+                botsEnabled: game.botsEnabled,
+              });
+              // #endregion
               await game.bootstrapLobbyStart();
             } else {
               await game.healSeatsMissingSockets(socket.userId);
@@ -6076,7 +6141,26 @@ function initTableGame(io, options = {}) {
         const vacatingNow = !!(again && (again.vacatingPlayers || []).some(
           (v) => String(v.user) === uid && new Date(v.vacateUntil).getTime() > Date.now()
         ));
-        if (!isSeated && !vacatingNow && !socket.rooms.has(`tg:${tableId}`)) return;
+        const inRoom = socket.rooms.has(`tg:${tableId}`);
+        // #region agent log
+        _dbg7("A", "tableGame.js:start-if-ready", "seat_check", {
+          tableId: String(tableId),
+          isSeated,
+          vacatingNow,
+          inRoom,
+          dropped: !isSeated && !vacatingNow && !inRoom,
+        });
+        // #endregion
+        if (!isSeated && !vacatingNow && !inRoom) return;
+      } else {
+        // #region agent log
+        _dbg7("A", "tableGame.js:start-if-ready", "seat_check", {
+          tableId: String(tableId),
+          isSeated,
+          isVacating,
+          dropped: false,
+        });
+        // #endregion
       }
       await ownerRunOrForward(
         String(tableId),
