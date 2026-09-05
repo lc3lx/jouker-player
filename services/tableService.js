@@ -367,15 +367,32 @@ function enrichPokerTableRow(tableObj, live) {
  * Lobby clients only need seat counts and whether *they* are seated. Do not
  * publish the roster or waiting-list identities in a list endpoint.
  */
+function viewerHasLeftPokerSession(row, viewerId) {
+  const viewer = String(viewerId || "");
+  if (!viewer) return false;
+  const pending = (row.pendingPermanentLeaves || []).some(
+    (entry) => String(entry?.user?._id || entry?.user || "") === viewer
+  );
+  if (pending) return true;
+  const blocked = (row.rejoinBlockedUsers || []).some(
+    (entry) => String(entry?.user?._id || entry?.user || "") === viewer
+  );
+  if (blocked) return true;
+  const live = getTableGameDebugSnapshot(String(row._id || ""));
+  return (live?.abandoningUserIds || []).some((uid) => String(uid) === viewer);
+}
+
 function redactPokerLobbyRoster(row, viewerId) {
   const seats = Array.isArray(row.seats) ? row.seats : [];
   const vacatingPlayers = Array.isArray(row.vacatingPlayers)
     ? row.vacatingPlayers
     : [];
   const viewer = String(viewerId || "");
-  const currentUserSeated = viewer
+  const leftSession = viewerHasLeftPokerSession(row, viewer);
+  const inSeats = viewer
     ? seats.some((seat) => String(seat?.user?._id || seat?.user || "") === viewer)
     : false;
+  const currentUserSeated = inSeats && !leftSession;
   const currentUserVacating = viewer
     ? vacatingPlayers.some(
         (entry) => String(entry?.user?._id || entry?.user || "") === viewer
@@ -385,6 +402,8 @@ function redactPokerLobbyRoster(row, viewerId) {
     seats: _seats,
     waitingQueue: _waitingQueue,
     vacatingPlayers: _vacatingPlayers,
+    pendingPermanentLeaves: _pendingPermanentLeaves,
+    rejoinBlockedUsers: _rejoinBlockedUsers,
     ...safeRow
   } = row;
   return {
@@ -395,7 +414,8 @@ function redactPokerLobbyRoster(row, viewerId) {
       vacateUntil: entry?.vacateUntil ?? null,
     })),
     currentUserSeated,
-    currentUserVacating,
+    // Poker leave/app-close is final — never advertise a vacate return.
+    currentUserVacating: currentUserVacating && !leftSession,
   };
 }
 
@@ -455,7 +475,7 @@ exports.getTables = asyncHandler(async (req, res) => {
     .skip(skip)
     .limit(limit)
     .select(
-      "gameType tier tableNumber smallBlind bigBlind minBuyIn maxBuyIn capacity seats status waitingQueue vacatingPlayers"
+      "gameType tier tableNumber smallBlind bigBlind minBuyIn maxBuyIn capacity seats status waitingQueue vacatingPlayers pendingPermanentLeaves rejoinBlockedUsers"
     );
 
   const summaryMatch = {
@@ -536,7 +556,7 @@ exports.getPrivateTables = asyncHandler(async (req, res) => {
     .sort({ updatedAt: -1 })
     .limit(100)
     .select(
-      "gameType tier tableNumber displayName smallBlind bigBlind minBuyIn maxBuyIn capacity seats status isPrivate tableKind owner settings"
+      "gameType tier tableNumber displayName smallBlind bigBlind minBuyIn maxBuyIn capacity seats status isPrivate tableKind owner settings pendingPermanentLeaves rejoinBlockedUsers"
     );
   const data = tables.map((table) => {
     const obj = table.toObject ? table.toObject() : table;
