@@ -1225,6 +1225,22 @@ exports.leaveTable = asyncHandler(async (req, res, next) => {
   // Queue cancellation must never become a seat cash-out if a queue entry was
   // promoted between the client refresh and this request.
   const queueOnly = req.body?.queueOnly === true || req.body?.queueOnly === "1";
+  // #region agent log
+  try {
+    require("../utils/agentDebugLog").sessionDebugLog(
+      "E",
+      "tableService.js:leaveTable",
+      "REST leave",
+      {
+        tableId: String(id),
+        queueOnly,
+        appExit: req.body?.appExit === true || req.body?.appExit === "1",
+        reason: req.body?.reason || null,
+        gameType: table.gameType,
+      }
+    );
+  } catch (_) {}
+  // #endregion
 
   // Do not decide from the snapshot above: a queue promotion can complete
   // between that read and this request. dequeuePlayer rechecks the seat and

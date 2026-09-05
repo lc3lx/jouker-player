@@ -2313,6 +2313,21 @@ class PokerTable {
     if (seat.playerState === PLAYER_STATE.LEAVE_PENDING) return;
     const reconnectWindowMs = require("../services/tableLifecycleSettingsService").getSettings()
       .pokerReconnectWindowMs;
+    // #region agent log
+    try {
+      require("../utils/agentDebugLog").sessionDebugLog(
+        "C",
+        "tableGame.js:onPlayerSocketDisconnected",
+        "started reconnect window",
+        {
+          tableId: String(this.tableId),
+          seatState: seat.playerState,
+          reconnectWindowMs,
+          inHand: !!seat.inHand,
+        }
+      );
+    } catch (_) {}
+    // #endregion
     this.clearReconnectTimer(userId);
     seat.disconnectedAt = Date.now();
     seat.reconnectDeadline = seat.disconnectedAt + reconnectWindowMs;
@@ -2327,6 +2342,21 @@ class PokerTable {
         if (i < 0) return;
         const s = this.seats[i];
         if (s.playerState !== PLAYER_STATE.DISCONNECTED) return;
+        // #region agent log
+        try {
+          require("../utils/agentDebugLog").sessionDebugLog(
+            "D",
+            "tableGame.js:reconnectTimeout",
+            "reconnect window expired",
+            {
+              tableId: String(this.tableId),
+              inHand: !!s.inHand,
+              allIn: !!s.allIn,
+              playerState: s.playerState,
+            }
+          );
+        } catch (_) {}
+        // #endregion
         // The reconnect grace expired. Fold safely, then request a durable
         // post-settlement cash-out; disconnected money is never forfeited or
         // transferred to a bot.
@@ -5750,9 +5780,29 @@ function initTableGame(io, options = {}) {
         });
         // #endregion
         if (!isSeated && !isVacating) {
+          // #region agent log
+          try {
+            require("../utils/agentDebugLog").sessionDebugLog(
+              "D",
+              "tableGame.js:handleJoinTable",
+              "join rejected not seated",
+              { tableId: String(tableId), isSeated, isVacating }
+            );
+          } catch (_) {}
+          // #endregion
           socket.emit("table_event", { type: "not_seated", tableId: String(tableId) });
           return;
         }
+        // #region agent log
+        try {
+          require("../utils/agentDebugLog").sessionDebugLog(
+            "D",
+            "tableGame.js:handleJoinTable",
+            "join accepted",
+            { tableId: String(tableId), isSeated, isVacating }
+          );
+        } catch (_) {}
+        // #endregion
 
         const socketDeviceId =
           socket.handshake?.headers?.["x-device-id"] ||
@@ -6141,6 +6191,21 @@ function initTableGame(io, options = {}) {
         // joined to this table (another tab/device), this disconnect is not
         // real abandonment — skip starting a reconnect/vacate timer.
         const remaining = await socketPresenceService.releaseSocket(game.tableId, socket.userId, socket.id);
+        // #region agent log
+        try {
+          require("../utils/agentDebugLog").sessionDebugLog(
+            "C",
+            "tableGame.js:socket.disconnect",
+            "socket drop",
+            {
+              tableId: String(game.tableId),
+              remaining,
+              isOwner: !!game.isOwner,
+              isSpectator: !!socket.isSpectator,
+            }
+          );
+        } catch (_) {}
+        // #endregion
         if (remaining > 0) continue;
         if (game.isOwner) {
           game.onPlayerSocketDisconnected(socket.userId);
