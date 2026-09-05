@@ -148,8 +148,14 @@ async function buildStatusSnapshot(userId = null) {
 
 exports.getIslandStatus = asyncHandler(async (req, res) => {
   const userId = req.user?._id || null;
-  const snapshot = await getCachedStatus(() => buildStatusSnapshot(userId));
-  res.status(200).json({ status: "success", data: snapshot });
+  // Shared cache must stay user-agnostic — isMember is overlaid per request.
+  const snapshot = await getCachedStatus(() => buildStatusSnapshot(null));
+  let isMember = false;
+  if (userId) {
+    const m = await IslandMember.findOne({ userId, active: true }).select("_id").lean();
+    isMember = !!m;
+  }
+  res.status(200).json({ status: "success", data: { ...snapshot, isMember } });
 });
 
 exports.getIslandHistory = asyncHandler(async (req, res) => {
@@ -252,13 +258,19 @@ exports.joinIslandJackpot = asyncHandler(async (req, res) => {
     }
   }
 
+  const existing = await IslandMember.findOne({ userId, active: true }).lean();
+  if (existing) {
+    const snapshot = await buildStatusSnapshot(userId);
+    return res.status(200).json({
+      status: "success",
+      data: { ...snapshot, alreadyMember: true },
+    });
+  }
+
   const lastJoin = _joinCooldown.get(uid) || 0;
   if (Date.now() - lastJoin < JOIN_COOLDOWN_MS) {
     throw new ApiError("Please wait before joining again", 429);
   }
-
-  const existing = await IslandMember.findOne({ userId, active: true }).lean();
-  if (existing) throw new ApiError("Already an Island member", 409);
 
   const pool = await IslandPool.getSingleton();
   if (!pool.enabled) throw new ApiError("Island Jackpot is disabled", 403);

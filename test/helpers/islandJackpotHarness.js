@@ -158,6 +158,15 @@ class IslandJackpotHarness {
     return pool;
   }
 
+  async getStatus(user = null) {
+    return this._invokeHandler(this.service.getIslandStatus, {
+      user: user ? { _id: user._id } : {},
+      headers: {},
+      query: {},
+      body: {},
+    });
+  }
+
   async joinMember(user, { idempotencyKey = null } = {}) {
     return this._invokeHandler(this.service.joinIslandJackpot, {
       user: { _id: user._id },

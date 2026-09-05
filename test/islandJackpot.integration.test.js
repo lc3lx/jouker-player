@@ -20,6 +20,42 @@ for (const [name, cards] of Object.entries(ISLAND_HANDS)) {
 }
 
 describe("Island Jackpot — integration (MongoDB replica set)", () => {
+  test("join twice — already a member returns 200 and does not double-charge", async () => {
+    await withHarness(async (h) => {
+      const user = await h.createUser({ balance: 500_000 });
+      await h.configurePool({ minTriggerAmount: 100_000, entryFee: 50_000, poolBalance: 0 });
+
+      const first = await h.joinMember(user);
+      assert.equal(first.statusCode, 200);
+      const second = await h.joinMember(user);
+      assert.equal(second.statusCode, 200);
+      assert.equal(second.data.data.isMember, true);
+      assert.equal(second.data.data.alreadyMember, true);
+
+      assert.equal(await h.getWalletBalance(user._id), 450_000);
+      const pool = await h.getPool();
+      assert.equal(pool.poolBalance, 50_000);
+      assert.equal(await IslandMember.countDocuments({ userId: user._id, active: true }), 1);
+    });
+  });
+
+  test("status cache — isMember is per user, not shared", async () => {
+    await withHarness(async (h) => {
+      const member = await h.createUser({ balance: 500_000, name: "Member" });
+      const outsider = await h.createUser({ balance: 500_000, name: "Out" });
+      await h.configurePool({ minTriggerAmount: 100_000, entryFee: 50_000, poolBalance: 0 });
+      await h.joinMember(member);
+
+      const outsiderStatus = await h.getStatus(outsider);
+      assert.equal(outsiderStatus.statusCode, 200);
+      assert.equal(outsiderStatus.data.data.isMember, false);
+
+      const memberStatus = await h.getStatus(member);
+      assert.equal(memberStatus.statusCode, 200);
+      assert.equal(memberStatus.data.data.isMember, true);
+    });
+  });
+
   test("join — wallet deduction + pool increase + member created", async () => {
     await withHarness(async (h) => {
       const user = await h.createUser({ balance: 500_000 });
