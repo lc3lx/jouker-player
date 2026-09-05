@@ -6064,11 +6064,20 @@ function initTableGame(io, options = {}) {
       const tbl = await Table.findById(tableId).select("gameType seats vacatingPlayers").lean();
       if (!tbl || tbl.gameType !== "poker") return;
       const uid = String(socket.userId);
-      const isSeated = tbl.seats.some((s) => String(s.user) === uid);
+      let isSeated = tbl.seats.some((s) => String(s.user) === uid);
       const isVacating = (tbl.vacatingPlayers || []).some(
         (v) => String(v.user) === uid && new Date(v.vacateUntil).getTime() > Date.now()
       );
-      if (!isSeated && !isVacating) return;
+      // join_table and start-if-ready often race; wait briefly for the seat write.
+      if (!isSeated && !isVacating) {
+        await new Promise((r) => setTimeout(r, 350));
+        const again = await Table.findById(tableId).select("seats vacatingPlayers").lean();
+        isSeated = !!(again && again.seats.some((s) => String(s.user) === uid));
+        const vacatingNow = !!(again && (again.vacatingPlayers || []).some(
+          (v) => String(v.user) === uid && new Date(v.vacateUntil).getTime() > Date.now()
+        ));
+        if (!isSeated && !vacatingNow && !socket.rooms.has(`tg:${tableId}`)) return;
+      }
       await ownerRunOrForward(
         String(tableId),
         { type: "bootstrap", tableId: String(tableId), userId: socket.userId, socketId: socket.id },

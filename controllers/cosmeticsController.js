@@ -9,7 +9,12 @@ const {
   unequipCosmetic,
   autoEquipAfterBuy,
 } = require("../services/cosmeticsService");
-const { refreshCosmeticsForUserOnTables } = require("../sockets/tableGame");
+function refreshCosmeticsForUserOnTables(userId) {
+  // Lazy require — tableGame is a huge graph; a top-level require here can
+  // leave this module half-exported and crash cosmeticsRoute on boot.
+  const tableGame = require("../sockets/tableGame");
+  return tableGame.refreshCosmeticsForUserOnTables(userId);
+}
 
 exports.getCatalog = async (req, res, next) => {
   try {
@@ -95,3 +100,7 @@ exports.postUnequip = async (req, res, next) => {
     next(e);
   }
 };
+
+exports.buy = exports.postBuy;
+exports.equip = exports.postEquip;
+exports.unequip = exports.postUnequip;
