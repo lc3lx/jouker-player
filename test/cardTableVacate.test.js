@@ -335,3 +335,10 @@ test("abandonTrixTableIfNoHumans waits while human is in vacate grace", async ()
   game.destroy();
   roomManager.trixGamesByTableId.delete(tableId);
 });
+
+test("intentionalLeaveCardTable is the permanent leave path for trix and tarneeb41", () => {
+  const {
+    intentionalLeaveCardTable,
+  } = require("../services/cardTableVacateService");
+  assert.equal(typeof intentionalLeaveCardTable, "function");
+});

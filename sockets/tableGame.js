@@ -2224,22 +2224,12 @@ class PokerTable {
     }
   }
 
-  /** Re-arm durable reconnect deadlines that survived a restart/failover. */
+  /** Stale DISCONNECTED seats after restart: cash out immediately (no grace). */
   rescheduleReconnectTimersAfterRestore() {
     if (!this.isOwner) return;
     for (const seat of this.seats) {
-      if (
-        !seat?.isBot &&
-        seat.playerState === PLAYER_STATE.DISCONNECTED &&
-        seat.reconnectDeadline
-      ) {
-        const uid = String(seat.userId);
-        this.clearReconnectTimer(uid);
-        const delayMs = Math.max(0, Number(seat.reconnectDeadline) - Date.now());
-        const timer = setTimeout(() => {
-          void this.expireRecoveredReconnect(uid);
-        }, delayMs);
-        this.reconnectTimers.set(uid, timer);
+      if (!seat?.isBot && seat.playerState === PLAYER_STATE.DISCONNECTED) {
+        void this.abandonHumanSeat(String(seat.userId));
       }
     }
   }
@@ -2296,49 +2286,10 @@ class PokerTable {
     void this.resyncTurnAfterReconnect(userId);
   }
 
-  async healSeatsMissingSockets(exceptUserId = null) {
-    try {
-      const nsp = this.nsp;
-      if (!nsp) return 0;
-      const sockets = await nsp.in(`tg:${this.tableId}`).fetchSockets();
-      const online = new Set(
-        sockets
-          .map((s) => String(s.data?.userId || s.userId || ""))
-          .filter(Boolean)
-      );
-      if (exceptUserId) online.add(String(exceptUserId));
-      let healed = 0;
-      for (const seat of this.seats) {
-        if (!seat || seat.isBot) continue;
-        const uid = String(seat.userId || "");
-        if (!uid || online.has(uid)) continue;
-        const st = seat.playerState || PLAYER_STATE.SEATED;
-        if (
-          st === PLAYER_STATE.DISCONNECTED ||
-          st === PLAYER_STATE.SITTING_OUT ||
-          st === PLAYER_STATE.LEAVE_PENDING
-        ) {
-          continue;
-        }
-        this.onPlayerSocketDisconnected(uid);
-        healed += 1;
-      }
-      // #region agent log
-      if (healed > 0) {
-        try {
-          require("../utils/agentDebugLog").sessionDebugLog(
-            "C",
-            "tableGame.js:healSeatsMissingSockets",
-            "healed zombie seats",
-            { tableId: String(this.tableId), healed }
-          );
-        } catch (_) {}
-      }
-      // #endregion
-      return healed;
-    } catch (_) {
-      return 0;
-    }
+  async healSeatsMissingSockets(_exceptUserId = null) {
+    // Do not infer a leave from a missing room membership. Join/start races
+    // used to wipe a live player mid-deal. Real leaves come from disconnect.
+    return 0;
   }
 
   /**
@@ -2375,30 +2326,20 @@ class PokerTable {
     if (idx < 0) return;
     const seat = this.seats[idx];
     if (seat.isBot) return;
-    // Deliberate leave stays leave. A socket blip must not cash out or reset.
     if (seat.playerState === PLAYER_STATE.LEAVE_PENDING) return;
-    if (seat.playerState === PLAYER_STATE.DISCONNECTED && seat.reconnectDeadline) {
-      return;
-    }
     this.clearReconnectTimer(userId);
-    const uid = String(userId);
-    this.abandoningUserIds.delete(uid);
-    seat.playerState = PLAYER_STATE.DISCONNECTED;
-    seat.disconnectedAt = Date.now();
-    seat.reconnectDeadline = Date.now() + POKER_TIMINGS.RECONNECT_WINDOW_MS;
-    const timer = setTimeout(() => {
-      void this.expireRecoveredReconnect(uid);
-    }, POKER_TIMINGS.RECONNECT_WINDOW_MS);
-    this.reconnectTimers.set(uid, timer);
+    seat.disconnectedAt = null;
+    seat.reconnectDeadline = null;
+    seat.playerState = PLAYER_STATE.LEAVE_PENDING;
+    this.abandoningUserIds.add(String(userId));
     // #region agent log
-    _dbg7("C", "tableGame.js:onPlayerSocketDisconnected", "keep_seat_reconnect", {
+    _dbg7("C", "tableGame.js:onPlayerSocketDisconnected", "abandon_now", {
       tableId: String(this.tableId),
       inHand: !!seat.inHand,
       humans: this.humanSeatCount(),
-      active: this.activeSeatCount(),
     });
     // #endregion
-    void this.broadcastState();
+    void this.abandonHumanSeat(userId);
   }
 
   /**
@@ -2435,12 +2376,26 @@ class PokerTable {
       await markPendingPermanentLeave({ tableId: this.tableId, userId: uid });
       const currentSeat = this.seats[this.findSeatIndexByUser(uid)];
       if (currentSeat) currentSeat.playerState = PLAYER_STATE.LEAVE_PENDING;
-      const res = await permanentLeavePokerTable({ tableId: this.tableId, userId: uid });
+      const res = await permanentLeavePokerTable({
+        tableId: this.tableId,
+        userId: uid,
+        force: true,
+      });
       if (
         !res.left &&
         (res.reason === "HAND_IN_PROGRESS" || res.reason === "SETTLEMENT_IN_PROGRESS")
       ) {
         scheduleDeferredPermanentLeave({ tableId: this.tableId, userId: uid });
+      }
+      if (res.left) {
+        const gone = this.findSeatIndexByUser(uid);
+        if (gone >= 0) {
+          this.seats.splice(gone, 1);
+          this.reindexSeatsByPosition();
+        }
+        if (this.seatedHumanCount() >= 1) {
+          this.addBotsForMissingSeats();
+        }
       }
       await this.broadcastState();
     } catch (err) {

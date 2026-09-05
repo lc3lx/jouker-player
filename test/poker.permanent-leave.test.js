@@ -25,6 +25,17 @@ test("remainingHumansAfterLeave is 0 when the leaver is the only seated human", 
     ),
     1
   );
+  assert.equal(
+    remainingHumansAfterLeave(
+      {
+        seats: [{ user: uid }],
+        vacatingPlayers: [{ user: "other", vacateUntil: new Date(Date.now() + 30_000) }],
+      },
+      uid
+    ),
+    0,
+    "vacate window does not keep the table alive"
+  );
 });
 
 test("userCannotRejoinPokerTable is true after a permanent leave block", () => {

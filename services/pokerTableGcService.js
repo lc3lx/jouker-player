@@ -42,10 +42,6 @@ async function resetPokerTableWhenEmpty(tableId) {
   );
   if (!table || table.gameType !== "poker") return { reset: false, reason: "not_poker" };
   if (table.seats.length > 0) return { reset: false, reason: "not_empty" };
-  const activeVacating = (table.vacatingPlayers || []).filter(
-    (v) => v?.vacateUntil && new Date(v.vacateUntil).getTime() > Date.now()
-  );
-  if (activeVacating.length > 0) return { reset: false, reason: "vacating" };
 
   const qLen = await countQueue(tid);
   const live = getTableGameBridge().getTableGameDebugSnapshot(tid);

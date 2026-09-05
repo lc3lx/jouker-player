@@ -20,8 +20,6 @@ const { archiveCardGameMatch } = require("../../services/cardGameHistoryService"
 const { markTrixTablePlaying, markTarneeb41TablePlaying } = require("../../services/tableService");
 const { emitTablesUpdated } = require("../../utils/lobbyRealtime");
 const {
-  scheduleCardTableVacate,
-  finalizeCardTableVacateNow,
   intentionalLeaveCardTable,
   onCardTableRejoin,
   abandonCardTableIfNoHumans,
@@ -662,17 +660,9 @@ function registerGameHandlers(nsp, jwtVerify) {
           !!game &&
           typeof game.getPlayerIndex === "function" &&
           game.getPlayerIndex(userId) >= 0;
-        const vacatedBotSeat = Array.isArray(game?.players)
-          ? game.players.find(
-              (p) =>
-                p &&
-                p.isBot &&
-                p.vacatedFromUserId &&
-                String(p.vacatedFromUserId) === userIdStr
-            )
-          : null;
         const seated = table.seats.some((s) => seatUserId(s) === userIdStr);
-        if (!seated && !stillInEngine && !vacatedBotSeat) {
+        // Leave/disconnect is permanent — no vacated-bot reclaim; only live seats.
+        if (!seated && !stillInEngine) {
           emitInvalidMove(socket, "not_seated_at_table" );
           return;
         }
@@ -692,25 +682,6 @@ function registerGameHandlers(nsp, jwtVerify) {
           })
         ) {
           return;
-        }
-
-        // Reclaim this user's vacated bot seat BEFORE the bot-only wipe.
-        if (game && typeof game.getPlayerIndex === "function" && game.getPlayerIndex(userId) < 0) {
-          const bot = (game.players || []).find(
-            (p) =>
-              p &&
-              p.isBot &&
-              p.vacatedFromUserId &&
-              String(p.vacatedFromUserId) === userIdStr
-          );
-          if (bot && typeof game.restoreHumanAtSeat === "function") {
-            let nm = `لاعب ${(bot.seatIndex ?? 0) + 1}`;
-            try {
-              const u = await require("../../models/userModel").findById(userId).select("name");
-              if (u?.name) nm = String(u.name);
-            } catch (_) {}
-            await game.restoreHumanAtSeat(bot.seatIndex, userId, socket.id, nm);
-          }
         }
 
         // Safety: never reattach a human into a bot-only mid-hand ghost after the
@@ -861,17 +832,9 @@ function registerGameHandlers(nsp, jwtVerify) {
           !!game &&
           typeof game.getPlayerIndex === "function" &&
           game.getPlayerIndex(userId) >= 0;
-        const vacatedBotSeat = Array.isArray(game?.players)
-          ? game.players.find(
-              (p) =>
-                p &&
-                p.isBot &&
-                p.vacatedFromUserId &&
-                String(p.vacatedFromUserId) === userIdStr
-            )
-          : null;
         const seated = table.seats.some((s) => seatUserId(s) === userIdStr);
-        if (!seated && !stillInEngine && !vacatedBotSeat) {
+        // Leave/disconnect is permanent — no vacated-bot reclaim; only live seats.
+        if (!seated && !stillInEngine) {
           emitInvalidMove(socket, "not_seated_at_table" );
           return;
         }
@@ -891,25 +854,6 @@ function registerGameHandlers(nsp, jwtVerify) {
           })
         ) {
           return;
-        }
-
-        // Reclaim this user's vacated bot seat BEFORE the bot-only wipe.
-        if (game && typeof game.getPlayerIndex === "function" && game.getPlayerIndex(userId) < 0) {
-          const bot = (game.players || []).find(
-            (p) =>
-              p &&
-              p.isBot &&
-              p.vacatedFromUserId &&
-              String(p.vacatedFromUserId) === userIdStr
-          );
-          if (bot && typeof game.restoreHumanAtSeat === "function") {
-            let nm = `لاعب ${(bot.seatIndex ?? 0) + 1}`;
-            try {
-              const u = await require("../../models/userModel").findById(userId).select("name");
-              if (u?.name) nm = String(u.name);
-            } catch (_) {}
-            await game.restoreHumanAtSeat(bot.seatIndex, userId, socket.id, nm);
-          }
         }
 
         // Safety: never reattach into a bot-only mid-hand ghost after last human left.
@@ -1774,10 +1718,8 @@ function registerGameHandlers(nsp, jwtVerify) {
       broadcastTarneeb41TableState(nsp, t41);
     });
 
-    // leave_room — INTENTIONAL leave: finalize immediately (no grace) so other
-    // players stop seeing a ghost this instant. Accidental disconnect keeps its
-    // reconnect grace (see the `disconnect` handler). Backward compatible: the
-    // `ack` callback is optional (old clients emit without one).
+    // leave_room — permanent leave (no grace), same as disconnect / REST leave.
+    // Backward compatible: the `ack` callback is optional (old clients emit without one).
     socket.on("leave_room", async (payload, ack) => {
       const { roomId } = payload || {};
       const respond = (r) => {
@@ -2061,20 +2003,15 @@ function registerGameHandlers(nsp, jwtVerify) {
       const t41 = roomManager.getTarneeb41TableIdForUser(userId);
       if (t41) {
         // Duplicate-tab guard: another live socket for this user may still be
-        // joined to this table (another tab/device) — its connection already
-        // owns the roomManager socketId mapping, so don't clear it or start a
-        // vacate timer against a user who is still actually connected.
+        // joined to this table (another tab/device) — do not cash out yet.
         const remaining = await socketPresenceService.releaseSocket(t41, userId, socket.id);
         if (remaining > 0) return;
         roomManager.deleteTarneeb41UserSocket(userId);
-        const game = roomManager.getTarneeb41GameForTable(t41);
-        if (game) {
-          const p = game.players.find((x) => String(x.userId) === String(userId));
-          if (p) p.socketId = null;
-          broadcastTarneeb41TableState(nsp, t41);
-        }
+        matchMaker.dequeue("tarneeb41", userId);
         lifecycleAudit("DISCONNECT", { gameType: "tarneeb41", tableId: String(t41), userId });
-        scheduleCardTableVacate({
+        // Same as poker: app close / socket drop is an immediate permanent leave.
+        // No 30–60s vacate restore — bots take the seat or the table resets.
+        await intentionalLeaveCardTable({
           gameType: "tarneeb41",
           tableId: t41,
           userId,
@@ -2087,14 +2024,9 @@ function registerGameHandlers(nsp, jwtVerify) {
         const remaining = await socketPresenceService.releaseSocket(trixId, userId, socket.id);
         if (remaining > 0) return;
         roomManager.deleteTrixUserSocket(userId);
-        const game = roomManager.getTrixGameForTable(trixId);
-        if (game) {
-          const p = game.players.find((x) => String(x.userId) === String(userId));
-          if (p) p.socketId = null;
-          broadcastTrixTableState(nsp, trixId);
-        }
+        matchMaker.dequeue("trix", userId);
         lifecycleAudit("DISCONNECT", { gameType: "trix", tableId: String(trixId), userId });
-        scheduleCardTableVacate({
+        await intentionalLeaveCardTable({
           gameType: "trix",
           tableId: trixId,
           userId,

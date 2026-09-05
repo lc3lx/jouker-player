@@ -40,7 +40,6 @@ const {
 } = require("./pokerVacateService");
 const {
   tryClaimTarneeb41BotSeat,
-  tryRestoreVacatedTarneeb41Seat,
   listReplaceableBotSeats,
 } = require("./tarneeb41BotSeatService");
 const {
@@ -426,8 +425,8 @@ function redactPokerLobbyRoster(row, viewerId) {
       vacateUntil: entry?.vacateUntil ?? null,
     })),
     currentUserSeated,
-    // Poker leave/app-close is final — never advertise a vacate return.
-    currentUserVacating: currentUserVacating && !leftSession,
+    // Poker leave / app-close / disconnect is final — no 30s return window.
+    currentUserVacating: false,
   };
 }
 
@@ -520,7 +519,22 @@ exports.getTables = asyncHandler(async (req, res) => {
         stakeSeatedCount: stake?.seatedCount ?? (Array.isArray(o.seats) ? o.seats.length : 0),
         stakeTableCount: stake?.tableCount ?? 1,
       };
-      if (gameType !== "poker") return { ...o, ...stakeFields };
+      if (gameType !== "poker") {
+        // Same leave rules as poker: never advertise a vacate return window.
+        const viewer = String(req.user?._id || "");
+        const inSeats = viewer
+          ? (o.seats || []).some(
+              (seat) => String(seat?.user?._id || seat?.user || "") === viewer
+            )
+          : false;
+        return {
+          ...o,
+          ...stakeFields,
+          currentUserSeated: inSeats,
+          currentUserVacating: false,
+          vacatingPlayers: [],
+        };
+      }
       const live = withLive ? getTableGameDebugSnapshot(String(t._id)) : null;
       const row = enrichPokerTableRow(o, live);
       const qLen = await getWaitingQueueSize(String(t._id));
@@ -793,29 +807,7 @@ exports.joinTable = asyncHandler(async (req, res, next) => {
     }));
   }
 
-  // Reconnect anchor: tarneeb41 vacate grace (bot replaced, mongo vacatingPlayers).
-  if (table.gameType === "tarneeb41") {
-    const vacRestore = await tryRestoreVacatedTarneeb41Seat({
-      tableId: id,
-      userId: req.user._id,
-    });
-    if (vacRestore) {
-      void trackJoinLeaveEvent(req.user._id, "join_table");
-      emitTablesUpdated({ gameType: "tarneeb41", reason: "vacate_restore", tableId: id });
-      return res.status(200).json({
-        status: "success",
-        message: "Seat restored — return within vacate window",
-        data: {
-          tableId: String(id),
-          tableNumber: table.tableNumber,
-          reconnect: true,
-          vacateRestore: true,
-          seatIndex: vacRestore.seatIndex,
-          rtcRoom: { roomId: String(id), type: "table" },
-        },
-      });
-    }
-  }
+  // Poker-aligned: disconnect already cashes out — no vacate restore for tarneeb41.
 
   const existingSeatTable = await findUserSeatedTable(req.user._id, table.gameType, table.tier);
   if (existingSeatTable) {

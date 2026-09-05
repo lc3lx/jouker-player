@@ -411,10 +411,10 @@ async function finalizeCardTableVacate({ gameType, tableId, userId, nsp, intenti
 }
 
 /**
- * Intentional leave (no grace). Drops any pending vacate timer + reconnect
- * deadline, then finalizes immediately so the seat is converted to a bot (or the
- * table abandoned + refunded for the last human) and the OTHER players stop
- * seeing a ghost this instant. Disconnect keeps using scheduleCardTableVacate.
+ * Intentional leave / disconnect (no grace). Drops any pending vacate timer +
+ * reconnect deadline, then finalizes immediately so the seat is converted to a
+ * bot (or the table abandoned + refunded for the last human). Matches poker:
+ * app close and socket drop cash out now — no 30–60s restore window.
  * Idempotent: if the human is already gone, finalize no-ops / abandons.
  */
 async function finalizeCardTableVacateNow({ gameType, tableId, userId, nsp }) {

@@ -50,11 +50,7 @@ function userCannotRejoinPokerTable(table, userId) {
 
 function remainingHumansAfterLeave(table, userId) {
   const uid = String(userId);
-  const seats = (table?.seats || []).filter((s) => String(s.user) !== uid).length;
-  const vacating = (table?.vacatingPlayers || []).filter(
-    (v) => String(v.user) !== uid && isVacateActive(v)
-  ).length;
-  return seats + vacating;
+  return (table?.seats || []).filter((s) => String(s.user) !== uid).length;
 }
 
 /** Persist a voluntary in-hand leave before folding the engine seat. */
@@ -313,6 +309,7 @@ async function permanentLeavePokerTable({
   userId,
   clientIp = null,
   deviceId = null,
+  force = false,
 }) {
   const tid = String(tableId);
   const uid = String(userId);
@@ -325,10 +322,10 @@ async function permanentLeavePokerTable({
       const table = await Table.findById(tid).session(session);
       if (!table || table.gameType !== "poker") throw new Error("NOT_POKER");
       const lastHuman = remainingHumansAfterLeave(table, uid) === 0;
-      // Last real player: cash out and reset immediately, even mid-hand.
-      // With other humans still seated, wait for settlement so pot chips stay consistent.
-      if (!lastHuman && table.status === "playing") throw new Error("HAND_IN_PROGRESS");
-      if (!lastHuman && table.activeSettlementId) throw new Error("SETTLEMENT_IN_PROGRESS");
+      // Disconnect / last human: leave now. A polite in-hand leave still waits
+      // for settlement when other humans remain.
+      if (!force && !lastHuman && table.status === "playing") throw new Error("HAND_IN_PROGRESS");
+      if (!force && !lastHuman && table.activeSettlementId) throw new Error("SETTLEMENT_IN_PROGRESS");
 
       const vacEntry = findActiveVacatingEntry(table, uid);
       if (vacEntry) {
@@ -396,12 +393,7 @@ async function permanentLeavePokerTable({
   await registerPromotedQueueSeatPresence(tid, promotedSeat);
 
   const afterLeave = await Table.findById(tid).select("seats gameType vacatingPlayers");
-  const activeVacating = (afterLeave?.vacatingPlayers || []).filter((v) => isVacateActive(v));
-  if (
-    afterLeave &&
-    afterLeave.seats.length === 0 &&
-    activeVacating.length === 0
-  ) {
+  if (afterLeave && afterLeave.seats.length === 0) {
     await require("./pokerTableGcService").resetPokerTableWhenEmpty(tid);
   } else {
     // Mongo was committed above and is the only source of truth for a

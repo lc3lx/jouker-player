@@ -443,11 +443,21 @@ test("CHAOS: player disconnect + turn timeout folds the actor and advances", asy
   // Heads-up: the first actor (SB) owes a call — a disconnect + timeout must fold.
   const owes = g.currentBet - actor.bet;
   g.onPlayerSocketDisconnected(actor.userId);
-  await g.handleTimeout(actorIdx);
+  const deadline = Date.now() + 2000;
+  while (
+    Date.now() < deadline &&
+    g.seats.some((s) => String(s.userId) === String(actor.userId))
+  ) {
+    await new Promise((resolve) => setTimeout(resolve, 40));
+  }
 
+  assert.equal(
+    g.seats.some((s) => String(s.userId) === String(actor.userId)),
+    false,
+    "disconnect removes the player immediately"
+  );
   if (owes > 0) {
-    assert.equal(g.seats[actorIdx].folded, true, "disconnected actor folded on timeout");
-    assert.equal(g.round, "idle", "uncontested hand ended");
+    assert.ok(["idle", "preflop"].includes(g.round));
   }
   g.disposeTimers();
 });
@@ -579,19 +589,20 @@ test("DURABLE LEAVE: an in-hand leave intent survives until the settled stack is
   assert.equal(await walletLocked(uid), 0, "the final stack is released from the table lock");
 });
 
-test("WIRING: socket drop keeps the seat for reconnect and does not cash out", async () => {
+test("WIRING: socket drop cashes out immediately with no 30s vacate window", async () => {
   const { g } = await makeSeatedGame(2, 10000);
   const uid = g.seats[0].userId;
 
   g.onPlayerSocketDisconnected(uid);
-  assert.equal(g.seats[0].playerState, "DISCONNECTED");
-  assert.ok(g.seats[0].reconnectDeadline > Date.now());
-  assert.equal(g.seats.length, 2, "human + partner stay seated");
+  assert.equal(g.seats[0].playerState, "LEAVE_PENDING");
 
   await new Promise((resolve) => setTimeout(resolve, 80));
 
   const table = await Table.findById(g.tableId).lean();
-  assert.equal((table.pendingPermanentLeaves || []).length, 0);
-  assert.equal(table.seats.some((seat) => String(seat.user) === uid), true);
+  assert.equal(
+    table.seats.some((seat) => String(seat.user) === uid),
+    false,
+    "disconnected player is removed from the table"
+  );
   g.disposeTimers();
 });
