@@ -14,6 +14,7 @@ Legacy table-seat jackpot (`POKER_LEGACY_JACKPOT_ENABLED`) is separate and must 
 - **Wallet:** `island_jackpot_entry` / `island_jackpot_win` ledger types
 - **Hand eval:** server-only via `utils/islandJackpotHand.js` → `bestOf7`
 - **Cache:** 5s status cache + Redis optional; in-memory payout locks when Redis absent
+- **Daily fill:** house adds **10,000,000 coins** once per UTC day (`ISLAND_DAILY_FILL_AMOUNT`). Idempotent via `lastDailyFillDayUtc`.
 
 ## Admin API
 

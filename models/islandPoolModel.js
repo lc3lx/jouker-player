@@ -65,6 +65,8 @@ const islandPoolSchema = new mongoose.Schema(
     stats: { type: statsSchema, default: () => ({}) },
     settings: { type: settingsSchema, default: () => ({}) },
     lastWinner: lastWinnerSchema,
+    /** UTC calendar day (YYYY-MM-DD) of the last house daily fill. */
+    lastDailyFillDayUtc: { type: String, default: "" },
   },
   { timestamps: true }
 );

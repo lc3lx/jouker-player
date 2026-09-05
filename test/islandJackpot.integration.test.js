@@ -309,6 +309,41 @@ describe("Island Jackpot — integration (MongoDB replica set)", () => {
   });
 });
 
+describe("Island Jackpot — daily house fill", () => {
+  test("applyDailyFill — adds 10M once per UTC day and is idempotent", async () => {
+    await withHarness(async (h) => {
+      await h.configurePool({ minTriggerAmount: 100_000, entryFee: 10_000, poolBalance: 1_000_000 });
+
+      const first = await h.service.applyDailyFill(new Date("2026-09-05T10:00:00.000Z"));
+      assert.equal(first.applied, true);
+      assert.equal(first.poolBalance, 11_000_000);
+
+      const pool = await h.getPool();
+      assert.equal(pool.poolBalance, 11_000_000);
+      assert.equal(pool.lastDailyFillDayUtc, "2026-09-05");
+      assert.equal(await IslandHistory.countDocuments({ type: "daily_fill" }), 1);
+
+      const second = await h.service.applyDailyFill(new Date("2026-09-05T23:59:00.000Z"));
+      assert.equal(second.applied, false);
+      const after = await h.getPool();
+      assert.equal(after.poolBalance, 11_000_000);
+      assert.equal(await IslandHistory.countDocuments({ type: "daily_fill" }), 1);
+    });
+  });
+
+  test("applyDailyFill — new UTC day adds another 10M", async () => {
+    await withHarness(async (h) => {
+      await h.configurePool({ minTriggerAmount: 100_000, entryFee: 10_000, poolBalance: 0 });
+
+      await h.service.applyDailyFill(new Date("2026-09-05T08:00:00.000Z"));
+      const next = await h.service.applyDailyFill(new Date("2026-09-06T00:01:00.000Z"));
+      assert.equal(next.applied, true);
+      assert.equal(next.poolBalance, 20_000_000);
+      assert.equal(await IslandHistory.countDocuments({ type: "daily_fill" }), 2);
+    });
+  });
+});
+
 describe("Island Jackpot — payout lock (concurrent hand settlement)", () => {
   test("parallel onHandSettled — only one payout", async () => {
     await withHarness(async (h) => {

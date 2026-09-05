@@ -895,41 +895,96 @@ exports.reservePayoutForHand = reservePayoutForHand;
 exports.buildStatusSnapshot = buildStatusSnapshot;
 exports.resetJoinCooldownForTests = () => _joinCooldown.clear();
 
-// ─── Auto-fill pool: gradually inflate to TARGET over ~7 days ────────────────
-const AUTOFILL_TARGET = 120_000_000;
-const AUTOFILL_INTERVAL_MS = 10 * 60 * 1000; // every 10 minutes
-const AUTOFILL_TICKS_PER_WEEK = (7 * 24 * 60) / 10; // ~1008 ticks in a week
-const AUTOFILL_INCREMENT = Math.ceil(AUTOFILL_TARGET / AUTOFILL_TICKS_PER_WEEK);
+// ─── House daily fill: +10,000,000 coins once per UTC day ───────────────────
+const DAILY_FILL_AMOUNT = Math.max(0, toSafeInt(process.env.ISLAND_DAILY_FILL_AMOUNT, 10_000_000));
+const DAILY_FILL_CHECK_MS = 5 * 60 * 1000;
 
 let _autoFillTimer = null;
 
-const AUTOFILL_SEED = 36_000_000;
+function utcDayKey(d = new Date()) {
+  return utcDayStart(d).toISOString().slice(0, 10);
+}
 
-async function _autoFillTick() {
+/**
+ * Adds DAILY_FILL_AMOUNT to the pool once per UTC calendar day.
+ * Atomic on lastDailyFillDayUtc so multi-instance boots cannot double-fill.
+ */
+async function applyDailyFill(now = new Date()) {
+  if (DAILY_FILL_AMOUNT <= 0) return { applied: false, reason: "disabled" };
+
+  const dayKey = utcDayKey(now);
+  await IslandPool.getSingleton();
+
+  const updated = await IslandPool.findOneAndUpdate(
+    {
+      key: "default",
+      lastDailyFillDayUtc: { $ne: dayKey },
+    },
+    {
+      $inc: { poolBalance: DAILY_FILL_AMOUNT, version: 1 },
+      $set: { lastDailyFillDayUtc: dayKey },
+    },
+    { new: true }
+  );
+
+  if (!updated) return { applied: false, reason: "already_filled", dayUtc: dayKey };
+
+  if (!updated.stats) updated.stats = {};
+  if (updated.poolBalance > toSafeInt(updated.stats.peakPoolBalance, 0)) {
+    updated.stats.peakPoolBalance = updated.poolBalance;
+  }
+  syncArmedFlags(updated);
+  await updated.save();
+
   try {
-    const pool = await IslandPool.getSingleton();
-    if (pool.poolBalance >= AUTOFILL_TARGET) return;
-    // Seed: if pool is empty or near-zero, start from a base amount
-    const base = pool.poolBalance < 1_000_000 ? AUTOFILL_SEED : pool.poolBalance;
-    const newBalance = Math.min(base + AUTOFILL_INCREMENT, AUTOFILL_TARGET);
-    pool.poolBalance = newBalance;
-    syncArmedFlags(pool);
-    pool.version = (pool.version || 0) + 1;
-    await pool.save();
-    invalidateStatusCache();
-    broadcastPoolTick(newBalance);
-    if (pool.hotJackpot) broadcastHotJackpot(true);
+    await IslandHistory.create({
+      type: "daily_fill",
+      amount: DAILY_FILL_AMOUNT,
+      poolAfter: updated.poolBalance,
+      meta: { dayUtc: dayKey },
+    });
+  } catch (histErr) {
+    logger.warn("island_daily_fill_history_failed", { reason: histErr?.message || "unknown" });
+  }
+
+  await invalidateStatusCache();
+  broadcastPoolTick(updated.poolBalance);
+  if (updated.hotJackpot) broadcastHotJackpot(true);
+
+  logger.info("island_daily_fill", {
+    amount: DAILY_FILL_AMOUNT,
+    poolAfter: updated.poolBalance,
+    dayUtc: dayKey,
+  });
+
+  return { applied: true, poolBalance: updated.poolBalance, dayUtc: dayKey };
+}
+
+async function _dailyFillTick() {
+  try {
+    await applyDailyFill();
   } catch (err) {
-    logger.warn("island_autofill_error", { reason: err?.message || "unknown" });
+    logger.warn("island_daily_fill_error", { reason: err?.message || "unknown" });
   }
 }
 
 function startAutoFill() {
   if (_autoFillTimer) return;
-  _autoFillTimer = setInterval(_autoFillTick, AUTOFILL_INTERVAL_MS);
-  // Initial tick after short delay
-  setTimeout(_autoFillTick, 5000);
+  _autoFillTimer = setInterval(_dailyFillTick, DAILY_FILL_CHECK_MS);
+  _autoFillTimer.unref?.();
+  const boot = setTimeout(_dailyFillTick, 3000);
+  boot.unref?.();
+}
+
+function stopAutoFill() {
+  if (_autoFillTimer) {
+    clearInterval(_autoFillTimer);
+    _autoFillTimer = null;
+  }
 }
 
 exports.startAutoFill = startAutoFill;
-exports.AUTOFILL_TARGET = AUTOFILL_TARGET;
+exports.stopAutoFill = stopAutoFill;
+exports.applyDailyFill = applyDailyFill;
+exports.DAILY_FILL_AMOUNT = DAILY_FILL_AMOUNT;
+exports.utcDayKey = utcDayKey;

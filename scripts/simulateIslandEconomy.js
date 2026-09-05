@@ -11,6 +11,7 @@ const { calculatePayoutShares, computePoolFlags } = require("../utils/islandJack
 const DAYS = 365;
 const ENTRY_FEE = 50_000;
 const MIN_TRIGGER = 100_000_000;
+const DAILY_HOUSE_FILL = 10_000_000;
 const PAYOUT_PCT = { royalFlush: 0.8, straightFlush: 0.3, fourOfAKind: 0.2 };
 
 /** Approximate daily qualifying-hand rate per active member (very conservative). */
@@ -30,6 +31,8 @@ function simulateYear(playerCount, { participationRate = 0.15, handsPerDay = 80 
   const members = Math.floor(playerCount * participationRate);
 
   for (let day = 0; day < DAYS; day += 1) {
+    pool += DAILY_HOUSE_FILL;
+    totalIn += DAILY_HOUSE_FILL;
     const dailyJoins = Math.floor(members * 0.02);
     const joinCoins = dailyJoins * ENTRY_FEE;
     pool += joinCoins;

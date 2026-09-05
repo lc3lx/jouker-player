@@ -4,7 +4,7 @@ const islandHistorySchema = new mongoose.Schema(
   {
     type: {
       type: String,
-      enum: ["join", "payout", "admin_adjust", "hot_entered"],
+      enum: ["join", "payout", "admin_adjust", "hot_entered", "daily_fill"],
       required: true,
       index: true,
     },
