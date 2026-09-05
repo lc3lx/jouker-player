@@ -5634,6 +5634,10 @@ class GameRegistry {
       redis: this.redis,
       stateStore: this.stateStore,
     });
+    const wm = pokerRevisionWatermark.get(tid);
+    if (wm) {
+      gt.stateRevision = Math.max(toSafeInt(gt.stateRevision, 0), wm);
+    }
     gt.isOwner = isOwner;
     gt.ownershipFence = own.fence || 0;
     if (isOwner) await this._recordFence(tid, gt.ownershipFence);
@@ -5654,6 +5658,9 @@ class GameRegistry {
         }
       }
       await gt.reconcileEngineWithMongo(table);
+      if (wm) {
+        gt.stateRevision = Math.max(toSafeInt(gt.stateRevision, 0), wm);
+      }
     }
 
     // H-3: a fresh owner clears any settlement marker orphaned by a crashed
@@ -6487,6 +6494,9 @@ async function refreshVipForUserOnTables(userId) {
   return refreshCosmeticsForUserOnTables(userId, { emitVipUpdated: true });
 }
 
+/** Survives engine evict so a rebuilt table does not restart at revision 0. */
+const pokerRevisionWatermark = new Map();
+
 function evictTableFromRegistry(tableId) {
   if (!activeRegistry) return false;
   const tid = String(tableId);
@@ -6494,6 +6504,11 @@ function evictTableFromRegistry(tableId) {
   if (!entry) return false;
   const game = entry.game;
   if (game) {
+    const prev = pokerRevisionWatermark.get(tid) || 0;
+    pokerRevisionWatermark.set(
+      tid,
+      Math.max(prev, toSafeInt(game.stateRevision, 0))
+    );
     game.disposeTimers?.();
     game.running = false;
   }
