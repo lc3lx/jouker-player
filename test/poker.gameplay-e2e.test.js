@@ -576,31 +576,25 @@ test("DURABLE LEAVE: an in-hand leave intent survives until the settled stack is
   pending = await Table.findById(tableId).lean();
   assert.equal(pending.pendingPermanentLeaves.length, 0, "intent clears only after cash-out commits");
   assert.equal(pending.seats.some((seat) => String(seat.user) === uid), false);
+  assert.equal(
+    (pending.rejoinBlockedUsers || []).some((row) => String(row.user) === uid),
+    true,
+    "leaver cannot sit this table session again"
+  );
   assert.equal(await walletLocked(uid), 0, "the final stack is released from the table lock");
 });
 
-test("WIRING: the reconnect-window timeout folds the player and queues a durable safe cash-out", async () => {
-  const tableLifecycleSettingsService = require("../services/tableLifecycleSettingsService");
-  const prevSettings = tableLifecycleSettingsService.getSettings();
-  tableLifecycleSettingsService.applySettings({ ...prevSettings, pokerReconnectWindowMs: 30 });
+test("WIRING: closing the app abandons the seat immediately and queues a durable cash-out", async () => {
+  const { g } = await makeSeatedGame(2, 10000);
+  const uid = g.seats[0].userId;
 
-  try {
-    const { g, users } = await makeSeatedGame(2, 10000);
-    const uid = g.seats[0].userId;
+  g.onPlayerSocketDisconnected(uid);
+  assert.equal(g.seats[0].playerState, "LEAVE_PENDING");
 
-    g.onPlayerSocketDisconnected(uid);
-    assert.equal(g.seats[0].playerState, "DISCONNECTED");
+  await new Promise((resolve) => setTimeout(resolve, 80));
 
-    await new Promise((resolve) => setTimeout(resolve, 150));
-
-    assert.equal(g.seats[0].playerState, "LEAVE_PENDING");
-    assert.equal(g.seats[0].disconnectedAt, null);
-    assert.equal(g.seats[0].reconnectDeadline, null);
-    const table = await Table.findById(g.tableId).lean();
-    assert.equal(table.pendingPermanentLeaves.length, 1);
-    assert.equal(String(table.pendingPermanentLeaves[0].user), uid);
-    g.disposeTimers();
-  } finally {
-    tableLifecycleSettingsService.applySettings(prevSettings);
-  }
+  const table = await Table.findById(g.tableId).lean();
+  assert.equal(table.pendingPermanentLeaves.length, 1);
+  assert.equal(String(table.pendingPermanentLeaves[0].user), uid);
+  g.disposeTimers();
 });

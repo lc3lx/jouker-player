@@ -32,6 +32,22 @@ function hasPendingPermanentLeave(table, userId) {
   return (table?.pendingPermanentLeaves || []).some((entry) => String(entry.user) === uid);
 }
 
+function isUserRejoinBlocked(table, userId) {
+  const uid = String(userId);
+  return (table?.rejoinBlockedUsers || []).some((entry) => String(entry.user) === uid);
+}
+
+function addRejoinBlock(table, userId) {
+  if (!table) return;
+  if (!Array.isArray(table.rejoinBlockedUsers)) table.rejoinBlockedUsers = [];
+  if (isUserRejoinBlocked(table, userId)) return;
+  table.rejoinBlockedUsers.push({ user: userId, blockedAt: new Date() });
+}
+
+function userCannotRejoinPokerTable(table, userId) {
+  return hasPendingPermanentLeave(table, userId) || isUserRejoinBlocked(table, userId);
+}
+
 /** Persist a voluntary in-hand leave before folding the engine seat. */
 async function markPendingPermanentLeave({ tableId, userId }) {
   const tid = String(tableId);
@@ -347,6 +363,7 @@ async function permanentLeavePokerTable({
       table.pendingPermanentLeaves = (table.pendingPermanentLeaves || []).filter(
         (entry) => String(entry.user) !== uid
       );
+      addRejoinBlock(table, uid);
       table.status = statusAfterSeatChange(table, table.seats.length);
       await table.save({ session });
       promotedSeat = await seatNextFromQueue({ session, tableId: tid });
@@ -389,7 +406,12 @@ async function permanentLeavePokerTable({
   }
 
   emitTablesUpdated({ gameType: "poker", reason: "leave", tableId: tid });
-  logger.info("poker_permanent_leave", { tableId: tid, userId: uid, cashedOut });
+  logger.info("poker_permanent_leave", {
+    tableId: tid,
+    userId: uid,
+    cashedOut,
+    remainingHumans: afterLeave?.seats?.length || 0,
+  });
 
   return { left: true, cashedOut };
 }
@@ -497,6 +519,9 @@ module.exports = {
   tryRestoreVacatedSeat,
   finalizeVacateWithBot,
   permanentLeavePokerTable,
+  isUserRejoinBlocked,
+  userCannotRejoinPokerTable,
+  hasPendingPermanentLeave,
   markPendingPermanentLeave,
   clearPendingPermanentLeave,
   scheduleDeferredPermanentLeave,

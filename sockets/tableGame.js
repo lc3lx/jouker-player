@@ -555,6 +555,8 @@ class PokerTable {
     this.currentHandActions = [];
     this.lastRaiseAmount = this.bigBlind;
     this.processedActionIds = new Set();
+    /** Users whose socket drop is being cashed out — blocks immediate rejoin. */
+    this.abandoningUserIds = new Set();
     /** Monotonic: bumps on each snapshot persist; clients drop stale packets. */
     this.stateRevision = 0;
     /** Shared VIP table felt for all viewers (highest seated VIP). */
@@ -1779,6 +1781,7 @@ class PokerTable {
     this.currentHandId = null;
     this.currentHandActions = [];
     this.processedActionIds = new Set();
+    this.abandoningUserIds = new Set();
     this.handStartTotal = 0;
     this.uncollectedRake = 0;
     this.lastHand = null;
@@ -2380,100 +2383,76 @@ class PokerTable {
     if (seat.isBot) return;
     // Do not overwrite a deliberate, durable leave with a reconnect state.
     if (seat.playerState === PLAYER_STATE.LEAVE_PENDING) return;
-    const reconnectWindowMs = require("../services/tableLifecycleSettingsService").getSettings()
-      .pokerReconnectWindowMs;
+    this.clearReconnectTimer(userId);
+    seat.disconnectedAt = null;
+    seat.reconnectDeadline = null;
+    seat.playerState = PLAYER_STATE.LEAVE_PENDING;
+    this.abandoningUserIds.add(String(userId));
     // #region agent log
     try {
       require("../utils/agentDebugLog").sessionDebugLog(
         "C",
         "tableGame.js:onPlayerSocketDisconnected",
-        "started reconnect window",
+        "abandon seat immediately",
         {
           tableId: String(this.tableId),
-          seatState: seat.playerState,
-          reconnectWindowMs,
           inHand: !!seat.inHand,
         }
       );
     } catch (_) {}
     // #endregion
-    this.clearReconnectTimer(userId);
-    seat.disconnectedAt = Date.now();
-    seat.reconnectDeadline = seat.disconnectedAt + reconnectWindowMs;
-    seat.playerState = PLAYER_STATE.DISCONNECTED;
+    void this.abandonHumanSeat(userId);
+  }
+
+  /**
+   * App close / socket drop is a permanent leave: cash out (or defer until
+   * settlement) and block rejoin for this table session.
+   */
+  async abandonHumanSeat(userId) {
     const uid = String(userId);
-    const timer = setTimeout(async () => {
-      this.reconnectTimers.delete(uid);
-      const lockAcquired = await this.acquireActionLock();
-      if (!lockAcquired) return; // table busy — skip; turn timer will handle the fold
-      try {
+    const lockAcquired = await this.acquireActionLock();
+    try {
+      if (lockAcquired) {
         const i = this.findSeatIndexByUser(uid);
-        if (i < 0) return;
-        const s = this.seats[i];
-        if (s.playerState !== PLAYER_STATE.DISCONNECTED) return;
-        // #region agent log
-        try {
-          require("../utils/agentDebugLog").sessionDebugLog(
-            "D",
-            "tableGame.js:reconnectTimeout",
-            "reconnect window expired",
-            {
-              tableId: String(this.tableId),
-              inHand: !!s.inHand,
-              allIn: !!s.allIn,
-              playerState: s.playerState,
-            }
-          );
-        } catch (_) {}
-        // #endregion
-        // The reconnect grace expired. Fold safely, then request a durable
-        // post-settlement cash-out; disconnected money is never forfeited or
-        // transferred to a bot.
-        {
-          s.playerState = PLAYER_STATE.SITTING_OUT;
-          // The reconnect window is over — clear the disconnect markers so this
-          // seat stays excluded while the safe cash-out is pending.
-          s.disconnectedAt = null;
-          s.reconnectDeadline = null;
-          // All-in players are still eligible for pots they already entered;
-          // a network timeout must never fold them out of that pot.
-          if (s.inHand && this.running && !s.allIn) {
+        if (i >= 0) {
+          const s = this.seats[i];
+          if (s && !s.isBot && s.inHand && this.running && !s.folded && !s.allIn) {
             this.applyFold(i);
             this.recordSeatAction(i, "disconnect_fold");
             this.appendHandAction({ type: "disconnect_fold", seatIndex: i, playerId: s.userId });
-            await this.broadcastState();
             if (this.currentIndex === i || this.aliveCount() <= 1) {
               await this.advance();
             }
-          } else {
-            await this.broadcastState();
           }
         }
-        try {
-          // No bot inherits a disconnected human's locked stack. Once the
-          // reconnect grace expires, persist an idempotent cash-out intent;
-          // it executes only after any active hand has settled.
-          const { markPendingPermanentLeave, scheduleDeferredPermanentLeave } = require("../services/pokerVacateService");
-          await markPendingPermanentLeave({ tableId: this.tableId, userId: uid });
-          const currentSeat = this.seats[this.findSeatIndexByUser(uid)];
-          if (currentSeat) currentSeat.playerState = PLAYER_STATE.LEAVE_PENDING;
-          scheduleDeferredPermanentLeave({ tableId: this.tableId, userId: uid });
-          await this.broadcastState();
-        } catch (err) {
-          // A database outage never turns an internet fault into a forfeiture.
-          // The seat remains sitting out and can be recovered later.
-          logger.warn("poker_disconnect_cashout_deferred_failed", {
-            tableId: this.tableId,
-            userId: uid,
-            reason: err?.message || "unknown",
-          });
-        }
-      } finally {
-        await this.releaseActionLock();
       }
-    }, reconnectWindowMs);
-    this.reconnectTimers.set(uid, timer);
-    void this.broadcastState();
+    } finally {
+      if (lockAcquired) await this.releaseActionLock();
+    }
+    try {
+      const {
+        markPendingPermanentLeave,
+        scheduleDeferredPermanentLeave,
+        permanentLeavePokerTable,
+      } = require("../services/pokerVacateService");
+      await markPendingPermanentLeave({ tableId: this.tableId, userId: uid });
+      const currentSeat = this.seats[this.findSeatIndexByUser(uid)];
+      if (currentSeat) currentSeat.playerState = PLAYER_STATE.LEAVE_PENDING;
+      const res = await permanentLeavePokerTable({ tableId: this.tableId, userId: uid });
+      if (
+        !res.left &&
+        (res.reason === "HAND_IN_PROGRESS" || res.reason === "SETTLEMENT_IN_PROGRESS")
+      ) {
+        scheduleDeferredPermanentLeave({ tableId: this.tableId, userId: uid });
+      }
+      await this.broadcastState();
+    } catch (err) {
+      logger.warn("poker_abandon_seat_failed", {
+        tableId: this.tableId,
+        userId: uid,
+        reason: err?.message || "unknown",
+      });
+    }
   }
 
   /**
@@ -5950,12 +5929,19 @@ function initTableGame(io, options = {}) {
           socket.emit("table_event", { type: "rate_limited", tableId: String(tableId) });
           return;
         }
-        const table = await Table.findById(tableId).select("gameType seats vacatingPlayers");
+        const table = await Table.findById(tableId).select(
+          "gameType seats vacatingPlayers pendingPermanentLeaves rejoinBlockedUsers"
+        );
         if (!table || table.gameType !== "poker") {
           socket.emit("table_event", { type: "table_not_found", tableId: String(tableId) });
           return;
         }
         const uid = String(socket.userId);
+        const { userCannotRejoinPokerTable } = require("../services/pokerVacateService");
+        if (userCannotRejoinPokerTable(table, uid)) {
+          socket.emit("table_event", { type: "not_seated", tableId: String(tableId) });
+          return;
+        }
         const isSeated = table.seats.some((s) => String(s.user) === uid);
         const isVacating = (table.vacatingPlayers || []).some(
           (v) => String(v.user) === uid && new Date(v.vacateUntil).getTime() > Date.now()
@@ -6008,17 +5994,8 @@ function initTableGame(io, options = {}) {
         // "reconnect anchor" (tableService.joinTable) so a client that only
         // reconnects its socket still gets its seat/chips back.
         if (!isSeated && isVacating) {
-          const { tryRestoreVacatedSeat } = require("../services/pokerVacateService");
-          const restored = await tryRestoreVacatedSeat({
-            tableId,
-            userId: socket.userId,
-            clientIp: socket.userIp,
-            deviceId: socketDeviceId,
-          });
-          if (!restored?.restored) {
-            socket.emit("table_event", { type: "reconnect_expired", tableId: String(tableId) });
-            return;
-          }
+          socket.emit("table_event", { type: "not_seated", tableId: String(tableId) });
+          return;
         }
 
         // Clear this only after a confirmed seat/restore. Otherwise a failed
@@ -6684,6 +6661,9 @@ async function syncLivePokerTableAfterLeave(tableId) {
     await resetLivePokerTableWhenEmpty(tableId);
     return;
   }
+  if (game.seatedHumanCount() >= 1 && game.activeSeatCount() < game.botFillTarget) {
+    game.addBotsForMissingSeats();
+  }
   if (game.round === "idle" && !game.running && !game.frozen) {
     if (game.seatedHumanCount() >= 1) {
       await game.bootstrapLobbyStart();
@@ -6712,6 +6692,7 @@ function getTableGameDebugSnapshot(tableId) {
     currentBet: game.currentBet,
     turnUserId: game.seats[game.currentIndex]?.userId || null,
     handId: game.currentHandId,
+    abandoningUserIds: [...(game.abandoningUserIds || [])],
   };
 }
 

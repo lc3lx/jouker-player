@@ -34,8 +34,6 @@ const { getQueuePosition, getWaitingQueueSize } = require("./pokerWaitingQueueSe
 const waitingQueueService = require("./waitingQueueService");
 const { syncLivePokerTableAfterJoin } = require("../sockets/tableGame");
 const {
-  vacatePokerSeat,
-  tryRestoreVacatedSeat,
   permanentLeavePokerTable,
   markPendingPermanentLeave,
   scheduleDeferredPermanentLeave,
@@ -789,29 +787,13 @@ exports.joinTable = asyncHandler(async (req, res, next) => {
 
   // Reconnect anchor: user already seated at an active table for this tier — skip re-join.
   if (table.gameType === "poker") {
-    const vacRestore = await tryRestoreVacatedSeat({
-      tableId: id,
-      userId: req.user._id,
-      clientIp,
-      deviceId: deviceId || null,
-    });
-    if (vacRestore) {
-      void trackJoinLeaveEvent(req.user._id, "join_table");
-      emitTablesUpdated({ gameType: "poker", reason: "vacate_restore", tableId: id });
-      void syncPokerTableStatusById(id);
-      void syncLivePokerTableAfterJoin(id);
-      return res.status(200).json({
-        status: "success",
-        message: "Seat restored — return within vacate window",
-        data: {
-          tableId: String(id),
-          tableNumber: table.tableNumber,
-          chips: vacRestore.chips,
-          reconnect: true,
-          vacateRestore: true,
-          rtcRoom: { roomId: String(id), type: "table" },
-        },
-      });
+    const { userCannotRejoinPokerTable } = require("./pokerVacateService");
+    if (userCannotRejoinPokerTable(table, req.user._id)) {
+      return next(new ApiError("لا يمكنك العودة إلى هذه الطاولة بعد المغادرة", 403));
+    }
+    const liveSnap = getTableGameDebugSnapshot(String(id));
+    if ((liveSnap?.abandoningUserIds || []).some((u) => String(u) === String(req.user._id))) {
+      return next(new ApiError("لا يمكنك العودة إلى هذه الطاولة بعد المغادرة", 403));
     }
   }
 
@@ -851,6 +833,12 @@ exports.joinTable = asyncHandler(async (req, res, next) => {
         });
       }
     } else {
+      if (existingSeatTable.gameType === "poker") {
+        const { userCannotRejoinPokerTable } = require("./pokerVacateService");
+        if (userCannotRejoinPokerTable(existingSeatTable, req.user._id)) {
+          return next(new ApiError("لا يمكنك العودة إلى هذه الطاولة بعد المغادرة", 403));
+        }
+      }
       const seat = existingSeatTable.seats.find(
         (s) => String(s.user) === String(req.user._id)
       );

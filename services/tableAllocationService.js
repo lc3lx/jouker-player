@@ -29,7 +29,7 @@ async function findUserSeatedTable(userId, gameType, tier) {
     tier,
     status: { $nin: LOBBY_EXCLUDED_STATUSES },
     "seats.user": userId,
-  }).select("tableNumber seats minBuyIn maxBuyIn gameType tier status");
+  }).select("tableNumber seats minBuyIn maxBuyIn gameType tier status pendingPermanentLeaves rejoinBlockedUsers");
 }
 
 /**

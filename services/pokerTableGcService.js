@@ -38,7 +38,7 @@ async function countQueue(tableId) {
 async function resetPokerTableWhenEmpty(tableId) {
   const tid = String(tableId);
   const table = await Table.findById(tid).select(
-    "gameType seats tableNumber tableKind tier minBuyIn status waitingQueue vacatingPlayers"
+    "gameType seats tableNumber tableKind tier minBuyIn status waitingQueue vacatingPlayers rejoinBlockedUsers"
   );
   if (!table || table.gameType !== "poker") return { reset: false, reason: "not_poker" };
   if (table.seats.length > 0) return { reset: false, reason: "not_empty" };
@@ -62,6 +62,7 @@ async function resetPokerTableWhenEmpty(tableId) {
   await getTableGameBridge().resetLivePokerTableWhenEmpty(tid);
 
   table.status = "waiting";
+  table.rejoinBlockedUsers = [];
   if (Array.isArray(table.vacatingPlayers) && table.vacatingPlayers.length > 0) {
     // Expired vacate entries reaching this path mean the forfeit timer never fired
     // (e.g. restart). Refund their locked chips instead of silently dropping them.

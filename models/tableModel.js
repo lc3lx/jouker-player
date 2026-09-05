@@ -87,6 +87,19 @@ const tableSchema = new mongoose.Schema(
     vacatingPlayers: { type: [vacatingPlayerSchema], default: [] },
     /** Durable cash-out intent for a voluntary leave requested mid-hand. */
     pendingPermanentLeaves: { type: [pendingPermanentLeaveSchema], default: [] },
+    /**
+     * Humans who permanently left or closed the app during this table session.
+     * Cleared when the table resets empty so a fresh session can be joined.
+     */
+    rejoinBlockedUsers: {
+      type: [
+        {
+          user: { type: mongoose.Schema.ObjectId, ref: "User", required: true },
+          blockedAt: { type: Date, default: Date.now },
+        },
+      ],
+      default: [],
+    },
     isPrivate: { type: Boolean, default: false },
     password: { type: String },
     /** Users admitted through an accepted game invitation (passwordless join). */
