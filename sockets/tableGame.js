@@ -30,7 +30,7 @@ function _dbg7(hypothesisId, location, message, data = {}) {
     message,
     data,
     timestamp: Date.now(),
-    runId: "pre-fix",
+    runId: "post-fix",
   };
   try {
     logger.info("AGENT_DEBUG_7d1f00", payload);
@@ -2784,10 +2784,25 @@ class PokerTable {
       return;
     }
     if (this.running) {
-      // #region agent log
-      _dbg7("B", "tableGame.js:bootstrapLobbyStart", "abort", { reason: "running", tableId: String(this.tableId), round: this.round });
-      // #endregion
-      return;
+      const humansInHand = this.seats.filter((s) => isHumanSeat(s) && s.inHand).length;
+      if (this.seatedHumanCount() >= 1 && humansInHand === 0) {
+        // #region agent log
+        _dbg7("E", "tableGame.js:bootstrapLobbyStart", "stop_ghost_hand", {
+          tableId: String(this.tableId),
+          round: this.round,
+          seatedHumans: this.seatedHumanCount(),
+        });
+        // #endregion
+        this.running = false;
+        this.starting = false;
+        this.clearActionScheduling();
+        this.healStaleRoundIfNotRunning();
+      } else {
+        // #region agent log
+        _dbg7("B", "tableGame.js:bootstrapLobbyStart", "abort", { reason: "running", tableId: String(this.tableId), round: this.round, humansInHand });
+        // #endregion
+        return;
+      }
     }
     if (this.round !== "idle") {
       this.healStaleRoundIfNotRunning();
@@ -2833,7 +2848,23 @@ class PokerTable {
     if (!this.isOwner) return; // H-3
     if (this.frozen) return;
     await this.healSeatsMissingSockets();
-    if (this.running || this.starting) return;
+    if (this.running || this.starting) {
+      const humansInHand = this.seats.filter((s) => isHumanSeat(s) && s.inHand).length;
+      if (this.running && !this.starting && this.seatedHumanCount() >= 1 && humansInHand === 0) {
+        // #region agent log
+        _dbg7("E", "tableGame.js:startIfReady", "stop_ghost_hand", {
+          tableId: String(this.tableId),
+          round: this.round,
+          seatedHumans: this.seatedHumanCount(),
+        });
+        // #endregion
+        this.running = false;
+        this.clearActionScheduling();
+        this.healStaleRoundIfNotRunning();
+      } else {
+        return;
+      }
+    }
     if (this.round !== "idle") {
       if (!this.running) this.healStaleRoundIfNotRunning();
       if (this.round !== "idle") {
@@ -5984,12 +6015,27 @@ function initTableGame(io, options = {}) {
               // #endregion
               await game.bootstrapLobbyStart();
             } else {
+              // #region agent log
+              _dbg7("E", "tableGame.js:join_table", "skip_bootstrap", {
+                tableId: String(tableId),
+                seatIdx: idx,
+                round: game.round,
+                running: game.running,
+                frozen: game.frozen,
+                seatedHumans: game.seatedHumanCount(),
+              });
+              // #endregion
               await game.healSeatsMissingSockets(socket.userId);
-              await game.refreshSeatsFromDb();
-              if (game.running) {
-                await game.resyncTurnAfterReconnect(socket.userId);
+              const humansInHand = game.seats.filter((s) => isHumanSeat(s) && s.inHand).length;
+              if (game.running && game.seatedHumanCount() >= 1 && humansInHand === 0) {
+                await game.bootstrapLobbyStart();
+              } else {
+                await game.refreshSeatsFromDb();
+                if (game.running) {
+                  await game.resyncTurnAfterReconnect(socket.userId);
+                }
+                await game.broadcastState();
               }
-              await game.broadcastState();
             }
             const p = game.getPublicState(null);
             const m = game.getPublicState(socket.userId);
@@ -6542,6 +6588,18 @@ async function syncLivePokerTableAfterJoin(tableId) {
     if (!game || !game.isOwner) return;
     if (game.round === "idle" && !game.running && !game.frozen) {
       await game.bootstrapLobbyStart();
+    } else if (game.running && game.seatedHumanCount() >= 1) {
+      const humansInHand = game.seats.filter((s) => isHumanSeat(s) && s.inHand).length;
+      if (humansInHand === 0) {
+        game.running = false;
+        game.starting = false;
+        game.clearActionScheduling();
+        game.healStaleRoundIfNotRunning();
+        await game.bootstrapLobbyStart();
+      } else {
+        await game.refreshSeatsFromDb();
+        await game.broadcastState();
+      }
     } else {
       await game.refreshSeatsFromDb();
       await game.broadcastState();

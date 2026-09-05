@@ -50,8 +50,13 @@ async function resetPokerTableWhenEmpty(tableId) {
   const qLen = await countQueue(tid);
   const live = getTableGameBridge().getTableGameDebugSnapshot(tid);
   if (live?.running) {
-    logger.warn("poker_table_reset_skipped_hand_active", { tableId: tid });
-    return { reset: false, reason: "hand_active" };
+    // No humans left — a bot-only ghost hand. Reset anyway so the next sitter
+    // is not stuck behind startIfReady's `if (this.running) return`.
+    logger.warn("poker_table_reset_forced_empty_running", {
+      tableId: tid,
+      round: live.round,
+      seated: live.seated,
+    });
   }
 
   await getTableGameBridge().resetLivePokerTableWhenEmpty(tid);
