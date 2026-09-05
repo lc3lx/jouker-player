@@ -576,11 +576,6 @@ test("DURABLE LEAVE: an in-hand leave intent survives until the settled stack is
   pending = await Table.findById(tableId).lean();
   assert.equal(pending.pendingPermanentLeaves.length, 0, "intent clears only after cash-out commits");
   assert.equal(pending.seats.some((seat) => String(seat.user) === uid), false);
-  assert.equal(
-    (pending.rejoinBlockedUsers || []).some((row) => String(row.user) === uid),
-    true,
-    "leaver cannot sit this table session again"
-  );
   assert.equal(await walletLocked(uid), 0, "the final stack is released from the table lock");
 });
 

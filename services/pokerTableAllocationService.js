@@ -51,7 +51,6 @@ function isHandActiveOnTable(tableId) {
 async function findAvailablePokerTable(tier, buyIn, session, opts = {}) {
   const cap = POKER_CAPACITY;
   const excludeIds = (opts.excludeIds || []).map(String).filter(Boolean);
-  const excludeUserId = opts.excludeUserId ? String(opts.excludeUserId) : "";
   const q = {
     gameType: "poker",
     tier,
@@ -61,9 +60,6 @@ async function findAvailablePokerTable(tier, buyIn, session, opts = {}) {
     $expr: { $lt: [{ $size: "$seats" }, cap] },
   };
   if (excludeIds.length > 0) q._id = { $nin: excludeIds };
-  if (excludeUserId) {
-    q.$nor = [{ rejoinBlockedUsers: { $elemMatch: { user: excludeUserId } } }];
-  }
   let query = Table.findOne(q).sort({ tableNumber: 1 });
   if (session) query = query.session(session);
   let table = await query;
@@ -173,10 +169,6 @@ async function executePokerJoinTransaction({
 
   const seated = tableTx.seats.find((s) => String(s.user) === String(userId));
   if (seated) throw new Error("ALREADY_SEATED");
-  const { userCannotRejoinPokerTable } = require("./pokerVacateService");
-  if (userCannotRejoinPokerTable(tableTx, userId)) {
-    throw new Error("REJOIN_BLOCKED");
-  }
 
   const inQueue = tableTx.waitingQueue.find((q) => String(q.user) === String(userId));
   if (inQueue) throw new Error("ALREADY_QUEUED");
@@ -316,15 +308,11 @@ async function joinPokerWithRetry({
       const retryable =
         err.message === "TABLE_FULL" ||
         err.message === "TABLE_CLOSED" ||
-        err.message === "TABLE_NOT_FOUND" ||
-        err.message === "REJOIN_BLOCKED";
+        err.message === "TABLE_NOT_FOUND";
       if (retryable && attempt < maxAttempts - 1) {
-        if (err.message === "REJOIN_BLOCKED") excludeIds.push(targetId);
+        if (err.message === "TABLE_FULL") excludeIds.push(targetId);
         const next = await withPokerAllocationLock(tier, buyIn, () =>
-          findAvailablePokerTable(tier, buyIn, null, {
-            excludeIds,
-            excludeUserId: userId,
-          })
+          findAvailablePokerTable(tier, buyIn, null, { excludeIds })
         );
         targetId = String(next._id);
         continue;

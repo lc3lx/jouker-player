@@ -5937,11 +5937,6 @@ function initTableGame(io, options = {}) {
           return;
         }
         const uid = String(socket.userId);
-        const { userCannotRejoinPokerTable } = require("../services/pokerVacateService");
-        if (userCannotRejoinPokerTable(table, uid)) {
-          socket.emit("table_event", { type: "not_seated", tableId: String(tableId) });
-          return;
-        }
         const isSeated = table.seats.some((s) => String(s.user) === uid);
         const isVacating = (table.vacatingPlayers || []).some(
           (v) => String(v.user) === uid && new Date(v.vacateUntil).getTime() > Date.now()

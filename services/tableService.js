@@ -390,10 +390,6 @@ function viewerHasLeftPokerSession(row, viewerId) {
     (entry) => String(entry?.user?._id || entry?.user || "") === viewer
   );
   if (pending) return true;
-  const blocked = (row.rejoinBlockedUsers || []).some(
-    (entry) => String(entry?.user?._id || entry?.user || "") === viewer
-  );
-  if (blocked) return true;
   const live = getTableGameDebugSnapshot(String(row._id || ""));
   return (live?.abandoningUserIds || []).some((uid) => String(uid) === viewer);
 }
@@ -787,25 +783,6 @@ exports.joinTable = asyncHandler(async (req, res, next) => {
     }
   }
 
-  if (table.gameType === "poker") {
-    const { userCannotRejoinPokerTable } = require("./pokerVacateService");
-    const { findAvailablePokerTable } = require("./pokerTableAllocationService");
-    const liveSnap = getTableGameDebugSnapshot(String(id));
-    const abandoning = (liveSnap?.abandoningUserIds || []).some(
-      (u) => String(u) === String(req.user._id)
-    );
-    if (userCannotRejoinPokerTable(table, req.user._id) || abandoning) {
-      const alt = await findAvailablePokerTable(
-        table.tier,
-        Number(buyIn) > 0 ? Number(buyIn) : table.minBuyIn,
-        null,
-        { excludeIds: [String(id)], excludeUserId: req.user._id }
-      );
-      id = String(alt._id);
-      table = alt;
-    }
-  }
-
   // One table per player: reject if the user is active (seated, mid-vacate
   // grace, or queued) anywhere else — any game type, any tier. Excludes the
   // target table itself so the reconnect-anchor branches below still work.
@@ -876,28 +853,20 @@ exports.joinTable = asyncHandler(async (req, res, next) => {
         });
       }
     } else {
-      const pokerBlocked =
-        existingSeatTable.gameType === "poker" &&
-        require("./pokerVacateService").userCannotRejoinPokerTable(
-          existingSeatTable,
-          req.user._id
-        );
-      if (!pokerBlocked) {
-        const seat = existingSeatTable.seats.find(
-          (s) => String(s.user) === String(req.user._id)
-        );
-        return res.status(200).json({
-          status: "success",
-          message: "Reconnected to existing seat",
-          data: {
-            tableId: String(existingSeatTable._id),
-            tableNumber: existingSeatTable.tableNumber,
-            chips: seat?.chips ?? buyIn,
-            reconnect: true,
-            rtcRoom: { roomId: String(existingSeatTable._id), type: "table" },
-          },
-        });
-      }
+      const seat = existingSeatTable.seats.find(
+        (s) => String(s.user) === String(req.user._id)
+      );
+      return res.status(200).json({
+        status: "success",
+        message: "Reconnected to existing seat",
+        data: {
+          tableId: String(existingSeatTable._id),
+          tableNumber: existingSeatTable.tableNumber,
+          chips: seat?.chips ?? buyIn,
+          reconnect: true,
+          rtcRoom: { roomId: String(existingSeatTable._id), type: "table" },
+        },
+      });
     }
   }
 
@@ -1150,9 +1119,6 @@ exports.joinTable = asyncHandler(async (req, res, next) => {
     if (e.message === "ALREADY_SEATED") throw new ApiError("You are already seated at this table", 400);
     if (e.message === "TABLE_CREATE_FAILED") {
       throw new ApiError("Could not allocate a table — try again", 503);
-    }
-    if (e.message === "REJOIN_BLOCKED") {
-      throw new ApiError("تعذر إيجاد طاولة أخرى بعد المغادرة", 409);
     }
     if (e.message === "INVALID_BUYIN") {
       throw new ApiError("Invalid buy-in for this table", 400);

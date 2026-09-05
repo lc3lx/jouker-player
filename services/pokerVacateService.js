@@ -371,7 +371,6 @@ async function permanentLeavePokerTable({
       table.pendingPermanentLeaves = (table.pendingPermanentLeaves || []).filter(
         (entry) => String(entry.user) !== uid
       );
-      addRejoinBlock(table, uid);
       table.status = statusAfterSeatChange(table, table.seats.length);
       await table.save({ session });
       promotedSeat = await seatNextFromQueue({ session, tableId: tid });
