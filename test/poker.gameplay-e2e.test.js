@@ -579,17 +579,19 @@ test("DURABLE LEAVE: an in-hand leave intent survives until the settled stack is
   assert.equal(await walletLocked(uid), 0, "the final stack is released from the table lock");
 });
 
-test("WIRING: closing the app abandons the seat immediately and queues a durable cash-out", async () => {
+test("WIRING: socket drop keeps the seat for reconnect and does not cash out", async () => {
   const { g } = await makeSeatedGame(2, 10000);
   const uid = g.seats[0].userId;
 
   g.onPlayerSocketDisconnected(uid);
-  assert.equal(g.seats[0].playerState, "LEAVE_PENDING");
+  assert.equal(g.seats[0].playerState, "DISCONNECTED");
+  assert.ok(g.seats[0].reconnectDeadline > Date.now());
+  assert.equal(g.seats.length, 2, "human + partner stay seated");
 
   await new Promise((resolve) => setTimeout(resolve, 80));
 
   const table = await Table.findById(g.tableId).lean();
-  assert.equal(table.pendingPermanentLeaves.length, 1);
-  assert.equal(String(table.pendingPermanentLeaves[0].user), uid);
+  assert.equal((table.pendingPermanentLeaves || []).length, 0);
+  assert.equal(table.seats.some((seat) => String(seat.user) === uid), true);
   g.disposeTimers();
 });

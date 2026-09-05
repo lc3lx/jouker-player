@@ -2258,7 +2258,7 @@ class PokerTable {
       seat.playerState = PLAYER_STATE.SITTING_OUT;
       seat.disconnectedAt = null;
       seat.reconnectDeadline = null;
-      if (seat.inHand && this.running && !seat.allIn) {
+      if (seat.inHand && this.running && !seat.folded && !seat.allIn) {
         this.applyFold(i);
         this.recordSeatAction(i, "disconnect_fold");
         this.appendHandAction({ type: "disconnect_fold", seatIndex: i, playerId: seat.userId });
@@ -2267,13 +2267,7 @@ class PokerTable {
       } else {
         await this.broadcastState();
       }
-
-      const { markPendingPermanentLeave, scheduleDeferredPermanentLeave } = require("../services/pokerVacateService");
-      await markPendingPermanentLeave({ tableId: this.tableId, userId: uid });
-      const currentSeat = this.seats[this.findSeatIndexByUser(uid)];
-      if (currentSeat) currentSeat.playerState = PLAYER_STATE.LEAVE_PENDING;
-      scheduleDeferredPermanentLeave({ tableId: this.tableId, userId: uid });
-      await this.broadcastState();
+      // Keep the human seat + bots. Only the leave button cashes out / resets.
     } catch (err) {
       logger.warn("poker_recovered_reconnect_expiry_failed", {
         tableId: this.tableId,
@@ -2381,27 +2375,30 @@ class PokerTable {
     if (idx < 0) return;
     const seat = this.seats[idx];
     if (seat.isBot) return;
-    // Do not overwrite a deliberate, durable leave with a reconnect state.
+    // Deliberate leave stays leave. A socket blip must not cash out or reset.
     if (seat.playerState === PLAYER_STATE.LEAVE_PENDING) return;
+    if (seat.playerState === PLAYER_STATE.DISCONNECTED && seat.reconnectDeadline) {
+      return;
+    }
     this.clearReconnectTimer(userId);
-    seat.disconnectedAt = null;
-    seat.reconnectDeadline = null;
-    seat.playerState = PLAYER_STATE.LEAVE_PENDING;
-    this.abandoningUserIds.add(String(userId));
+    const uid = String(userId);
+    this.abandoningUserIds.delete(uid);
+    seat.playerState = PLAYER_STATE.DISCONNECTED;
+    seat.disconnectedAt = Date.now();
+    seat.reconnectDeadline = Date.now() + POKER_TIMINGS.RECONNECT_WINDOW_MS;
+    const timer = setTimeout(() => {
+      void this.expireRecoveredReconnect(uid);
+    }, POKER_TIMINGS.RECONNECT_WINDOW_MS);
+    this.reconnectTimers.set(uid, timer);
     // #region agent log
-    try {
-      require("../utils/agentDebugLog").sessionDebugLog(
-        "C",
-        "tableGame.js:onPlayerSocketDisconnected",
-        "abandon seat immediately",
-        {
-          tableId: String(this.tableId),
-          inHand: !!seat.inHand,
-        }
-      );
-    } catch (_) {}
+    _dbg7("C", "tableGame.js:onPlayerSocketDisconnected", "keep_seat_reconnect", {
+      tableId: String(this.tableId),
+      inHand: !!seat.inHand,
+      humans: this.humanSeatCount(),
+      active: this.activeSeatCount(),
+    });
     // #endregion
-    void this.abandonHumanSeat(userId);
+    void this.broadcastState();
   }
 
   /**
