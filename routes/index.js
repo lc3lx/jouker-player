@@ -22,6 +22,7 @@ const parkourRoute = require("./parkourRoute");
 const timeRoute = require("./timeRoute");
 const goldenTreeRoute = require("./goldenTreeRoute");
 const poseidonRoute = require("./poseidonRoute");
+const zenobiaRoute = require("./zenobiaRoute");
 const sicboRoute = require("./sicboRoute");
 const adminSicboRoute = require("./adminSicboRoute");
 const luckyWheelRoute = require("./luckyWheelRoute");
@@ -122,6 +123,7 @@ const mountRoutes = (app) => {
   app.use("/api-docs", openapiRoute);
   app.use("/api/game", goldenTreeRoute);
   app.use("/api/poseidon", poseidonRoute);
+  app.use("/api/zenobia", zenobiaRoute);
 };
 
 module.exports = mountRoutes;
