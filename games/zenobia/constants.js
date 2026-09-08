@@ -76,7 +76,7 @@ const SCATTER = "bonus";
  * two artwork sets and the two Bonus Box plates.
  */
 const MULTIPLIER_VALUES = Object.freeze([
-  2, 3, 4, 5, 6, 7, 8, 9, 10, 15, 20, 30, 50, 100, 500, 1000,
+  2, 3, 4, 5, 6, 7, 8, 9, 10, 15, 20, 30, 50, 100, 200, 500, 1000,
 ]);
 
 /** Royal-blue plaques start here; below this the plaque art is gold. */
@@ -84,12 +84,12 @@ const ROYAL_MULTIPLIER_MIN = 10;
 
 /** Base-game plaque faces — heavily skewed to the small gold end. */
 const BASE_MULTIPLIER_WEIGHTS = Object.freeze([
-  30, 21, 15, 11, 7.5, 5, 3.4, 2.4, 1.9, 1.0, 0.62, 0.3, 0.14, 0.06, 0.012, 0.004,
+  30, 21, 15, 11, 7.5, 5, 3.4, 2.4, 1.9, 1.0, 0.62, 0.3, 0.14, 0.08, 0.04, 0.012, 0.004,
 ]);
 
-/** Free spins — the royal end opens up, x500/x1000 stay rare. */
+/** Free spins — the royal end opens up, x200/x500/x1000 stay rare. */
 const BONUS_MULTIPLIER_WEIGHTS = Object.freeze([
-  22, 17, 13.5, 11, 8.5, 6.5, 5, 4, 3.6, 2.5, 1.7, 1.0, 0.55, 0.24, 0.055, 0.018,
+  22, 17, 13.5, 11, 8.5, 6.5, 5, 4, 3.6, 2.5, 1.7, 1.0, 0.55, 0.32, 0.16, 0.055, 0.018,
 ]);
 
 /**
@@ -97,8 +97,7 @@ const BONUS_MULTIPLIER_WEIGHTS = Object.freeze([
  * collapse toward the gold end so several huge faces rarely stack.
  */
 const SUPPRESSED_MULTIPLIER_WEIGHTS = Object.freeze([
-  36, 24, 16, 10, 6, 3.4, 1.9, 1.1, 0.75, 0.32, 0.15, 0.06, 0.022, 0.008, 0.0015,
-  0.0005,
+  36, 24, 16, 10, 6, 3.4, 1.9, 1.1, 0.75, 0.32, 0.15, 0.06, 0.025, 0.012, 0.005, 0.0015, 0.0005,
 ]);
 
 /** Plaques at/above this face count as "big" for stacking suppression. */
@@ -141,37 +140,37 @@ const PAYTABLE = Object.freeze({
 
 /**
  * Per-cell draw weights — independent weighted draws per cell, not physical
- * strips. RTP is enforced by simulation, so treat these as a tuned set.
+ * strips. Tuned for ~35% win rate.
  */
 const BASE_WEIGHTS = Object.freeze([
-  [SYMBOLS.S, 12],
-  [SYMBOLS.N, 12],
-  [SYMBOLS.E, 12],
-  [SYMBOLS.A, 12],
-  [SYMBOLS.RING, 9.5],
-  [SYMBOLS.SPEAR, 9],
-  [SYMBOLS.POT, 8],
-  [SYMBOLS.NECKLACE, 7],
-  [SYMBOLS.THRONE, 6],
-  [SYMBOLS.QUEEN, 5],
-  ["mult", 1.9],
-  [SCATTER, 0.96],
+  [SYMBOLS.S, 10],
+  [SYMBOLS.N, 10],
+  [SYMBOLS.E, 10],
+  [SYMBOLS.A, 10],
+  [SYMBOLS.RING, 11],
+  [SYMBOLS.SPEAR, 10],
+  [SYMBOLS.POT, 9.5],
+  [SYMBOLS.NECKLACE, 9],
+  [SYMBOLS.THRONE, 8],
+  [SYMBOLS.QUEEN, 7],
+  ["mult", 2.2],
+  [SCATTER, 1.1],
 ]);
 
-/** Free spins: plaques rain far more often; scatters stay tuned for retrigger. */
+/** Free spins: plaques rain more often; scatters tuned for retrigger. */
 const BONUS_WEIGHTS = Object.freeze([
-  [SYMBOLS.S, 12],
-  [SYMBOLS.N, 12],
-  [SYMBOLS.E, 12],
-  [SYMBOLS.A, 12],
-  [SYMBOLS.RING, 9.5],
-  [SYMBOLS.SPEAR, 9],
-  [SYMBOLS.POT, 8],
-  [SYMBOLS.NECKLACE, 7],
-  [SYMBOLS.THRONE, 6],
-  [SYMBOLS.QUEEN, 5],
-  ["mult", 2.6],
-  [SCATTER, 0.7],
+  [SYMBOLS.S, 10],
+  [SYMBOLS.N, 10],
+  [SYMBOLS.E, 10],
+  [SYMBOLS.A, 10],
+  [SYMBOLS.RING, 11],
+  [SYMBOLS.SPEAR, 10],
+  [SYMBOLS.POT, 9.5],
+  [SYMBOLS.NECKLACE, 9],
+  [SYMBOLS.THRONE, 8],
+  [SYMBOLS.QUEEN, 7],
+  ["mult", 3.0],
+  [SCATTER, 0.85],
 ]);
 
 /** Win presentation tiers in bet multiples (client shows the matching banner). */
