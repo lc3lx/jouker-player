@@ -21,16 +21,6 @@ const {
   userRoom,
 } = require("../services/sicboService");
 
-function getTokenFromHandshake(socket) {
-  const auth = socket.handshake.auth || {};
-  if (auth.token) return String(auth.token).replace(/^Bearer\s+/i, "");
-  const header = socket.handshake.headers && socket.handshake.headers.authorization;
-  if (header && header.startsWith("Bearer ")) return header.split(" ")[1];
-  const query = socket.handshake.query || {};
-  if (query.token) return String(query.token).replace(/^Bearer\s+/i, "");
-  return null;
-}
-
 // ─── Lightweight per-socket anti-abuse ───────────────────────────────────────
 const RATE_WINDOW_MS = 1000;
 const RATE_MAX = 12; // max bet events per second per socket
