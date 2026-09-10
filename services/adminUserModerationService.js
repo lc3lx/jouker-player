@@ -116,9 +116,12 @@ exports.adminUserReports = asyncHandler(async (req, res) => {
 // ── moderation actions ───────────────────────────────────────────────────────
 
 async function _moderate(req, res, { set, event }) {
-  const user = await User.findById(req.params.id).select("_id active muted");
+  const user = await User.findById(req.params.id).select("_id active muted sessionVersion");
   if (!user) throw new ApiError("User not found", 404);
   Object.assign(user, set);
+  if (set.active === false) {
+    user.sessionVersion = Math.floor(Number(user.sessionVersion) || 0) + 1;
+  }
   await user.save();
   playerProfileService.invalidate(user._id);
   await auditService.logEvent({

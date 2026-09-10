@@ -16,6 +16,7 @@ const {
   recordWithdrawCompleted,
 } = require("./fraudService");
 const { trackEventServerFireAndForget } = require("./analyticsService");
+const { isProduction } = require("../utils/appConfig");
 
 function parseAmount(body) {
   const raw = body?.amount;
@@ -42,6 +43,7 @@ function depositProvider() {
   if (p === "crypto_usdt" || p === "crypto") return "crypto_usdt";
   return "simulated";
 }
+exports.depositProvider = depositProvider;
 
 function stripeMinorUnitsForChips(chipAmount) {
   const mult = parseFloat(process.env.STRIPE_MINOR_UNITS_PER_CHIP || "1");
@@ -203,6 +205,10 @@ exports.createPaymentIntent = asyncHandler(async (req, res, next) => {
     if (dp === "stripe") provider = "stripe";
     else if (dp === "crypto_usdt") provider = "crypto_usdt";
     else provider = "simulated";
+
+    if (provider === "simulated" && isProduction()) {
+      return next(new ApiError("Simulated deposit is disabled in production", 403));
+    }
   }
 
   try {
@@ -376,6 +382,10 @@ exports.confirmPayment = asyncHandler(async (req, res, next) => {
     return next(
       new ApiError("Crypto deposits are confirmed by the payment processor / ops — not via this endpoint", 400)
     );
+  }
+
+  if (existing.flow === "deposit" && existing.provider === "simulated" && isProduction()) {
+    return next(new ApiError("Simulated deposit confirmation is disabled in production", 403));
   }
 
   try {

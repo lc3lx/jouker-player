@@ -87,6 +87,13 @@ function assertLegacyPokerJackpotDisabled() {
   }
 }
 
+function assertPaymentProviderConfigured() {
+  const provider = String(process.env.PAYMENT_DEPOSIT_PROVIDER || "simulated").toLowerCase();
+  if (provider === "simulated") {
+    throw new Error("SIMULATED_PAYMENT_PROVIDER_FORBIDDEN_IN_PRODUCTION");
+  }
+}
+
 async function assertHouseWalletExists() {
   const wallet = await getHouseWallet();
   if (!wallet) {
@@ -171,6 +178,7 @@ async function runProductionChecks({ skipSmoke = false } = {}) {
       assertCorsWhitelist();
       assertTransactionFallbackDisabled();
       assertLegacyPokerJackpotDisabled();
+      assertPaymentProviderConfigured();
       await assertReplicaSetEnabled();
       await assertHouseWalletExists();
     }

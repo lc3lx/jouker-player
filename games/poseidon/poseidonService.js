@@ -55,148 +55,164 @@ function stepsWithAmounts(steps, betAmount) {
 async function executeSpin(userId, betAmountInput) {
   const userKey = String(userId);
 
-  await roundManager.ensureLoaded(userKey);
-  const bonusSession = roundManager.getBonusSession(userKey);
-  const isFreeSpin =
-    bonusSession != null && bonusSession.freeSpinsRemaining > 0;
+  return wallet.withUserLock(userKey, async () => {
+    await roundManager.ensureLoaded(userKey);
+    const bonusSession = roundManager.getBonusSession(userKey);
+    const isFreeSpin =
+      bonusSession != null && bonusSession.freeSpinsRemaining > 0;
 
-  const betAmount = isFreeSpin
-    ? bonusSession.betAmount
-    : validateBet(betAmountInput);
+    const betAmount = isFreeSpin
+      ? bonusSession.betAmount
+      : validateBet(betAmountInput);
 
-  if (!isFreeSpin) {
-    const balance = await wallet.getBalance(userKey);
-    if (balance < betAmount) {
-      throw new ApiError("Insufficient wallet balance", 402);
+    if (!isFreeSpin) {
+      const balance = await wallet.getBalance(userKey);
+      if (balance < betAmount) {
+        throw new ApiError("Insufficient wallet balance", 402);
+      }
     }
-  }
 
-  const superBonus = !!(isFreeSpin && bonusSession.superBonus);
-  const spin = spinEngine.resolveSpin({ bonusMode: isFreeSpin, superBonus });
+    const superBonus = !!(isFreeSpin && bonusSession.superBonus);
+    const spin = spinEngine.resolveSpin({ bonusMode: isFreeSpin, superBonus });
 
-  // --- win math (bet multiples) ---
-  // Base: this spin's plaques multiply a winning sequence. Bonus: plaques from
-  // winning spins bank into a session total that multiplies later wins.
-  // Losing spins ignore plaques for payout (they still count for the free-spins
-  // trigger below). Overall win is still hard-capped by MAX_WIN_MULTIPLIER.
-  const carried = isFreeSpin ? Number(bonusSession.bonusMultiplier || 0) : 0;
-  const { applied: appliedMultiplier, nextCarried } = resolvePayoutMultiplier({
-    baseWin: spin.baseWin,
-    plaqueSum: spin.multiplierSum,
-    carried,
-    isFreeSpin,
-  });
-  if (isFreeSpin) {
-    roundManager.setBonusMultiplier(userKey, nextCarried);
-  }
-
-  let totalWinX = spin.baseWin * appliedMultiplier;
-  const winCapped = totalWinX > MAX_WIN_MULTIPLIER;
-  if (winCapped) totalWinX = MAX_WIN_MULTIPLIER;
-
-  const totalWin = roundMoney(totalWinX * betAmount);
-
-  // --- free spins: 4+ base / 3+ during bonus (bought or natural) ---
-  const multiplierCount = spin.multipliers.length;
-  let freeSpinsTriggered = false;
-  let freeSpinsAwarded = 0;
-  if (isFreeSpin) {
-    if (multiplierCount >= TRIGGER_RETRIGGER_MIN) {
-      roundManager.addRetriggerSpins(userKey, RETRIGGER_AWARD);
-      freeSpinsAwarded = RETRIGGER_AWARD;
+    // --- win math (bet multiples) ---
+    // Base: this spin's plaques multiply a winning sequence. Bonus: plaques from
+    // winning spins bank into a session total that multiplies later wins.
+    // Losing spins ignore plaques for payout (they still count for the free-spins
+    // trigger below). Overall win is still hard-capped by MAX_WIN_MULTIPLIER.
+    const carried = isFreeSpin ? Number(bonusSession.bonusMultiplier || 0) : 0;
+    const { applied: appliedMultiplier, nextCarried } = resolvePayoutMultiplier({
+      baseWin: spin.baseWin,
+      plaqueSum: spin.multiplierSum,
+      carried,
+      isFreeSpin,
+    });
+    if (isFreeSpin) {
+      roundManager.setBonusMultiplier(userKey, nextCarried);
     }
-  } else if (
-    multiplierCount >= TRIGGER_NATURAL_MIN &&
-    !roundManager.hasActiveBonusSession(userKey)
-  ) {
-    roundManager.createBonusSession(userKey, {
-      betAmount,
-      freeSpins: FREE_SPINS_NATURAL,
-    });
-    await roundManager.touchSession(userKey);
-    freeSpinsTriggered = true;
-    freeSpinsAwarded = FREE_SPINS_NATURAL;
-  }
 
-  // --- settlement ---
-  let balanceAfter;
-  try {
-    balanceAfter = await wallet.atomicSpinWallet(userKey, {
-      betAmount: isFreeSpin ? 0 : betAmount,
-      winAmount: totalWin,
-      meta: { type: isFreeSpin ? "free_spin" : "main_spin" },
-    });
-  } catch (err) {
-    mapWalletError(err);
-  }
+    let totalWinX = spin.baseWin * appliedMultiplier;
+    const winCapped = totalWinX > MAX_WIN_MULTIPLIER;
+    if (winCapped) totalWinX = MAX_WIN_MULTIPLIER;
 
-  let bonusTotalWon = 0;
-  if (isFreeSpin) {
-    roundManager.addBonusWin(userKey, totalWin);
-    bonusTotalWon = roundManager.getBonusSession(userKey)?.totalWon ?? 0;
-    roundManager.consumeBonusSpin(userKey);
-  }
+    const totalWin = roundMoney(totalWinX * betAmount);
 
-  const round = roundManager.createRound({
-    userId: userKey,
-    betAmount,
-    initialMatrix: spin.initialMatrix,
-    steps: spin.steps,
-    totalWin,
-    isFreeSpin,
-    bonusSessionId: bonusSession?.sessionId || null,
-  });
+    // --- free spins: 4+ base / 3+ during bonus (bought or natural) ---
+    const multiplierCount = spin.multipliers.length;
+    let freeSpinsTriggered = false;
+    let freeSpinsAwarded = 0;
+    let stagedBonusAction = null;
+    if (isFreeSpin) {
+      if (multiplierCount >= TRIGGER_RETRIGGER_MIN) {
+        stagedBonusAction = { type: "retrigger", spins: RETRIGGER_AWARD };
+        freeSpinsAwarded = RETRIGGER_AWARD;
+      }
+    } else if (
+      multiplierCount >= TRIGGER_NATURAL_MIN &&
+      !roundManager.hasActiveBonusSession(userKey)
+    ) {
+      stagedBonusAction = {
+        type: "create",
+        betAmount,
+        freeSpins: FREE_SPINS_NATURAL,
+      };
+      freeSpinsTriggered = true;
+      freeSpinsAwarded = FREE_SPINS_NATURAL;
+    }
 
-  const { publishSpinCompleted } = require("../../domain/publishers/playerActivityPublishers");
-  publishSpinCompleted(userKey, {
-    sourceId: round.roundId,
-    game: "poseidon",
-    won: Number(totalWin || 0) > 0,
-  });
-
-  const liveSession = roundManager.getBonusSession(userKey);
-
-  // --- jackpot round (server-authoritative) ---
-  let jackpotGame = null;
-  if (jackpotService.isJackpotTriggered(spin.finalMatrix)) {
+    // --- settlement ---
+    let balanceAfter;
     try {
-      jackpotGame = await jackpotService.createJackpotRound({
-        spinId: round.roundId,
-        userId: userKey,
+      balanceAfter = await wallet.atomicSpinWallet(userKey, {
+        betAmount: isFreeSpin ? 0 : betAmount,
+        winAmount: totalWin,
+        meta: { type: isFreeSpin ? "free_spin" : "main_spin" },
       });
     } catch (err) {
-      // Non-fatal — log and continue without jackpot data rather than
-      // failing the whole spin. The round still settles normally.
-      const logger = (() => { try { return require("../../utils/logger"); } catch { return console; } })();
-      logger.error?.("jackpot round creation failed", { err: err?.message, userId: userKey });
+      mapWalletError(err);
     }
-  }
 
-  return {
-    roundId: round.roundId,
-    roundHash: round.roundHash,
-    betAmount,
-    initialMatrix: spin.initialMatrix,
-    steps: stepsWithAmounts(spin.steps, betAmount),
-    finalMatrix: spin.finalMatrix,
-    multipliers: spin.multipliers,
-    multiplierSum: spin.multiplierSum,
-    multiplierCount,
-    appliedMultiplier,
-    bonusMultiplier: isFreeSpin ? nextCarried : 0,
-    baseWinAmount: roundMoney(spin.baseWin * betAmount),
-    totalWin,
-    winCapped,
-    maxWinCap: roundMoney(MAX_WIN_MULTIPLIER * betAmount),
-    winTier: winTierFor(totalWinX),
-    isFreeSpin,
-    freeSpinsTriggered,
-    freeSpinsAwarded,
-    freeSpinsRemaining: liveSession?.freeSpinsRemaining ?? 0,
-    bonusTotalWon: isFreeSpin ? bonusTotalWon : 0,
-    balance: roundMoney(balanceAfter),
-    jackpotGame,        // null when no jackpot triggered; JackpotGameData otherwise
-  };
+    // Apply staged bonus session ONLY after successful debit/settlement
+    if (stagedBonusAction) {
+      if (stagedBonusAction.type === "retrigger") {
+        roundManager.addRetriggerSpins(userKey, stagedBonusAction.spins);
+      } else if (stagedBonusAction.type === "create") {
+        roundManager.createBonusSession(userKey, {
+          betAmount: stagedBonusAction.betAmount,
+          freeSpins: stagedBonusAction.freeSpins,
+        });
+        await roundManager.touchSession(userKey);
+      }
+    }
+
+    let bonusTotalWon = 0;
+    if (isFreeSpin) {
+      roundManager.addBonusWin(userKey, totalWin);
+      bonusTotalWon = roundManager.getBonusSession(userKey)?.totalWon ?? 0;
+      roundManager.consumeBonusSpin(userKey);
+    }
+
+    const round = roundManager.createRound({
+      userId: userKey,
+      betAmount,
+      initialMatrix: spin.initialMatrix,
+      steps: spin.steps,
+      totalWin,
+      isFreeSpin,
+      bonusSessionId: bonusSession?.sessionId || null,
+    });
+
+    const { publishSpinCompleted } = require("../../domain/publishers/playerActivityPublishers");
+    publishSpinCompleted(userKey, {
+      sourceId: round.roundId,
+      game: "poseidon",
+      won: Number(totalWin || 0) > 0,
+    });
+
+    const liveSession = roundManager.getBonusSession(userKey);
+
+    // --- jackpot round (server-authoritative) ---
+    let jackpotGame = null;
+    if (jackpotService.isJackpotTriggered(spin.finalMatrix)) {
+      try {
+        jackpotGame = await jackpotService.createJackpotRound({
+          spinId: round.roundId,
+          userId: userKey,
+        });
+      } catch (err) {
+        // Non-fatal — log and continue without jackpot data rather than
+        // failing the whole spin. The round still settles normally.
+        const logger = (() => { try { return require("../../utils/logger"); } catch { return console; } })();
+        logger.error?.("jackpot round creation failed", { err: err?.message, userId: userKey });
+      }
+    }
+
+    return {
+      roundId: round.roundId,
+      roundHash: round.roundHash,
+      betAmount,
+      initialMatrix: spin.initialMatrix,
+      steps: stepsWithAmounts(spin.steps, betAmount),
+      finalMatrix: spin.finalMatrix,
+      multipliers: spin.multipliers,
+      multiplierSum: spin.multiplierSum,
+      multiplierCount,
+      appliedMultiplier,
+      bonusMultiplier: isFreeSpin ? nextCarried : 0,
+      baseWinAmount: roundMoney(spin.baseWin * betAmount),
+      totalWin,
+      winCapped,
+      maxWinCap: roundMoney(MAX_WIN_MULTIPLIER * betAmount),
+      winTier: winTierFor(totalWinX),
+      isFreeSpin,
+      freeSpinsTriggered,
+      freeSpinsAwarded,
+      freeSpinsRemaining: liveSession?.freeSpinsRemaining ?? 0,
+      bonusTotalWon: isFreeSpin ? bonusTotalWon : 0,
+      balance: roundMoney(balanceAfter),
+      jackpotGame,        // null when no jackpot triggered; JackpotGameData otherwise
+    };
+  });
 }
 
 /**
@@ -205,45 +221,47 @@ async function executeSpin(userId, betAmountInput) {
  */
 async function executeBuyBonus(userId, currentBetInput, { superBonus = false } = {}) {
   const userKey = String(userId);
-  await roundManager.ensureLoaded(userKey);
-  if (roundManager.hasActiveBonusSession(userKey)) {
-    throw new ApiError("Bonus session already active", 409);
-  }
+  return wallet.withUserLock(userKey, async () => {
+    await roundManager.ensureLoaded(userKey);
+    if (roundManager.hasActiveBonusSession(userKey)) {
+      throw new ApiError("Bonus session already active", 409);
+    }
 
-  const betAmount = validateBet(currentBetInput);
-  const multiplier = superBonus ? SUPER_BUY_BONUS_COST : BUY_BONUS_COST;
-  const cost = roundMoney(betAmount * multiplier);
+    const betAmount = validateBet(currentBetInput);
+    const multiplier = superBonus ? SUPER_BUY_BONUS_COST : BUY_BONUS_COST;
+    const cost = roundMoney(betAmount * multiplier);
 
-  const balance = await wallet.getBalance(userKey);
-  if (balance < cost) {
-    throw new ApiError("Insufficient wallet balance for bonus purchase", 402);
-  }
+    const balance = await wallet.getBalance(userKey);
+    if (balance < cost) {
+      throw new ApiError("Insufficient wallet balance for bonus purchase", 402);
+    }
 
-  try {
-    await wallet.deductBalance(userKey, cost, { leg: "buy_bonus" });
-  } catch (err) {
-    mapWalletError(err);
-  }
+    try {
+      await wallet.deductBalance(userKey, cost, { leg: "buy_bonus" });
+    } catch (err) {
+      mapWalletError(err);
+    }
 
-  const session = roundManager.createBonusSession(userKey, {
-    betAmount,
-    freeSpins: FREE_SPINS_BOUGHT,
-    superBonus: !!superBonus,
+    const session = roundManager.createBonusSession(userKey, {
+      betAmount,
+      freeSpins: FREE_SPINS_BOUGHT,
+      superBonus: !!superBonus,
+    });
+    await roundManager.touchSession(userKey);
+
+    const balanceAfter = await wallet.getBalance(userKey);
+
+    return {
+      sessionId: session.sessionId,
+      cost,
+      betAmount,
+      superBonus: !!superBonus,
+      freeSpinsTriggered: true,
+      freeSpinsAwarded: FREE_SPINS_BOUGHT,
+      freeSpinsRemaining: session.freeSpinsRemaining,
+      balance: roundMoney(balanceAfter),
+    };
   });
-  await roundManager.touchSession(userKey);
-
-  const balanceAfter = await wallet.getBalance(userKey);
-
-  return {
-    sessionId: session.sessionId,
-    cost,
-    betAmount,
-    superBonus: !!superBonus,
-    freeSpinsTriggered: true,
-    freeSpinsAwarded: FREE_SPINS_BOUGHT,
-    freeSpinsRemaining: session.freeSpinsRemaining,
-    balance: roundMoney(balanceAfter),
-  };
 }
 
 /** Active free-spins / buy-bonus session for reconnect restore. */

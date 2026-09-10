@@ -1,5 +1,5 @@
 const jwt = require("jsonwebtoken");
-const { getTokenFromHandshake } = require("../socket/handlers/game.handlers");
+const { getTokenFromHandshake, verifySocketToken } = require("../utils/socketAuth");
 const friendService = require("../services/friendService");
 const invitationService = require("../services/invitationService");
 const chatService = require("../services/chatService");
@@ -13,15 +13,16 @@ function initSocial(io, options = {}) {
   invitationService.setSocialIo(nsp);
   chatService.setSocialIo(nsp);
 
-  nsp.use((socket, next) => {
+  nsp.use(async (socket, next) => {
     try {
       const token = getTokenFromHandshake(socket);
       if (!token) return next(new Error("Authentication token missing"));
-      const decoded = jwt.verify(token, process.env.JWT_SECRET_KEY);
+      const { user, decoded } = await verifySocketToken(token);
       socket.userId = decoded.userId;
+      socket.user = user;
       next();
     } catch (err) {
-      next(new Error("Invalid token"));
+      next(new Error(err.message || "Invalid token"));
     }
   });
 

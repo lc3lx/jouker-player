@@ -72,12 +72,12 @@ test("countdown cancellation returns to waiting", () => {
   }
 });
 
-test("countdown completion deals and enters bidding", () => {
+test("countdown completion deals and enters bidding", async () => {
   const game = mkFourHumans();
   try {
     game.clearBotTimer();
     game.clearCountdown();
-    assert.equal(game.startGame(), true);
+    assert.equal(await game.startGame(), true);
     assert.equal(game.state, "bidding_syrian");
     assert.ok(game.hands[0].length === 13);
   } finally {

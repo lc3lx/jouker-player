@@ -43,7 +43,28 @@ exports.getUser = factory.getOne(User);
 // @desc    Create user
 // @route   POST  /api/v1/users
 // @access  Private/Admin
-exports.createUser = factory.createOne(User);
+exports.createUser = asyncHandler(async (req, res, next) => {
+  const payload = {
+    name: req.body.name,
+    email: req.body.email,
+    password: req.body.password,
+    passwordConfirm: req.body.passwordConfirm,
+    phone: req.body.phone,
+    profileImg: req.body.profileImg,
+    role: "user",
+  };
+
+  if (req.body.slug) payload.slug = req.body.slug;
+
+  const document = await User.create(payload);
+  const safeUser = document.toObject ? document.toObject() : { ...document._doc };
+  delete safeUser.password;
+  delete safeUser.passwordResetCode;
+  delete safeUser.passwordResetExpires;
+  delete safeUser.passwordResetVerified;
+
+  res.status(201).json({ data: safeUser });
+});
 
 // @desc    Update specific user
 // @route   PUT /api/v1/users/:id
@@ -158,7 +179,10 @@ exports.updateLoggedUserData = asyncHandler(async (req, res, next) => {
 // @route   DELETE /api/v1/users/deleteMe
 // @access  Private/Protect
 exports.deleteLoggedUserData = asyncHandler(async (req, res, next) => {
-  await User.findByIdAndUpdate(req.user._id, { active: false });
+  await User.findByIdAndUpdate(req.user._id, {
+    active: false,
+    $inc: { sessionVersion: 1 },
+  });
 
   res.status(204).json({ status: 'Success' });
 });

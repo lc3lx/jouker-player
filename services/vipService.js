@@ -102,7 +102,11 @@ async function getVipLevelsForUsers(userIds) {
   }
   if (missing.length === 0) return out;
 
-  const rows = await VIPSubscription.find({ userId: { $in: missing } }).lean();
+  const validObjectIds = missing.filter((s) => mongoose.isValidObjectId(s));
+  let rows = [];
+  if (validObjectIds.length > 0) {
+    rows = await VIPSubscription.find({ userId: { $in: validObjectIds } }).lean();
+  }
   const byUser = new Map(rows.map((r) => [String(r.userId), r]));
   for (const uid of missing) {
     const level = levelFromSubscription(byUser.get(uid) || null);

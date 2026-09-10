@@ -112,7 +112,7 @@ exports.signup = asyncHandler(async (req, res, next) => {
 exports.login = asyncHandler(async (req, res, next) => {
   // 1) check if password and email in the body (validation)
   // 2) check if user exist & check if password is correct
-  const user = await User.findOne({ email: req.body.email });
+  const user = await User.findOne({ email: req.body.email }).select("+password");
 
   if (!user || !(await bcrypt.compare(req.body.password, user.password))) {
     return next(new ApiError("Incorrect email or password", 401));
@@ -161,6 +161,12 @@ exports.protect = asyncHandler(async (req, res, next) => {
         "The user that belong to this token does no longer exist",
         401
       )
+    );
+  }
+
+  if (currentUser.active === false) {
+    return next(
+      new ApiError("Account is deactivated or suspended", 401)
     );
   }
 
@@ -277,10 +283,15 @@ exports.forgotPassword = asyncHandler(async (req, res, next) => {
 // @route   POST /api/v1/auth/verifyResetCode
 // @access  Public
 exports.verifyPassResetCode = asyncHandler(async (req, res, next) => {
+  const resetCode = String(req.body?.resetCode || "");
+  if (!resetCode) {
+    return next(new ApiError("Reset code is required", 400));
+  }
+
   // 1) Get user based on reset code
   const hashedResetCode = crypto
     .createHash("sha256")
-    .update(req.body.resetCode)
+    .update(resetCode)
     .digest("hex");
 
   const user = await User.findOne({
@@ -288,15 +299,26 @@ exports.verifyPassResetCode = asyncHandler(async (req, res, next) => {
     passwordResetExpires: { $gt: Date.now() },
   });
   if (!user) {
-    return next(new ApiError("Reset code invalid or expired"));
+    return next(new ApiError("Reset code invalid or expired", 400));
   }
 
-  // 2) Reset code valid
+  // 2) Generate cryptographically secure one-time reset token (10 min expiry)
+  const resetToken = crypto.randomBytes(32).toString("hex");
+  const hashedResetToken = crypto
+    .createHash("sha256")
+    .update(resetToken)
+    .digest("hex");
+
+  user.passwordResetToken = hashedResetToken;
+  user.passwordResetTokenExpires = new Date(Date.now() + 10 * 60 * 1000);
   user.passwordResetVerified = true;
+  user.passwordResetCode = undefined;
+  user.passwordResetExpires = undefined;
   await user.save();
 
   res.status(200).json({
     status: "Success",
+    resetToken,
   });
 });
 
@@ -304,27 +326,61 @@ exports.verifyPassResetCode = asyncHandler(async (req, res, next) => {
 // @route   POST /api/v1/auth/resetPassword
 // @access  Public
 exports.resetPassword = asyncHandler(async (req, res, next) => {
+  const email = req.body?.email;
+  const newPassword = req.body?.newPassword;
+  const resetToken = req.body?.resetToken || req.headers["x-reset-token"];
+
+  if (!email || !newPassword) {
+    return next(new ApiError("Email and new password are required", 400));
+  }
+
   // 1) Get user based on email
-  const user = await User.findOne({ email: req.body.email });
+  const user = await User.findOne({ email });
   if (!user) {
     return next(
-      new ApiError(`There is no user with email ${req.body.email}`, 404)
+      new ApiError(`There is no user with email ${email}`, 404)
     );
   }
 
-  // 2) Check if reset code verified
-  if (!user.passwordResetVerified) {
-    return next(new ApiError("Reset code not verified", 400));
+  // 2) Verify reset token and expiration
+  if (resetToken) {
+    const hashedResetToken = crypto
+      .createHash("sha256")
+      .update(String(resetToken))
+      .digest("hex");
+
+    const isTokenValid =
+      user.passwordResetToken &&
+      user.passwordResetToken === hashedResetToken &&
+      user.passwordResetTokenExpires &&
+      user.passwordResetTokenExpires.getTime() > Date.now();
+
+    if (!isTokenValid) {
+      return next(new ApiError("Reset token is invalid or expired", 400));
+    }
+  } else {
+    // Require verified state within an unexpired window
+    const hasValidExpiry =
+      (user.passwordResetTokenExpires && user.passwordResetTokenExpires.getTime() > Date.now()) ||
+      (user.passwordResetExpires && user.passwordResetExpires.getTime() > Date.now());
+
+    if (!user.passwordResetVerified || !hasValidExpiry) {
+      return next(new ApiError("Password reset authorization missing or expired", 400));
+    }
   }
 
-  user.password = req.body.newPassword;
+  user.password = newPassword;
+  user.passwordChangedAt = new Date();
+  user.sessionVersion = Math.floor(Number(user.sessionVersion) || 0) + 1;
   user.passwordResetCode = undefined;
   user.passwordResetExpires = undefined;
   user.passwordResetVerified = undefined;
+  user.passwordResetToken = undefined;
+  user.passwordResetTokenExpires = undefined;
 
   await user.save();
 
-  // 3) if everything is ok, generate token
+  // 3) if everything is ok, generate token with new session version
   const token = createToken(user._id, user.sessionVersion);
   res.status(200).json({ token });
 });

@@ -93,7 +93,7 @@ exports.logoutAllDevices = asyncHandler(async (req, res, next) => {
 });
 
 exports.changeMyPassword = asyncHandler(async (req, res, next) => {
-  const user = await User.findById(req.user._id);
+  const user = await User.findById(req.user._id).select("+password");
   if (!user) return next(new ApiError("User not found", 404));
 
   const currentPassword = req.body?.currentPassword;
@@ -111,7 +111,7 @@ exports.changeMyPassword = asyncHandler(async (req, res, next) => {
   }
 
   const ok = await bcrypt.compare(String(currentPassword), user.password);
-  if (!ok) return next(new ApiError("Incorrect current password", 401));
+  if (!ok) return next(new ApiError("Incorrect current password", 400));
 
   user.password = password;
   user.passwordChangedAt = Date.now();

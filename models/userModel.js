@@ -40,11 +40,14 @@ const userSchema = new mongoose.Schema(
       type: String,
       required: [true, "password required"],
       minlength: [6, "Too short password"],
+      select: false,
     },
     passwordChangedAt: Date,
-    passwordResetCode: String,
-    passwordResetExpires: Date,
-    passwordResetVerified: Boolean,
+    passwordResetCode: { type: String, select: false },
+    passwordResetExpires: { type: Date, select: false },
+    passwordResetVerified: { type: Boolean, select: false },
+    passwordResetToken: { type: String, select: false },
+    passwordResetTokenExpires: { type: Date, select: false },
     role: {
       type: String,
       enum: ["user", "support", "manager", "admin", "superadmin"],
@@ -170,6 +173,20 @@ userSchema.pre("save", async function (next) {
   this.password = await bcrypt.hash(this.password, 12);
   next();
 });
+
+function stripPrivateFields(doc, ret) {
+  delete ret.password;
+  delete ret.passwordResetCode;
+  delete ret.passwordResetExpires;
+  delete ret.passwordResetVerified;
+  delete ret.passwordResetToken;
+  delete ret.passwordResetTokenExpires;
+  delete ret.__v;
+  return ret;
+}
+
+userSchema.set("toJSON", { transform: stripPrivateFields });
+userSchema.set("toObject", { transform: stripPrivateFields });
 
 userSchema.index({ referredBy: 1, createdAt: -1 });
 userSchema.index({ "referralMeta.deviceFingerprint": 1 }, { sparse: true });

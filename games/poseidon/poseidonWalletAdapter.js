@@ -19,24 +19,35 @@ const MODE =
 /** @type {Map<string, { balance: number, version: number }>} */
 const stubBalances = new Map();
 
+const { AsyncLocalStorage } = require("node:async_hooks");
+const lockContext = new AsyncLocalStorage();
+
 /** @type {Map<string, Promise<void>>} */
 const userLocks = new Map();
 
 async function withUserLock(userId, fn) {
   const key = String(userId);
+  const currentHeld = lockContext.getStore();
+  if (currentHeld && currentHeld.has(key)) {
+    return await fn();
+  }
+
   const prev = userLocks.get(key) || Promise.resolve();
   let release;
   const gate = new Promise((resolve) => {
     release = resolve;
   });
-  userLocks.set(key, prev.then(() => gate));
+  const lockPromise = prev.then(() => gate);
+  userLocks.set(key, lockPromise);
 
   await prev;
   try {
-    return await fn();
+    const nextHeld = new Set(currentHeld || []);
+    nextHeld.add(key);
+    return await lockContext.run(nextHeld, () => fn());
   } finally {
     release();
-    if (userLocks.get(key) === gate) {
+    if (userLocks.get(key) === lockPromise) {
       userLocks.delete(key);
     }
   }

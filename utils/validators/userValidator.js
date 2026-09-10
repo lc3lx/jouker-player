@@ -50,7 +50,14 @@ exports.createUserValidator = [
     .withMessage('Invalid phone number only accepted Egy and SA Phone numbers'),
 
   check('profileImg').optional(),
-  check('role').optional(),
+  check('role')
+    .optional()
+    .custom((val) => {
+      if (val && val !== 'user') {
+        throw new Error('Administrative roles cannot be assigned through this endpoint');
+      }
+      return true;
+    }),
 
   validatorMiddleware,
 ];
@@ -103,7 +110,7 @@ exports.changeUserPasswordValidator = [
     .withMessage('You must enter new password')
     .custom(async (val, { req }) => {
       // 1) Verify current password
-      const user = await User.findById(req.params.id);
+      const user = await User.findById(req.params.id).select('+password');
       if (!user) {
         throw new Error('There is no user for this id');
       }

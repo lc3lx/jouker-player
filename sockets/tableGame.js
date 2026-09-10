@@ -6,46 +6,8 @@ const path = require("path");
 const Table = require("../models/tableModel");
 const { isAgentDebugEnabled } = require("../utils/agentDebugEnabled");
 // #region agent log
-function _agentDbg(hypothesisId, location, message, data = {}) {
-  if (!isAgentDebugEnabled()) return;
-  try {
-    fs.appendFileSync(
-      path.join(__dirname, "..", "..", "debug-b181d7.log"),
-      `${JSON.stringify({
-        sessionId: "b181d7",
-        hypothesisId,
-        location,
-        message,
-        data,
-        timestamp: Date.now(),
-      })}\n`
-    );
-  } catch (_) {}
-}
-function _dbg7(hypothesisId, location, message, data = {}) {
-  const payload = {
-    sessionId: "7d1f00",
-    hypothesisId,
-    location,
-    message,
-    data,
-    timestamp: Date.now(),
-    runId: "post-fix",
-  };
-  try {
-    logger.info("AGENT_DEBUG_7d1f00", payload);
-  } catch (_) {}
-  try {
-    fs.appendFileSync(path.join(__dirname, "..", "..", "debug-7d1f00.log"), `${JSON.stringify(payload)}\n`);
-  } catch (_) {}
-  try {
-    fetch("http://127.0.0.1:7937/ingest/b9a00eef-7143-4edb-b1d5-038072464bf7", {
-      method: "POST",
-      headers: { "Content-Type": "application/json", "X-Debug-Session-Id": "7d1f00" },
-      body: JSON.stringify(payload),
-    }).catch(() => {});
-  } catch (_) {}
-}
+function _agentDbg() {}
+function _dbg7() {}
 // #endregion
 const HandHistory = require("../models/handHistoryModel");
 const { newDeck, shuffleDeterministic, draw, sha256Hex, randomInt: secureRandomInt } = require("../utils/poker/deck");
@@ -110,6 +72,7 @@ const { deriveMinimumBet } = require("../utils/poker/tableBettingConfig");
 const { buildHandAuditLog } = require("../services/handHistoryAuditService");
 const { resolveRakePolicy, calculateRake } = require("../utils/poker/rakePolicy");
 const { buildDeckCommitment } = require("../utils/poker/fairnessCommitment");
+const { verifySocketToken } = require("../utils/socketAuth");
 
 function getTokenFromHandshake(socket) {
   const auth = socket.handshake.auth || {};
@@ -5847,22 +5810,24 @@ function initTableGame(io, options = {}) {
   };
 
   // Auth
-  nsp.use((socket, next) => {
+  nsp.use(async (socket, next) => {
     try {
       const token = getTokenFromHandshake(socket);
       if (!token) return next(new Error("Authentication token missing"));
-      const decoded = jwt.verify(token, process.env.JWT_SECRET_KEY);
+      const { user, decoded } = await verifySocketToken(token);
       socket.userId = decoded.userId;
+      socket.user = user;
       // H-3: mirror userId into socket.data so cluster-wide RemoteSockets (via the
       // redis-adapter) expose it for the owner's per-user broadcasts.
       socket.data.userId = decoded.userId;
+      socket.data.user = user;
       socket.userIp = security.getIp(socket);
       const sec = security.onConnection(socket, socket.userId);
       if (sec.blocked) return next(new Error(sec.reason || "Rate limited"));
       metrics.activePlayers.inc();
       next();
     } catch (err) {
-      next(new Error("Invalid token"));
+      next(new Error(err.message || "Invalid token"));
     }
   });
 

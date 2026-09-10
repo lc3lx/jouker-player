@@ -15,6 +15,7 @@ const AgentProfile = require("../models/agentProfileModel");
 const SystemSettings = require("../models/systemSettingsModel");
 const { getPublicCurrencySummary } = require("./currencySettingsService");
 const { getOrCreateWallet } = require("./walletLedgerService");
+const { isProduction } = require("../utils/appConfig");
 
 const TX_LABELS = {
   win: "فوز في طاولة",
@@ -286,6 +287,9 @@ function parseSimulatedAmount(body) {
 // @route   POST /api/v1/wallet/deposit
 // @access  Protected/User
 exports.simulatedDeposit = asyncHandler(async (req, res, next) => {
+  if (isProduction()) {
+    return next(new ApiError("Simulated funding endpoints are disabled in production", 403));
+  }
   const amount = parseSimulatedAmount(req.body);
   if (amount == null) {
     return next(new ApiError("Invalid amount", 400));
@@ -330,6 +334,9 @@ exports.simulatedDeposit = asyncHandler(async (req, res, next) => {
 // @route   POST /api/v1/wallet/withdraw
 // @access  Protected/User
 exports.simulatedWithdraw = asyncHandler(async (req, res, next) => {
+  if (isProduction()) {
+    return next(new ApiError("Simulated funding endpoints are disabled in production", 403));
+  }
   const amount = parseSimulatedAmount(req.body);
   if (amount == null) {
     return next(new ApiError("Invalid amount", 400));

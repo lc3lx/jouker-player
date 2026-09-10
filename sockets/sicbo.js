@@ -13,6 +13,7 @@ const jwt = require("jsonwebtoken");
 const logger = require("../utils/logger");
 const roundManager = require("../games/sicbo/sicboRoundManager");
 const walletAdapter = require("../games/sicbo/sicboWalletAdapter");
+const { getTokenFromHandshake, verifySocketToken } = require("../utils/socketAuth");
 const {
   startSicboEngine,
   getPublicStateForClient,
@@ -76,16 +77,17 @@ async function sendSnapshot(socket) {
 function initSicbo(io, { redis } = {}) {
   const nsp = io.of("/sicbo");
 
-  nsp.use((socket, next) => {
+  nsp.use(async (socket, next) => {
     try {
       const token = getTokenFromHandshake(socket);
       if (!token) return next(new Error("Authentication token missing"));
-      const decoded = jwt.verify(token, process.env.JWT_SECRET_KEY);
+      const { user, decoded } = await verifySocketToken(token);
       socket.userId = decoded.userId;
+      socket.user = user;
       socket._rate = makeRateState();
       next();
-    } catch (_) {
-      next(new Error("Invalid token"));
+    } catch (err) {
+      next(new Error(err.message || "Invalid token"));
     }
   });
 
