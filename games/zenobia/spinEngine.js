@@ -32,6 +32,7 @@ const {
   findWins,
   collectMultipliers,
   collectScatters,
+  collectJackpots,
 } = require("./winCalculator");
 
 /** Hard stop — a legitimate sequence exhausts long before this. */
@@ -238,6 +239,7 @@ function resolveSpin({ bonusMode = false, superBonus = false, rng = secureRandom
 
   const multipliers = collectMultipliers(matrix);
   const scatters = collectScatters(matrix);
+  const jackpots = collectJackpots(matrix);
   return {
     initialMatrix,
     finalMatrix: matrix,
@@ -247,6 +249,8 @@ function resolveSpin({ bonusMode = false, superBonus = false, rng = secureRandom
     multiplierSum: multipliers.reduce((sum, m) => sum + m.value, 0),
     scatters,
     scatterCount: scatters.length,
+    jackpots,
+    jackpotCount: jackpots.length,
   };
 }
 

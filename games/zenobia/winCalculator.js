@@ -153,11 +153,23 @@ function collectScatters(matrix) {
   return out;
 }
 
+/** Jackpot scatters on the board, as [{ col, row }]. */
+function collectJackpots(matrix) {
+  const out = [];
+  for (let col = 0; col < REEL_COUNT; col += 1) {
+    for (let row = 0; row < ROW_COUNT; row += 1) {
+      if (matrix[col][row] === "jackpot") out.push({ col, row });
+    }
+  }
+  return out;
+}
+
 module.exports = {
   findWins,
   collectRoutes,
   keepMaximalRoutes,
   collectMultipliers,
   collectScatters,
+  collectJackpots,
   cellContinues,
 };

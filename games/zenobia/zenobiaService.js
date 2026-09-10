@@ -16,7 +16,7 @@ const {
 } = require("./constants");
 const spinEngine = require("./spinEngine");
 const roundManager = require("./roundManager");
-const wallet = require("./zenobiaWalletAdapter");
+const zenobiaJackpot = require("./zenobiaJackpot");
 
 function mapWalletError(err) {
   if (
@@ -157,6 +157,19 @@ async function executeSpin(userId, betAmountInput) {
       bonusSessionId: bonusSession?.sessionId || null,
     });
 
+    let jackpotGame = null;
+    if (zenobiaJackpot.isJackpotTriggered(spin.finalMatrix)) {
+      try {
+        jackpotGame = await zenobiaJackpot.createRoundForSpin({
+          spinId: round.roundId,
+          userId: userKey,
+        });
+      } catch (err) {
+        console.error?.("[zenobia] jackpot round creation failed", err?.message || err);
+        jackpotGame = null;
+      }
+    }
+
     const {
       publishSpinCompleted,
     } = require("../../domain/publishers/playerActivityPublishers");
@@ -182,6 +195,8 @@ async function executeSpin(userId, betAmountInput) {
       bonusMultiplier: isFreeSpin ? nextCarried : 0,
       scatters: spin.scatters,
       scatterCount,
+      jackpotCount: spin.jackpotCount || 0,
+      jackpotGame,
       baseWinAmount: roundMoney(spin.baseWin * betAmount),
       totalWin,
       winCapped,

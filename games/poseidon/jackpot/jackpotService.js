@@ -108,7 +108,7 @@ async function createJackpotRound({ spinId, userId, game = "poseidon" }) {
   const cards = buildMatchThreeLayout();
 
   const now = Date.now();
-  const allowedGames = new Set(["poseidon", "king-arth", "golden-tree"]);
+  const allowedGames = new Set(["poseidon", "king-arth", "golden-tree", "zenobia"]);
   const gameKey = allowedGames.has(game) ? game : "poseidon";
   const round = {
     roundId,

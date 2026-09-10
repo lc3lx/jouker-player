@@ -111,8 +111,18 @@ async function settleJackpotRound(roundId, userId) {
 
   if (prizeAmount > 0) {
     const source =
-      round.game === "king-arth" ? "king_arth_jackpot" : "poseidon_jackpot";
-    const result = await wallet.creditBalance(userId, prizeAmount, {
+      round.game === "king-arth"
+        ? "king_arth_jackpot"
+        : round.game === "golden-tree"
+          ? "golden_tree_jackpot"
+          : round.game === "zenobia"
+            ? "zenobia_jackpot"
+            : "poseidon_jackpot";
+    const walletMod =
+      round.game === "zenobia"
+        ? require("../../zenobia/zenobiaWalletAdapter")
+        : wallet;
+    const result = await walletMod.creditBalance(userId, prizeAmount, {
       source,
       roundId,
       settlementId,

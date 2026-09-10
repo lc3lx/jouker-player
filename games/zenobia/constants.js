@@ -70,6 +70,9 @@ const SYMBOLS = Object.freeze({
 /** Free-spins scatter — the gold BONUS coin. Never part of a route. */
 const SCATTER = "bonus";
 
+/** Match-3 jackpot scatter — same cell id as Poseidon / Zeus / Golden Tree. */
+const JACKPOT = "jackpot";
+
 /**
  * Plaque faces, encoded straight into the matrix as `x<value>`.
  * Gold plaques run x2–x9, royal-blue plaques x10–x1000 — the split matches the
@@ -155,6 +158,7 @@ const BASE_WEIGHTS = Object.freeze([
   [SYMBOLS.QUEEN, 7],
   ["mult", 2.2],
   [SCATTER, 1.1],
+  [JACKPOT, 0.42],
 ]);
 
 /** Free spins: plaques rain more often; scatters tuned for retrigger. */
@@ -171,6 +175,7 @@ const BONUS_WEIGHTS = Object.freeze([
   [SYMBOLS.QUEEN, 7],
   ["mult", 3.0],
   [SCATTER, 0.85],
+  [JACKPOT, 0.42],
 ]);
 
 /** Win presentation tiers in bet multiples (client shows the matching banner). */
@@ -193,9 +198,13 @@ function isScatter(cell) {
   return cell === SCATTER;
 }
 
-/** Plaques and the BONUS coin sit outside routes and break any path crossing them. */
+function isJackpot(cell) {
+  return cell === JACKPOT;
+}
+
+/** Plaques, BONUS coins, and jackpot scatters sit outside routes. */
 function isRouteBreaker(cell) {
-  return isMultiplier(cell) || isScatter(cell);
+  return isMultiplier(cell) || isScatter(cell) || isJackpot(cell);
 }
 
 function payoutFor(symbol, length) {
@@ -265,6 +274,7 @@ module.exports = {
   SUPER_BUY_BONUS_COST,
   SYMBOLS,
   SCATTER,
+  JACKPOT,
   MULTIPLIER_VALUES,
   ROYAL_MULTIPLIER_MIN,
   BASE_MULTIPLIER_WEIGHTS,
@@ -280,6 +290,7 @@ module.exports = {
   isMultiplier,
   multiplierValue,
   isScatter,
+  isJackpot,
   isRouteBreaker,
   payoutFor,
   winTierFor,

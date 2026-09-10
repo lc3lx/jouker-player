@@ -30,7 +30,7 @@ const poseidonJackpotRoundSchema = new mongoose.Schema(
     /** Owning game: poseidon | king-arth | golden-tree (shared match-3). */
     game: {
       type: String,
-      enum: ["poseidon", "king-arth", "golden-tree"],
+      enum: ["poseidon", "king-arth", "golden-tree", "zenobia"],
       default: "poseidon",
       index: true,
     },
