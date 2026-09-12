@@ -17,6 +17,8 @@ const {
 const spinEngine = require("./spinEngine");
 const roundManager = require("./roundManager");
 const zenobiaJackpot = require("./zenobiaJackpot");
+const wallet = require("./zenobiaWalletAdapter");
+
 
 function mapWalletError(err) {
   if (

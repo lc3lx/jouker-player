@@ -64,11 +64,6 @@ function jackpotCount(column) {
 
 /**
  * Select a Golden Tree reel window while keeping jackpot scatters rare.
- *
- * Normal stops retain their existing weights and ordering.  A one-jackpot
- * stop is available only on a 1-in-N activation roll; windows containing two
- * or more jackpot cells are never eligible.  This prevents a single reel
- * from manufacturing most of a 3-symbol jackpot trigger.
  */
 function pickRareJackpotColumnWindow(strip, rng = secureRandomInt) {
   const normalStops = [];
@@ -86,8 +81,6 @@ function pickRareJackpotColumnWindow(strip, rng = secureRandomInt) {
     }
   }
 
-  // Golden Tree's configured strips always have normal stops.  Keep the
-  // original generic picker as a defensive fallback for malformed strips.
   if (normalStops.length === 0) return pickColumnWindow(strip, rng);
 
   const activateJackpot =
@@ -96,8 +89,6 @@ function pickRareJackpotColumnWindow(strip, rng = secureRandomInt) {
 
   let eligibleStops = normalStops;
   if (activateJackpot) {
-    // Keep jackpot stop share ~stable as wild-dense strips grow more
-    // mixed normal windows (otherwise bonus jackpot rate collapses to ~0).
     const targetShare = 0.15;
     const boost = Math.max(
       1,
@@ -141,6 +132,16 @@ function sanitizeWildPlacements(matrix) {
   }
 }
 
+/**
+ * Force wild trees on columns 1, 2, 3 at middle row for buy bonus.
+ * Columns 0 and 4 must NOT have trees (enforced by sanitizeWildPlacements).
+ */
+function forceTreesOnMiddleReels(matrix) {
+  for (const col of WILD_REELS) {
+    matrix[col][WILD_ROW] = SYMBOLS.WILD;
+  }
+}
+
 function assignWildMultipliers(matrix, multiplierPool, rng = secureRandomInt) {
   const wildMultipliers = {};
   for (const col of WILD_REELS) {
@@ -153,11 +154,11 @@ function assignWildMultipliers(matrix, multiplierPool, rng = secureRandomInt) {
 
 /**
  * Generate a 5×3 outcome matrix.
- * Bonus mode uses denser (isolated) wild stops so trees appear often;
- * still never injects or guarantees a tree on every spin.
+ * When forceTrees is true (buy bonus initial spin), forces wild trees on
+ * columns 1, 2, 3 at middle row.
  * @returns {{ matrix: string[][], wildMultipliers: Record<number, number>, stopIndices: number[] }}
  */
-function generateSpin({ bonusMode = false, rng = secureRandomInt } = {}) {
+function generateSpin({ bonusMode = false, forceTrees = false, rng = secureRandomInt } = {}) {
   const strips = bonusMode ? BONUS_REEL_STRIPS : MAIN_REEL_STRIPS;
   const multiplierPool = bonusMode ? BONUS_WILD_MULTIPLIERS : MAIN_WILD_MULTIPLIERS;
 
@@ -176,6 +177,12 @@ function generateSpin({ bonusMode = false, rng = secureRandomInt } = {}) {
   }
 
   sanitizeWildPlacements(matrix);
+
+  // Buy bonus: force exactly 3 trees on columns 1-3 at middle row
+  if (forceTrees) {
+    forceTreesOnMiddleReels(matrix);
+  }
+
   const wildMultipliers = assignWildMultipliers(matrix, multiplierPool, rng);
 
   return { matrix, wildMultipliers, stopIndices };
@@ -189,4 +196,5 @@ module.exports = {
   pickColumnWindow,
   pickRareJackpotColumnWindow,
   sanitizeWildPlacements,
+  forceTreesOnMiddleReels,
 };

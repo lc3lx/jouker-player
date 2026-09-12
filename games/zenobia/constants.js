@@ -92,7 +92,7 @@ const BASE_MULTIPLIER_WEIGHTS = Object.freeze([
 
 /** Free spins — the royal end opens up, x200/x500/x1000 stay rare. */
 const BONUS_MULTIPLIER_WEIGHTS = Object.freeze([
-  22, 17, 13.5, 11, 8.5, 6.5, 5, 4, 3.6, 2.5, 1.7, 1.0, 0.55, 0.32, 0.16, 0.055, 0.018,
+  22, 17, 13.5, 11, 8.5, 6.5, 5, 4, 3.6, 2.5, 1.7, 1.0, 0.55, 0.16, 0.07, 0.055, 0.018,
 ]);
 
 /**
@@ -146,35 +146,35 @@ const PAYTABLE = Object.freeze({
  * strips. Tuned for ~35% win rate.
  */
 const BASE_WEIGHTS = Object.freeze([
-  [SYMBOLS.S, 10],
-  [SYMBOLS.N, 10],
-  [SYMBOLS.E, 10],
-  [SYMBOLS.A, 10],
-  [SYMBOLS.RING, 11],
-  [SYMBOLS.SPEAR, 10],
-  [SYMBOLS.POT, 9.5],
-  [SYMBOLS.NECKLACE, 9],
-  [SYMBOLS.THRONE, 8],
-  [SYMBOLS.QUEEN, 7],
-  ["mult", 2.2],
-  [SCATTER, 1.1],
+  [SYMBOLS.S, 12],
+  [SYMBOLS.N, 12],
+  [SYMBOLS.E, 12],
+  [SYMBOLS.A, 12],
+  [SYMBOLS.RING, 9.5],
+  [SYMBOLS.SPEAR, 9],
+  [SYMBOLS.POT, 8],
+  [SYMBOLS.NECKLACE, 7],
+  [SYMBOLS.THRONE, 6],
+  [SYMBOLS.QUEEN, 5],
+  ["mult", 1.9],
+  [SCATTER, 0.96],
   [JACKPOT, 0.42],
 ]);
 
 /** Free spins: plaques rain more often; scatters tuned for retrigger. */
 const BONUS_WEIGHTS = Object.freeze([
-  [SYMBOLS.S, 10],
-  [SYMBOLS.N, 10],
-  [SYMBOLS.E, 10],
-  [SYMBOLS.A, 10],
-  [SYMBOLS.RING, 11],
-  [SYMBOLS.SPEAR, 10],
-  [SYMBOLS.POT, 9.5],
-  [SYMBOLS.NECKLACE, 9],
-  [SYMBOLS.THRONE, 8],
-  [SYMBOLS.QUEEN, 7],
-  ["mult", 3.0],
-  [SCATTER, 0.85],
+  [SYMBOLS.S, 12],
+  [SYMBOLS.N, 12],
+  [SYMBOLS.E, 12],
+  [SYMBOLS.A, 12],
+  [SYMBOLS.RING, 9.5],
+  [SYMBOLS.SPEAR, 9],
+  [SYMBOLS.POT, 8],
+  [SYMBOLS.NECKLACE, 7],
+  [SYMBOLS.THRONE, 6],
+  [SYMBOLS.QUEEN, 5],
+  ["mult", 2.6],
+  [SCATTER, 0.7],
   [JACKPOT, 0.42],
 ]);
 

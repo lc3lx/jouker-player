@@ -19,6 +19,7 @@ class RoundManager {
     gameState.roundPlayedCards = [];
     gameState.leadingSuit = null;
     gameState.finishedPlayers = [];
+    gameState.lastPassedPlayers = [];
     gameState.trixTable = {
       Spades: { min: null, max: null },
       Hearts: { min: null, max: null },

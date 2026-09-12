@@ -1,4 +1,4 @@
-﻿const BaseGameEngine = require('../../engine/BaseGameEngine');
+const BaseGameEngine = require('../../engine/BaseGameEngine');
 const crypto = require('crypto');
 const Player = require('./models/Player');
 const GameState = require('./models/GameState');
@@ -118,6 +118,17 @@ class TrixGame extends BaseGameEngine {
       this.onGameEvent(event, payload);
     } catch (e) {
       // ignore listener errors
+    }
+  }
+
+  _emitPassedPlayers() {
+    if (
+      Array.isArray(this.gameState?.lastPassedPlayers) &&
+      this.gameState.lastPassedPlayers.length > 0
+    ) {
+      for (const seat of this.gameState.lastPassedPlayers) {
+        this._emit('player_pass', { tableId: this.roomId, playerIndex: seat });
+      }
     }
   }
 
@@ -286,6 +297,7 @@ class TrixGame extends BaseGameEngine {
         if (this.gameState.currentGameType === 'Trix') {
           const before = this.gameState.turnPlayerIndex;
           GameManager.nextTurn(this.gameState);
+          this._emitPassedPlayers();
           if (this.gameState.turnPlayerIndex !== before) {
             this._restartTurnTimer();
             this.notifyStateChanged();
@@ -712,6 +724,7 @@ class TrixGame extends BaseGameEngine {
         if (valid.length === 0) {
           const before = this.gameState.turnPlayerIndex;
           GameManager.nextTurn(this.gameState);
+          this._emitPassedPlayers();
           if (this.gameState.turnPlayerIndex !== before) {
             stateChanged = true;
             this._restartTurnTimer();
@@ -740,6 +753,7 @@ class TrixGame extends BaseGameEngine {
         } else if (this.gameState.currentGameType === 'Trix') {
           const before = this.gameState.turnPlayerIndex;
           GameManager.nextTurn(this.gameState);
+          this._emitPassedPlayers();
           if (this.gameState.turnPlayerIndex !== before) {
             stateChanged = true;
             this._restartTurnTimer();
@@ -817,6 +831,9 @@ class TrixGame extends BaseGameEngine {
       gamesPlayedByKing: this.gameState.gamesPlayedByKing.map((row) => [...row]),
       trixTable: JSON.parse(JSON.stringify(this.gameState.trixTable)),
       finishedPlayers: [...this.gameState.finishedPlayers],
+      lastPassedPlayers: Array.isArray(this.gameState.lastPassedPlayers)
+        ? [...this.gameState.lastPassedPlayers]
+        : [],
       roundPlayedCards: (this.gameState.roundPlayedCards || []).map((c) => ({
         rank: c.rank,
         suit: c.suit,
@@ -891,6 +908,7 @@ class TrixGame extends BaseGameEngine {
         );
         if (currentValid.length === 0) {
           GameManager.nextTurn(this.gameState);
+          this._emitPassedPlayers();
         }
       }
       this._restartTurnTimer();
@@ -919,6 +937,7 @@ class TrixGame extends BaseGameEngine {
         this.clearTurnTimer();
       } else if (!trickResult && this.gameState.currentGameType === 'Trix') {
         GameManager.nextTurn(this.gameState);
+        this._emitPassedPlayers();
         this._restartTurnTimer();
       } else if (!trickResult) {
         this.gameState.turnPlayerIndex = (this.gameState.turnPlayerIndex + 1) % 4;

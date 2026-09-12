@@ -19,6 +19,7 @@ class GameState {
       Clubs: { min: null, max: null }
     };
     this.finishedPlayers = [];
+    this.lastPassedPlayers = [];
     
     this.gamesPlayedByKing = [
       [], [], [], [] // 4 kings, each array stores game types selected

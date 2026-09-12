@@ -2,8 +2,9 @@
 
 const {
   roundMoney,
-  MIN_CONSECUTIVE,
+  PAYLINES,
   WIN_RULES_VERSION,
+  minMatchCount,
 } = require("./constants");
 const {
   calculateWins,
@@ -16,7 +17,7 @@ const logger = require("../../utils/logger");
 
 /**
  * Defense-in-depth: never credit a win that does not match the landed grid.
- * Payable paths: L→R from reel 0 with adjacent/corner steps (|Δrow| ≤ 1).
+ * Validates against the 10 fixed paylines.
  */
 function hardenWinResult(matrix, wildMultipliers, betAmount, options = {}) {
   const bonusMode = options.bonusMode === true;
@@ -32,9 +33,22 @@ function hardenWinResult(matrix, wildMultipliers, betAmount, options = {}) {
   for (const w of fresh.lineWins) {
     if (!w || w.count !== w.positions?.length) continue;
 
-    // Same bar for orange, seven, cherry, … — never pay under 3-in-a-row.
-    if (!Number.isInteger(w.count) || w.count < MIN_CONSECUTIVE) continue;
-    // Reject mid-board / right-side clusters that never touch reel 0.
+    // Validate lineIndex references a valid payline
+    if (!Number.isInteger(w.lineIndex) || w.lineIndex < 0 || w.lineIndex >= PAYLINES.length) {
+      logger.warn("golden_tree_win_guard_drop_line", {
+        winRulesVersion: WIN_RULES_VERSION,
+        reason: "invalid_line_index",
+        lineIndex: w.lineIndex,
+        symbol: w.symbol,
+        amount: w.amount,
+      });
+      continue;
+    }
+
+    // Validate minimum match count (seven=2, others=3)
+    if (!Number.isInteger(w.count) || w.count < minMatchCount(w.symbol)) continue;
+
+    // Reject if positions don't start at col 0
     const startsAtCol0 =
       Array.isArray(w.positions) &&
       w.positions[0] &&
@@ -49,6 +63,28 @@ function hardenWinResult(matrix, wildMultipliers, betAmount, options = {}) {
       });
       continue;
     }
+
+    // Validate positions match the declared payline
+    const payline = PAYLINES[w.lineIndex];
+    let paylineMatch = true;
+    for (let i = 0; i < w.positions.length; i += 1) {
+      if (w.positions[i].row !== payline[i]) {
+        paylineMatch = false;
+        break;
+      }
+    }
+    if (!paylineMatch) {
+      logger.warn("golden_tree_win_guard_drop_line", {
+        winRulesVersion: WIN_RULES_VERSION,
+        reason: "positions_dont_match_payline",
+        lineIndex: w.lineIndex,
+        symbol: w.symbol,
+        positions: w.positions,
+        expectedPayline: payline,
+      });
+      continue;
+    }
+
     const base = basePayout(w.symbol, w.count, betAmount);
     if (base <= 0) continue;
     const amount = roundMoney(w.amount);

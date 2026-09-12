@@ -183,9 +183,13 @@ function wireTrixGame(nsp, tableId, game) {
     if (
       event === "turn_timer_started" ||
       event === "turn_timer_update" ||
-      event === "turn_timer_expired"
+      event === "turn_timer_expired" ||
+      event === "player_pass"
     ) {
       emitToTrixHumans(nsp, tid, event, payload);
+      if (event === "player_pass" && spectatorService.getCount(tid) > 0) {
+        nsp.to(`spec:${tid}`).emit(event, payload);
+      }
     } else if (event === "bot_chat" && payload) {
       // Forward a bot's chat/emoji to seated players + spectators (same event
       // humans use — no special client logic).

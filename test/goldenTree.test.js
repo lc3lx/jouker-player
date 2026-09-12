@@ -95,11 +95,11 @@ function atLeastThreeIndependentCells(cellCount, cellChance) {
   return probability;
 }
 
-test("only three horizontal paylines (no diagonal lines)", () => {
-  assert.equal(PAYLINES.length, 3);
+test("ten fixed paylines", () => {
+  assert.equal(PAYLINES.length, 10);
   for (const line of PAYLINES) {
     assert.equal(line.length, 5);
-    assert.equal(new Set(line).size, 1);
+    assert.ok(line.every((row) => row >= 0 && row <= 2));
   }
 });
 
@@ -110,9 +110,11 @@ test("payline parser — left-to-right with wild substitution", () => {
   assert.equal(match.symbol, SYMBOLS.CHERRY);
 });
 
-test("every line symbol needs at least 3 matches", () => {
-  assert.equal(basePayout(SYMBOLS.SEVEN, 2, 10000), 0);
+test("seven symbol wins with 2 matches; others need at least 3 matches", () => {
+  assert.equal(basePayout(SYMBOLS.SEVEN, 2, 10000), 5000);
   assert.equal(basePayout(SYMBOLS.SEVEN, 3, 10000), 10000);
+  assert.equal(basePayout(SYMBOLS.CHERRY, 2, 10000), 0);
+  assert.equal(basePayout(SYMBOLS.CHERRY, 3, 10000), 2000);
 });
 
 test("corner-touch diagonal cherries DO pay", () => {
@@ -134,8 +136,8 @@ test("corner-touch diagonal cherries DO pay", () => {
   assert.equal(cherry.amount, 2000);
 });
 
-test("screenshot bananas pay via corner-adjacent path", () => {
-  // User board: bananas on reels 0/1/2 touching by corners (not same row).
+test("bananas not forming one of the 10 paylines do not pay", () => {
+  // Bananas on (0,1), (1,0), (2,1) do not match any of the 10 paylines for 3 matches.
   const matrix = [
     [SYMBOLS.PINEAPPLE, SYMBOLS.BANANA, SYMBOLS.BANANA],
     [SYMBOLS.BANANA, SYMBOLS.GRAPES, SYMBOLS.GRAPES],
@@ -145,10 +147,9 @@ test("screenshot bananas pay via corner-adjacent path", () => {
   ];
 
   const result = calculateWins(matrix, {}, 10000, { bonusMode: false });
-  const banana = result.lineWins.find((w) => w.symbol === SYMBOLS.BANANA);
-  assert.ok(banana, "expected banana win on adjacent path");
-  assert.ok(banana.count >= 3);
-  assert.ok(result.totalWin > 0);
+  const bananaWins = result.lineWins.filter((w) => w.symbol === SYMBOLS.BANANA);
+  assert.equal(bananaWins.length, 0);
+  assert.equal(result.totalWin, 0);
 });
 
 test("horizontal 3 cherries on one row pay", () => {
@@ -338,7 +339,7 @@ test("orange cluster — every maximal path pays", () => {
   assert.ok(mid, "middle-row 3 oranges must pay");
 });
 
-test("screenshot oranges — mid row, 45° and L-path all pay", () => {
+test("screenshot oranges — fixed paylines matching matrix pay", () => {
   const matrix = [
     [SYMBOLS.ORANGE, SYMBOLS.ORANGE, SYMBOLS.PINEAPPLE],
     [SYMBOLS.ORANGE, SYMBOLS.ORANGE, SYMBOLS.PINEAPPLE],
@@ -352,10 +353,9 @@ test("screenshot oranges — mid row, 45° and L-path all pay", () => {
   const keys = new Set(result.lineWins.map(key));
   assert.ok(keys.has("0,0>1,0>2,0"), "top row");
   assert.ok(keys.has("0,1>1,1>2,1"), "middle row");
-  assert.ok(keys.has("0,0>1,1>2,2"), "45 degree");
-  assert.ok(keys.has("0,1>1,1>2,2"), "L path");
-  assert.equal(result.lineWins.length, 10);
-  assert.equal(result.totalWin, 10 * bet * 0.2);
+  assert.ok(keys.has("0,0>1,1>2,2"), "V-shape");
+  assert.equal(result.lineWins.length, 6);
+  assert.equal(result.totalWin, 6 * bet * 0.2);
 });
 
 test("orange and cherry use identical match rules on the same shape", () => {
@@ -416,7 +416,7 @@ test("screenshot 02:41 — gapped 4 sevens + mid oranges → 0 (not 5× bet)", (
   assert.notEqual(result.totalWin, bet * 5);
 });
 
-test("seven cluster — every maximal seven path pays", () => {
+test("seven cluster — paylines with sevens pay", () => {
   const matrix = [
     [SYMBOLS.SEVEN, SYMBOLS.SEVEN, SYMBOLS.ORANGE],
     [SYMBOLS.SEVEN, SYMBOLS.SEVEN, SYMBOLS.ORANGE],
@@ -428,14 +428,14 @@ test("seven cluster — every maximal seven path pays", () => {
   const result = calculateWins(matrix, {}, bet, { bonusMode: false });
   assert.ok(result.lineWins.length > 1);
   assert.ok(result.lineWins.every((w) => w.symbol === SYMBOLS.SEVEN));
-  assert.equal(result.totalWin, result.lineWins.length * bet);
+  assert.equal(result.totalWin, 200000000);
 });
 
 test("two sevens do not pay across missing reels", () => {
   const matrix = [
-    [SYMBOLS.ORANGE, SYMBOLS.SEVEN, SYMBOLS.SEVEN],
-    [SYMBOLS.BELL, SYMBOLS.BELL, SYMBOLS.SEVEN],
-    [SYMBOLS.ORANGE, SYMBOLS.ORANGE, SYMBOLS.ORANGE],
+    [SYMBOLS.SEVEN, SYMBOLS.ORANGE, SYMBOLS.ORANGE],
+    [SYMBOLS.BELL, SYMBOLS.BELL, SYMBOLS.BELL],
+    [SYMBOLS.SEVEN, SYMBOLS.SEVEN, SYMBOLS.SEVEN],
     [SYMBOLS.CHERRY, SYMBOLS.CHERRY, SYMBOLS.ORANGE],
     [SYMBOLS.ORANGE, SYMBOLS.ORANGE, SYMBOLS.SEVEN],
   ];
@@ -560,15 +560,15 @@ test("an unmultiplied tree connects two matching symbols on the same row", () =>
   matrix[1][1] = SYMBOLS.WILD;
   matrix[2][1] = SYMBOLS.CHERRY;
 
-  // No explicit multiplier map → default 2× when wild is on the paying run.
+  // No explicit multiplier map → wild acts as standard matching symbol (multiplier 1).
   const result = calculateWins(matrix, {}, 10000, { bonusMode: false });
   const win = result.lineWins.find(
     (w) => w.symbol === SYMBOLS.CHERRY && w.count === 3,
   );
 
   assert.ok(win, "expected cherry → plain tree → cherry on one row");
-  assert.equal(win.wildMultiplier, 2);
-  assert.equal(win.amount, 4000);
+  assert.equal(win.wildMultiplier, 1);
+  assert.equal(win.amount, 2000);
   assert.ok(win.positions.every((p) => p.row === 1));
 });
 
@@ -1031,4 +1031,52 @@ test("spin response includes jackpot fields", async () => {
   assert.ok(result.jackpotMeters);
   assert.equal(typeof result.jackpotMeters.club, "number");
   assert.equal(typeof result.jackpotMeters.spade, "number");
+});
+
+test("two sevens on payline from reel 0 awards 2-match payout", () => {
+  const matrix = emptyMatrix(SYMBOLS.BANANA);
+  // Payline 1: middle row [1, 1, 1, 1, 1]
+  matrix[0][1] = SYMBOLS.SEVEN;
+  matrix[1][1] = SYMBOLS.SEVEN;
+  matrix[2][1] = SYMBOLS.ORANGE; // breaks the run
+
+  const result = calculateWins(matrix, {}, 10000, { bonusMode: false });
+  const sevenWin = result.lineWins.find((w) => w.symbol === SYMBOLS.SEVEN && w.lineIndex === 0);
+  assert.ok(sevenWin, "expected 2-match seven win on payline 1");
+  assert.equal(sevenWin.count, 2);
+  assert.equal(sevenWin.amount, 5000); // 0.5 × 10000
+});
+
+test("bonus mode with 3 trees on cols 1-3: all 3 symbols on col 0 win, and matching opposite symbol makes full win", () => {
+  // Columns 1, 2, 3 have trees (row 1), expanding across whole columns in bonus mode
+  const matrix = [
+    [SYMBOLS.CHERRY, SYMBOLS.SEVEN, SYMBOLS.BELL],      // col 0: top=cherry, mid=seven, bot=bell
+    [SYMBOLS.ORANGE, SYMBOLS.WILD, SYMBOLS.BANANA],     // col 1: tree at mid
+    [SYMBOLS.GRAPES, SYMBOLS.WILD, SYMBOLS.PLUM],       // col 2: tree at mid
+    [SYMBOLS.WATERMELON, SYMBOLS.WILD, SYMBOLS.ORANGE], // col 3: tree at mid
+    [SYMBOLS.BANANA, SYMBOLS.SEVEN, SYMBOLS.PLUM],      // col 4: mid=seven (matches col 0 mid!)
+  ];
+
+  const wildMultipliers = { 1: 2, 2: 3, 3: 5 };
+  const result = calculateWins(matrix, wildMultipliers, 10000, { bonusMode: true });
+
+  // 1. All 3 symbols in col 0 must win!
+  const cherryWins = result.lineWins.filter((w) => w.symbol === SYMBOLS.CHERRY);
+  const sevenWins = result.lineWins.filter((w) => w.symbol === SYMBOLS.SEVEN);
+  const bellWins = result.lineWins.filter((w) => w.symbol === SYMBOLS.BELL);
+
+  assert.ok(cherryWins.length > 0, "col 0 row 0 (cherry) must win");
+  assert.ok(sevenWins.length > 0, "col 0 row 1 (seven) must win");
+  assert.ok(bellWins.length > 0, "col 0 row 2 (bell) must win");
+
+  // 2. The matching symbol opposite col 0 row 1 (seven at col 4 row 1 on Payline 1 [1,1,1,1,1])
+  // completes the full 5-symbol win!
+  const fullSevenWin = sevenWins.find((w) => w.lineIndex === 0);
+  assert.ok(fullSevenWin, "expected full win on payline 1 for seven");
+  assert.equal(fullSevenWin.count, 5, "seven must be 5-of-a-kind (full win)");
+  // Wild multiplier: 2 + 3 + 5 = 10
+  assert.equal(fullSevenWin.wildMultiplier, 10);
+  // Base payout for 5 sevens at 10000 bet is 100 × 10000 = 1,000,000
+  // Multiplied by 10x wild multiplier = 10,000,000
+  assert.equal(fullSevenWin.amount, 10000000);
 });

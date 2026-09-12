@@ -2,14 +2,16 @@
  * Golden Tree — core game constants.
  * Matrix: 5 reels (columns) × 3 rows.
  *
- * Win rule for line symbols: every maximal path of ≥ MIN_CONSECUTIVE
- * matching cells starting on reel 0, stepping one reel right each time.
- * Each step must touch the previous cell (same row, shared edge, or
- * corner — |Δrow| ≤ 1). Wilds substitute. No mid-board starts.
+ * Win rule: 10 fixed paylines evaluated left-to-right from column 0.
+ * Each payline defines row indices per column. Wilds substitute.
+ * Seven symbol requires only 2 consecutive matches; all others need 3.
  */
 
-/** Minimum run length for any line symbol (orange / seven included). */
+/** Minimum run length for regular line symbols. */
 const MIN_CONSECUTIVE = 3;
+
+/** Seven only needs 2 consecutive to win. */
+const SEVEN_MIN_CONSECUTIVE = 2;
 
 const REEL_COUNT = 5;
 const ROW_COUNT = 3;
@@ -32,8 +34,8 @@ const GAMBLE_MAX_WIN_MULTIPLIER = 35;
 
 const FREE_SPINS_PER_BONUS = 5;
 
-/** Adjacent/corner paths from reel 0, min 3 — every maximal path pays. */
-const WIN_RULES_VERSION = "adjacent-corner-col0-min3-all-paths-v7";
+/** 10 fixed paylines, left-to-right evaluation from col 0. */
+const WIN_RULES_VERSION = "fixed-10-paylines-seven2-v8";
 
 /**
  * @deprecated Removed — seven+tree adjacent pairs no longer pay.
@@ -76,21 +78,29 @@ const WILD_REELS = new Set([1, 2, 3]);
 const WILD_ROW = 1;
 
 /**
- * The only payable lines: 3 horizontal rows (UI diagrams).
- * Each entry is [rowAtCol0 … rowAtCol4]. Row 0 = top, row 2 = bottom.
+ * 10 fixed paylines — each entry is [rowAtCol0 … rowAtCol4].
+ * Row 0 = top, row 1 = middle, row 2 = bottom.
  */
 const PAYLINES = Object.freeze([
-  [0, 0, 0, 0, 0],
-  [1, 1, 1, 1, 1],
-  [2, 2, 2, 2, 2],
+  [1, 1, 1, 1, 1], // Line 1: Middle row
+  [0, 0, 0, 0, 0], // Line 2: Top row
+  [2, 2, 2, 2, 2], // Line 3: Bottom row
+  [0, 1, 2, 1, 0], // Line 4: V-shape
+  [2, 1, 0, 1, 2], // Line 5: Inverted V
+  [0, 0, 1, 2, 2], // Line 6: Descending step
+  [2, 2, 1, 0, 0], // Line 7: Ascending step
+  [1, 0, 0, 0, 1], // Line 8: U-shape top
+  [0, 1, 1, 1, 0], // Line 9: Flat bump down
+  [2, 1, 1, 1, 2], // Line 10: Flat bump up
 ]);
 
 /**
  * Paytable multipliers at REFERENCE_BET (1 FUN).
  * Index = matching symbol count (0-based array; index N = count N).
+ * Seven has a payout at index 2 (2-match rule).
  */
 const PAYTABLE = Object.freeze({
-  [SYMBOLS.SEVEN]: [0, 0, 0, 1, 5, 100],
+  [SYMBOLS.SEVEN]: [0, 0, 0.5, 1, 5, 100],
   [SYMBOLS.GRAPES]: [0, 0, 0, 0.8, 2.4, 14],
   [SYMBOLS.WATERMELON]: [0, 0, 0, 0.8, 2.4, 14],
   [SYMBOLS.BELL]: [0, 0, 0, 0.4, 0.8, 4],
@@ -106,13 +116,13 @@ const BONUS_WILD_MULTIPLIERS = [2, 3, 5];
 
 /**
  * Public buy-bonus identifier retained for API compatibility with existing
- * clients. Bonus strips land trees often (high rate) but never guarantee
- * one/two/three trees on every free spin.
+ * clients. Buy bonus forces 3 trees on columns 1-3 during the initial spin.
  */
 const BUY_BONUS_TYPE = "Triple";
 const BUY_BONUS_COST = 350;
 
-function minMatchCount(_symbol) {
+function minMatchCount(symbol) {
+  if (symbol === SYMBOLS.SEVEN) return SEVEN_MIN_CONSECUTIVE;
   return MIN_CONSECUTIVE;
 }
 
@@ -144,6 +154,7 @@ module.exports = {
   GAMBLE_MAX_WIN_MULTIPLIER,
   FREE_SPINS_PER_BONUS,
   MIN_CONSECUTIVE,
+  SEVEN_MIN_CONSECUTIVE,
   WIN_RULES_VERSION,
   SEVEN_TREE_ADJACENT_MULT,
   SYMBOLS,

@@ -114,6 +114,7 @@ class GameManager {
     if (gameState.currentGameType === 'Trix') {
         let attempts = 0;
         let nextIdx = gameState.turnPlayerIndex;
+        const passedPlayers = [];
         do {
             nextIdx = (nextIdx + 1) % 4;
             attempts++;
@@ -124,10 +125,15 @@ class GameManager {
             const valid = GameManager.getValidCards(gameState, nextIdx);
             if (valid.length > 0) {
                gameState.turnPlayerIndex = nextIdx;
+               gameState.lastPassedPlayers = passedPlayers;
                return;
+            } else {
+               passedPlayers.push(nextIdx);
             }
         } while (attempts <= 4);
+        gameState.lastPassedPlayers = passedPlayers;
     } else {
+        gameState.lastPassedPlayers = [];
         if (gameState.tableCards.length > 0 && gameState.tableCards.length < 4) {
            gameState.turnPlayerIndex = (gameState.turnPlayerIndex + 1) % 4;
         }

@@ -5,7 +5,7 @@ const {
   REFERENCE_BET,
   SYMBOLS,
   WILD_ROW,
-  MIN_CONSECUTIVE,
+  PAYLINES,
   minMatchCount,
   isLineBreaker,
   roundMoney,
@@ -34,7 +34,113 @@ function applyExpandingWilds(matrix, wildMultipliers) {
 }
 
 /**
+ * Evaluate a single fixed payline against the matrix.
+ * Walk left-to-right: track the base symbol (first non-wild), wilds substitute.
+ * Returns null if no win, otherwise { symbol, count, positions, lineIndex }.
+ */
+function evaluatePayline(payline, lineIndex, evalMatrix, wildMultipliers, betAmount) {
+  let base = null;
+  let count = 0;
+  const positions = [];
+
+  for (let col = 0; col < REEL_COUNT; col += 1) {
+    const row = payline[col];
+    if (row < 0 || row >= ROW_COUNT) break;
+    const sym = evalMatrix[col]?.[row];
+    if (sym == null) break;
+
+    if (isLineBreaker(sym)) break;
+
+    if (sym === SYMBOLS.WILD) {
+      // Wild substitutes — don't lock the base symbol
+      count += 1;
+      positions.push({ col, row });
+      continue;
+    }
+
+    if (base === null) {
+      base = sym;
+      count += 1;
+      positions.push({ col, row });
+    } else if (sym === base) {
+      count += 1;
+      positions.push({ col, row });
+    } else {
+      break;
+    }
+  }
+
+  if (count === 0) return null;
+  const paySymbol = base || SYMBOLS.SEVEN;
+  if (count < minMatchCount(paySymbol)) return null;
+
+  const base_payout = basePayout(paySymbol, count, betAmount);
+  if (base_payout <= 0) return null;
+
+  const mult = wildMultiplierSum(positions, evalMatrix, wildMultipliers);
+  const amount = roundMoney(base_payout * mult);
+
+  return {
+    lineIndex,
+    symbol: paySymbol,
+    count,
+    positions,
+    baseAmount: base_payout,
+    wildMultiplier: mult,
+    amount,
+  };
+}
+
+function basePayout(symbol, count, betAmount) {
+  const table = PAYTABLE[symbol];
+  if (!table || count < minMatchCount(symbol)) return 0;
+  const idx = Math.min(count, table.length - 1);
+  return roundMoney(table[idx] * (betAmount / REFERENCE_BET));
+}
+
+function wildMultiplierSum(positions, matrix, wildMultipliers) {
+  let sum = 0;
+  for (const { col, row } of positions) {
+    if (matrix[col][row] === SYMBOLS.WILD) {
+      const mult = wildMultipliers ? wildMultipliers[col] : 0;
+      if (mult && mult > 1) {
+        sum += mult;
+      }
+    }
+  }
+  return sum > 0 ? sum : 1;
+}
+
+/**
+ * Check that positions follow a valid payline pattern starting from col 0.
+ */
+function isContiguousFromCol0(positions) {
+  if (!Array.isArray(positions) || positions.length === 0) return false;
+  for (let i = 0; i < positions.length; i += 1) {
+    const p = positions[i];
+    if (!p || p.col !== i) return false;
+    if (!Number.isInteger(p.row) || p.row < 0 || p.row >= ROW_COUNT) {
+      return false;
+    }
+  }
+  return true;
+}
+
+function pathMatchesMatrix(positions, symbol, matrix) {
+  if (!isContiguousFromCol0(positions)) return false;
+  if (positions.length < minMatchCount(symbol)) return false;
+  for (const { col, row } of positions) {
+    const cell = matrix[col]?.[row];
+    if (cell == null) return false;
+    if (isLineBreaker(cell)) return false;
+    if (cell !== symbol && cell !== SYMBOLS.WILD) return false;
+  }
+  return true;
+}
+
+/**
  * Left-to-right match on one horizontal strip (wild substitutes in-cell).
+ * Kept for backward compatibility with unit tests.
  */
 function matchPayline(symbols) {
   let base = null;
@@ -59,144 +165,6 @@ function matchPayline(symbols) {
   const paySymbol = base || SYMBOLS.SEVEN;
   if (count < minMatchCount(paySymbol)) return null;
   return { count, symbol: paySymbol };
-}
-
-function basePayout(symbol, count, betAmount) {
-  const table = PAYTABLE[symbol];
-  if (!table || count < minMatchCount(symbol)) return 0;
-  const idx = Math.min(count, table.length - 1);
-  return roundMoney(table[idx] * (betAmount / REFERENCE_BET));
-}
-
-function wildMultiplierSum(positions, matrix, wildMultipliers) {
-  let sum = 0;
-  for (const { col, row } of positions) {
-    if (matrix[col][row] === SYMBOLS.WILD) {
-      sum += wildMultipliers[col] || 2;
-    }
-  }
-  return sum > 0 ? sum : 1;
-}
-
-/**
- * Contiguous L→R path from reel 0: each step lands on the next reel and
- * touches the previous cell (same row, edge, or corner — |Δrow| ≤ 1).
- */
-function isContiguousFromCol0(positions) {
-  if (!Array.isArray(positions) || positions.length === 0) return false;
-  for (let i = 0; i < positions.length; i += 1) {
-    const p = positions[i];
-    if (!p || p.col !== i) return false;
-    if (!Number.isInteger(p.row) || p.row < 0 || p.row >= ROW_COUNT) {
-      return false;
-    }
-    if (i > 0 && Math.abs(p.row - positions[i - 1].row) > 1) {
-      return false;
-    }
-  }
-  return true;
-}
-
-function pathMatchesMatrix(positions, symbol, matrix) {
-  if (!isContiguousFromCol0(positions)) return false;
-  if (positions.length < MIN_CONSECUTIVE) return false;
-  for (const { col, row } of positions) {
-    const cell = matrix[col]?.[row];
-    if (cell == null) return false;
-    if (isLineBreaker(cell)) return false;
-    if (cell !== symbol && cell !== SYMBOLS.WILD) return false;
-  }
-  return true;
-}
-
-function cellContinues(sym, baseSymbol) {
-  if (isLineBreaker(sym)) return { ok: false, base: baseSymbol };
-  if (sym === SYMBOLS.WILD) return { ok: true, base: baseSymbol };
-  if (baseSymbol === null) return { ok: true, base: sym };
-  if (sym === baseSymbol) return { ok: true, base: baseSymbol };
-  return { ok: false, base: baseSymbol };
-}
-
-function pathKey(symbol, positions) {
-  return `${symbol}:${positions.map((p) => `${p.col},${p.row}`).join(">")}`;
-}
-
-function isPrefixPath(shortPos, longPos) {
-  if (shortPos.length >= longPos.length) return false;
-  for (let i = 0; i < shortPos.length; i += 1) {
-    if (
-      shortPos[i].col !== longPos[i].col ||
-      shortPos[i].row !== longPos[i].row
-    ) {
-      return false;
-    }
-  }
-  return true;
-}
-
-/** Drop 3-in-a-row prefixes of a longer 4/5 run so a 5-oak is not also a 3+4. */
-function keepMaximalPaths(found) {
-  const seen = new Set();
-  const unique = [];
-  for (const hit of found) {
-    const key = pathKey(hit.symbol, hit.positions);
-    if (seen.has(key)) continue;
-    seen.add(key);
-    unique.push(hit);
-  }
-  return unique.filter(
-    (a) =>
-      !unique.some(
-        (b) =>
-          a !== b &&
-          a.symbol === b.symbol &&
-          isPrefixPath(a.positions, b.positions),
-      ),
-  );
-}
-
-/**
- * Collect L→R adjacent paths (incl. corner touch) starting on reel 0.
- * Every geometrically distinct maximal path is a separate win.
- */
-function collectContiguousWins(evalMatrix) {
-  const found = [];
-
-  function walk(col, row, base, positions) {
-    if (positions.length >= MIN_CONSECUTIVE) {
-      const paySymbol = base || SYMBOLS.SEVEN;
-      if (positions.length >= minMatchCount(paySymbol)) {
-        found.push({
-          symbol: paySymbol,
-          count: positions.length,
-          positions: positions.slice(),
-        });
-      }
-    }
-
-    const nextCol = col + 1;
-    if (nextCol >= REEL_COUNT) return;
-
-    for (let dr = -1; dr <= 1; dr += 1) {
-      const nextRow = row + dr;
-      if (nextRow < 0 || nextRow >= ROW_COUNT) continue;
-      const sym = evalMatrix[nextCol][nextRow];
-      const step = cellContinues(sym, base);
-      if (!step.ok) continue;
-      positions.push({ col: nextCol, row: nextRow });
-      walk(nextCol, nextRow, step.base, positions);
-      positions.pop();
-    }
-  }
-
-  for (let row = 0; row < ROW_COUNT; row += 1) {
-    const sym = evalMatrix[0][row];
-    const step = cellContinues(sym, null);
-    if (!step.ok) continue;
-    walk(0, row, step.base, [{ col: 0, row }]);
-  }
-
-  return found;
 }
 
 /** Landscape: matrix[reel][row]. Auto-transposes mistaken 3×5 row-major. */
@@ -233,8 +201,8 @@ function normalizeLandscapeMatrix(matrix) {
 }
 
 /**
- * Adjacent-path wins (≥3 from reel 0, corner/edge touch OK) + scatters.
- * Every maximal L→R path pays (middle row, 45° diagonal, zig-zag, …).
+ * Fixed 10-payline evaluation. Each payline is evaluated left-to-right.
+ * Seven requires only 2 consecutive; all others need 3.
  * Backend is sole payout authority.
  */
 function calculateWins(matrix, wildMultipliers, betAmount, options = {}) {
@@ -250,46 +218,15 @@ function calculateWins(matrix, wildMultipliers, betAmount, options = {}) {
     evalMatrix = landed.map((col) => [...col]);
   }
 
-  const candidates = keepMaximalPaths(collectContiguousWins(evalMatrix));
-  const payable = [];
-
-  for (let i = 0; i < candidates.length; i += 1) {
-    const { symbol, count, positions } = candidates[i];
-    if (count !== positions.length) continue;
-    if (!pathMatchesMatrix(positions, symbol, evalMatrix)) continue;
-
-    const base = basePayout(symbol, count, betAmount);
-    if (base <= 0) continue;
-
-    const mult = wildMultiplierSum(positions, evalMatrix, wildMultipliers);
-    const amount = roundMoney(base * mult);
-    payable.push({
-      symbol,
-      count,
-      positions,
-      baseAmount: base,
-      wildMultiplier: mult,
-      amount,
-    });
-  }
-
-  payable.sort((a, b) => {
-    const rowA = a.positions[0]?.row ?? 0;
-    const rowB = b.positions[0]?.row ?? 0;
-    if (rowA !== rowB) return rowA - rowB;
-    const keyA = pathKey(a.symbol, a.positions);
-    const keyB = pathKey(b.symbol, b.positions);
-    return keyA < keyB ? -1 : keyA > keyB ? 1 : 0;
-  });
-
   const lineWins = [];
   let lineTotal = 0;
-  for (const win of payable) {
-    lineTotal = roundMoney(lineTotal + win.amount);
-    lineWins.push({
-      lineIndex: lineWins.length,
-      ...win,
-    });
+
+  for (let i = 0; i < PAYLINES.length; i += 1) {
+    const win = evaluatePayline(PAYLINES[i], i, evalMatrix, wildMultipliers, betAmount);
+    if (win) {
+      lineTotal = roundMoney(lineTotal + win.amount);
+      lineWins.push(win);
+    }
   }
 
   const scatterWins = [];
@@ -297,7 +234,7 @@ function calculateWins(matrix, wildMultipliers, betAmount, options = {}) {
 
   const totalWin = roundMoney(lineTotal + scatterTotal);
 
-  // Always report landed trees + multipliers so the client can show treex art.
+  // Always report landed trees + multipliers so the client can show tree art.
   // `expands` is true only in bonus — main trees connect in-cell, no column fill.
   const expandedWilds = Object.keys(wildMultipliers)
     .map(Number)
@@ -324,10 +261,9 @@ function calculateWins(matrix, wildMultipliers, betAmount, options = {}) {
 module.exports = {
   applyExpandingWilds,
   calculateWins,
+  evaluatePayline,
   matchPayline,
   basePayout,
-  collectContiguousWins,
-  keepMaximalPaths,
   isContiguousFromCol0,
   pathMatchesMatrix,
   normalizeLandscapeMatrix,
