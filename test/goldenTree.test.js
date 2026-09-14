@@ -840,6 +840,27 @@ test("buy bonus creates 5 free spins session", async () => {
   assert.equal(spin1.isFreeSpin, true);
   assert.equal(spin1.betAmount, 10000);
   assert.equal(spin1.freeSpinsRemaining, 4);
+  // First purchased spin always plants trees on reels 2–4 (cols 1,2,3).
+  assert.equal(spin1.matrix[1][1], SYMBOLS.WILD);
+  assert.equal(spin1.matrix[2][1], SYMBOLS.WILD);
+  assert.equal(spin1.matrix[3][1], SYMBOLS.WILD);
+  assert.equal(spin1.matrix[0].includes(SYMBOLS.WILD), false);
+  assert.equal(spin1.matrix[4].includes(SYMBOLS.WILD), false);
+});
+
+test("forceTrees plants the triple only on columns 1-3", () => {
+  for (let i = 0; i < 80; i += 1) {
+    const { matrix } = generateSpin({ bonusMode: true, forceTrees: true });
+    assert.equal(matrix[1][1], SYMBOLS.WILD);
+    assert.equal(matrix[2][1], SYMBOLS.WILD);
+    assert.equal(matrix[3][1], SYMBOLS.WILD);
+    assert.equal(matrix[0].includes(SYMBOLS.WILD), false);
+    assert.equal(matrix[4].includes(SYMBOLS.WILD), false);
+    for (const col of [1, 2, 3]) {
+      assert.equal(matrix[col][0] === SYMBOLS.WILD, false);
+      assert.equal(matrix[col][2] === SYMBOLS.WILD, false);
+    }
+  }
 });
 
 test("bonus spins use denser strips but do not inject three trees", () => {
@@ -850,6 +871,17 @@ test("bonus spins use denser strips but do not inject three trees", () => {
     if (Object.keys(wildMultipliers).length === 0) empty += 1;
   }
   assert.ok(empty >= 20, `expected some empty-tree bonus spins, got ${empty}/400`);
+});
+
+test("bonus spins never plant a tree on columns 0 or 4", () => {
+  for (let i = 0; i < 300; i += 1) {
+    const { matrix } = generateSpin({
+      bonusMode: true,
+      forceTrees: i % 2 === 0,
+    });
+    assert.equal(matrix[0].includes(SYMBOLS.WILD), false);
+    assert.equal(matrix[4].includes(SYMBOLS.WILD), false);
+  }
 });
 
 test("bonus strips land trees often but not always", () => {

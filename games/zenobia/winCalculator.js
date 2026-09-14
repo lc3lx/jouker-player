@@ -1,14 +1,18 @@
 /**
  * Zenobia win calculator — "Caravan Route" evaluation on a 6×5 board.
  *
- * A route starts on reel 0 and steps one reel right at a time, each step
- * touching the previous cell (same row, edge, or corner — |Δrow| ≤ 1). Every
- * cell on the route carries the same symbol. Multiplier plaques and the BONUS
- * coin are route breakers: no route passes through them.
+ * A route runs across consecutive reels in any part of the board — it does NOT
+ * have to start on reel 0. Each step moves one reel right and touches the
+ * previous cell (same row, edge, or corner — |Δrow| ≤ 1), and every cell on the
+ * route carries the same symbol. Multiplier plaques and the BONUS coin are
+ * route breakers: no route passes through them.
  *
- * Every geometrically distinct maximal route pays. A 3-cell prefix of a longer
- * run of the same symbol is not a separate win, so a 6-reel route never also
- * pays as a 4 and a 5.
+ * Only *maximal* routes pay. A route is maximal when neither end can be
+ * extended by an adjacent cell of the same symbol, which is enforced at the
+ * source: the walk is seeded only on cells with no same-symbol neighbour to
+ * their left, and a path is banked only when it has no same-symbol neighbour to
+ * its right. So a 6-reel run never also pays as the 3, 4 and 5 inside it, and a
+ * mid-board run is never double-counted against a longer run containing it.
  *
  * Matrix layout: matrix[col][row], row 0 = top. Payouts here are bet multiples.
  */
@@ -36,17 +40,25 @@ function routeKey(symbol, positions) {
   return `${symbol}:${positions.map(([c, r]) => `${c},${r}`).join(">")}`;
 }
 
-function isPrefixRoute(shortPos, longPos) {
+function isSubRoute(shortPos, longPos) {
   if (shortPos.length >= longPos.length) return false;
+  const offset = longPos.findIndex(
+    ([c, r]) => c === shortPos[0][0] && r === shortPos[0][1],
+  );
+  if (offset < 0 || offset + shortPos.length > longPos.length) return false;
   for (let i = 0; i < shortPos.length; i += 1) {
-    if (shortPos[i][0] !== longPos[i][0] || shortPos[i][1] !== longPos[i][1]) {
-      return false;
-    }
+    const [c, r] = longPos[offset + i];
+    if (shortPos[i][0] !== c || shortPos[i][1] !== r) return false;
   }
   return true;
 }
 
-/** Drop short prefixes of a longer run of the same symbol. */
+/**
+ * Drop any route contained inside a longer one of the same symbol.
+ *
+ * [collectRoutes] already emits only maximal routes, so this is a safety net
+ * for hand-built route lists (and for tests) rather than a hot-path filter.
+ */
 function keepMaximalRoutes(found) {
   const seen = new Set();
   const unique = [];
@@ -62,42 +74,62 @@ function keepMaximalRoutes(found) {
         (b) =>
           a !== b &&
           a.symbol === b.symbol &&
-          isPrefixRoute(a.positions, b.positions),
+          isSubRoute(a.positions, b.positions),
       ),
   );
 }
 
-/** Depth-first walk of every L→R adjacent route rooted on reel 0. */
+/** Is there a same-symbol cell one reel over from [col],[row] in direction [dir]? */
+function hasNeighbour(matrix, col, row, symbol, dir) {
+  const side = col + dir;
+  if (side < 0 || side >= REEL_COUNT) return false;
+  for (let dr = -1; dr <= 1; dr += 1) {
+    const r = row + dr;
+    if (r < 0 || r >= ROW_COUNT) continue;
+    if (matrix[side][r] === symbol) return true;
+  }
+  return false;
+}
+
+/**
+ * Depth-first walk of every maximal L→R adjacent route, anchored anywhere on
+ * the board. Seeds are cells with nothing to extend into on their left; a path
+ * is banked only where nothing extends it on the right.
+ */
 function collectRoutes(matrix) {
   const found = [];
 
   function walk(col, row, base, positions) {
-    if (positions.length >= MIN_ROUTE) {
+    const extendable = hasNeighbour(matrix, col, row, base, 1);
+    if (!extendable && positions.length >= MIN_ROUTE) {
       found.push({
         symbol: base,
         length: positions.length,
         positions: positions.map(([c, r]) => [c, r]),
       });
     }
-
-    const nextCol = col + 1;
-    if (nextCol >= REEL_COUNT) return;
+    if (!extendable) return;
 
     for (let dr = -1; dr <= 1; dr += 1) {
       const nextRow = row + dr;
       if (nextRow < 0 || nextRow >= ROW_COUNT) continue;
-      const step = cellContinues(matrix[nextCol][nextRow], base);
+      const step = cellContinues(matrix[col + 1][nextRow], base);
       if (!step.ok) continue;
-      positions.push([nextCol, nextRow]);
-      walk(nextCol, nextRow, step.base, positions);
+      positions.push([col + 1, nextRow]);
+      walk(col + 1, nextRow, step.base, positions);
       positions.pop();
     }
   }
 
-  for (let row = 0; row < ROW_COUNT; row += 1) {
-    const step = cellContinues(matrix[0][row], null);
-    if (!step.ok) continue;
-    walk(0, row, step.base, [[0, row]]);
+  // A route needs MIN_ROUTE reels, so seeding past that point can never pay.
+  const lastSeedCol = REEL_COUNT - MIN_ROUTE;
+  for (let col = 0; col <= lastSeedCol; col += 1) {
+    for (let row = 0; row < ROW_COUNT; row += 1) {
+      const step = cellContinues(matrix[col][row], null);
+      if (!step.ok) continue;
+      if (hasNeighbour(matrix, col, row, step.base, -1)) continue;
+      walk(col, row, step.base, [[col, row]]);
+    }
   }
 
   return found;
@@ -110,14 +142,20 @@ function collectRoutes(matrix) {
  */
 function findWins(matrix) {
   const wins = [];
-  for (const route of keepMaximalRoutes(collectRoutes(matrix))) {
+  // collectRoutes emits maximal routes only — every path it yields starts at a
+  // left anchor and ends at a right anchor, so none can contain another and the
+  // quadratic keepMaximalRoutes filter is not needed on the hot path.
+  for (const route of collectRoutes(matrix)) {
     const payout = payoutFor(route.symbol, route.length);
     if (payout <= 0) continue;
     wins.push({ ...route, payout });
   }
-  // Stable order: top-most start first, then by geometry — keeps the client's
-  // route-by-route replay deterministic across runs.
+  // Stable order: left-most start first, then top-most, then by geometry —
+  // keeps the client's route-by-route replay deterministic and reading L→R.
   wins.sort((a, b) => {
+    const colA = a.positions[0][0];
+    const colB = b.positions[0][0];
+    if (colA !== colB) return colA - colB;
     const rowA = a.positions[0][1];
     const rowB = b.positions[0][1];
     if (rowA !== rowB) return rowA - rowB;

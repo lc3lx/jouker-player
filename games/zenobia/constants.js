@@ -8,12 +8,18 @@
  *   "Caravan Route" — Golden Tree's connected adjacent-path rule generalised
  *   to a 6-reel board, then resolved inside Poseidon's tumble loop.
  *
- *   • A win is a maximal left→right route starting on reel 0, one step per
- *     reel, touching the previous cell (|Δrow| ≤ 1), all cells the same
- *     symbol. Minimum route length is [MIN_ROUTE] of the 6 reels.
- *   • Every geometrically distinct maximal route pays (zig-zags included).
+ *   • A win is a route of [MIN_ROUTE]+ consecutive reels *anywhere* on the
+ *     board — it does not have to touch reel 0. Each step moves one reel right
+ *     and touches the previous cell (|Δrow| ≤ 1); all cells share one symbol.
+ *   • Only maximal routes pay: a run that can be extended at either end is not
+ *     a win of its own, so a 6-reel route never also pays as the 4 and 5 inside
+ *     it. Every geometrically distinct maximal route pays (zig-zags included).
  *   • Winning routes shatter, survivors fall, the board refills from the top,
  *     and the whole thing re-evaluates until no route forms.
+ *
+ *   Dropping the reel-0 anchor multiplies the number of paying start positions
+ *   by four, so [MIN_ROUTE] is 4 of the 6 reels and the pay bands and strip
+ *   weights below are re-fitted around that — see the RTP sim in the tests.
  *
  * "Bonus Box" multipliers — the plaque board Zenobia holds beside the reels.
  * Every plaque that lands at any point during a tumble sequence banks into the
@@ -36,8 +42,11 @@ const BET_MAX = 1000000000;
 const MAX_WIN_MULTIPLIER = 5000;
 const TARGET_RTP = 0.965;
 
-/** Shortest paying caravan route, in reels. */
-const MIN_ROUTE = 3;
+/**
+ * Shortest paying caravan route, in reels. Four of six: a route may start on
+ * any reel, so three would pay on roughly two spins in three.
+ */
+const MIN_ROUTE = 4;
 
 /** BONUS coins on the final screen that open free spins from the base game. */
 const TRIGGER_NATURAL_MIN = 3;
@@ -48,9 +57,9 @@ const FREE_SPINS_BOUGHT = 10;
 const RETRIGGER_AWARD = 5;
 
 /** Buy bonus cost in bet multiples (EV-matched by the sim). */
-const BUY_BONUS_COST = 37.5;
+const BUY_BONUS_COST = 42;
 /** Super buy bonus — richer plaque table, never below [SUPER_MULTIPLIER_MIN]. */
-const SUPER_BUY_BONUS_COST = 138.5;
+const SUPER_BUY_BONUS_COST = 155;
 
 const SYMBOLS = Object.freeze({
   // low pays — carved stone letters (all pay the same)
@@ -123,18 +132,20 @@ const PAYING_SYMBOLS = Object.freeze([
 
 /**
  * Route paytable in bet multiples, indexed by route length.
- * Index 0..3 are unreachable (routes shorter than [MIN_ROUTE] never pay);
- * index 4 / 5 / 6 are the real bands.
- * Ranking: queen (max 20×) > throne > necklace > pot > spear > ring > letters.
+ * Index 0..[MIN_ROUTE]-1 are unreachable; 4 / 5 / 6 are the real bands.
+ * Ranking: queen > throne > necklace > pot > spear > ring > letters.
+ *
+ * The bands are deliberately modest — a route is the *entry* to a win here, and
+ * the Bonus Box plaque total is what turns one into a big one.
  */
-const LETTER_PAYS = Object.freeze([0, 0, 0, 0.14, 0.46, 1.4, 4.6]);
+const LETTER_PAYS = Object.freeze([0, 0, 0, 0, 0.15, 0.45, 1.5]);
 const PAYTABLE = Object.freeze({
-  [SYMBOLS.QUEEN]: [0, 0, 0, 0.56, 2.3, 7.0, 18.5],
-  [SYMBOLS.THRONE]: [0, 0, 0, 0.46, 1.85, 5.6, 15],
-  [SYMBOLS.NECKLACE]: [0, 0, 0, 0.37, 1.4, 4.2, 11],
-  [SYMBOLS.POT]: [0, 0, 0, 0.28, 1.1, 3.25, 8.4],
-  [SYMBOLS.SPEAR]: [0, 0, 0, 0.23, 0.84, 2.4, 6.5],
-  [SYMBOLS.RING]: [0, 0, 0, 0.19, 0.65, 1.85, 5.1],
+  [SYMBOLS.QUEEN]: Object.freeze([0, 0, 0, 0, 0.75, 2.25, 6.0]),
+  [SYMBOLS.THRONE]: Object.freeze([0, 0, 0, 0, 0.6, 1.8, 4.8]),
+  [SYMBOLS.NECKLACE]: Object.freeze([0, 0, 0, 0, 0.45, 1.35, 3.5]),
+  [SYMBOLS.POT]: Object.freeze([0, 0, 0, 0, 0.35, 1.05, 2.7]),
+  [SYMBOLS.SPEAR]: Object.freeze([0, 0, 0, 0, 0.27, 0.78, 2.1]),
+  [SYMBOLS.RING]: Object.freeze([0, 0, 0, 0, 0.21, 0.6, 1.65]),
   [SYMBOLS.A]: LETTER_PAYS,
   [SYMBOLS.E]: LETTER_PAYS,
   [SYMBOLS.N]: LETTER_PAYS,
@@ -143,39 +154,42 @@ const PAYTABLE = Object.freeze({
 
 /**
  * Per-cell draw weights — independent weighted draws per cell, not physical
- * strips. Tuned for ~35% win rate.
+ * strips. The letters carry the concentration that keeps a 4-reel route
+ * reachable now that routes are not anchored to reel 0; the plaque / coin /
+ * jackpot cells hold the same share of the strip as before the change.
+ * Tuned for a ~31% win rate.
  */
 const BASE_WEIGHTS = Object.freeze([
-  [SYMBOLS.S, 12],
-  [SYMBOLS.N, 12],
-  [SYMBOLS.E, 12],
-  [SYMBOLS.A, 12],
-  [SYMBOLS.RING, 9.5],
-  [SYMBOLS.SPEAR, 9],
+  [SYMBOLS.S, 22],
+  [SYMBOLS.N, 22],
+  [SYMBOLS.E, 22],
+  [SYMBOLS.A, 22],
+  [SYMBOLS.RING, 12],
+  [SYMBOLS.SPEAR, 10],
   [SYMBOLS.POT, 8],
-  [SYMBOLS.NECKLACE, 7],
-  [SYMBOLS.THRONE, 6],
-  [SYMBOLS.QUEEN, 5],
-  ["mult", 1.9],
-  [SCATTER, 0.96],
-  [JACKPOT, 0.42],
+  [SYMBOLS.NECKLACE, 6.5],
+  [SYMBOLS.THRONE, 5],
+  [SYMBOLS.QUEEN, 4],
+  ["mult", 2.74],
+  [SCATTER, 1.39],
+  [JACKPOT, 0.61],
 ]);
 
 /** Free spins: plaques rain more often; scatters tuned for retrigger. */
 const BONUS_WEIGHTS = Object.freeze([
-  [SYMBOLS.S, 12],
-  [SYMBOLS.N, 12],
-  [SYMBOLS.E, 12],
-  [SYMBOLS.A, 12],
-  [SYMBOLS.RING, 9.5],
-  [SYMBOLS.SPEAR, 9],
+  [SYMBOLS.S, 22],
+  [SYMBOLS.N, 22],
+  [SYMBOLS.E, 22],
+  [SYMBOLS.A, 22],
+  [SYMBOLS.RING, 12],
+  [SYMBOLS.SPEAR, 10],
   [SYMBOLS.POT, 8],
-  [SYMBOLS.NECKLACE, 7],
-  [SYMBOLS.THRONE, 6],
-  [SYMBOLS.QUEEN, 5],
-  ["mult", 2.6],
-  [SCATTER, 0.7],
-  [JACKPOT, 0.42],
+  [SYMBOLS.NECKLACE, 6.5],
+  [SYMBOLS.THRONE, 5],
+  [SYMBOLS.QUEEN, 4],
+  ["mult", 3.75],
+  [SCATTER, 1.01],
+  [JACKPOT, 0.61],
 ]);
 
 /** Win presentation tiers in bet multiples (client shows the matching banner). */

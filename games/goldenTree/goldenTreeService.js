@@ -5,6 +5,7 @@ const {
   MAX_WIN_MULTIPLIER,
   BUY_BONUS_TYPE,
   BUY_BONUS_COST,
+  FREE_SPINS_PER_BONUS,
   JACKPOT_ODDS,
   JACKPOT_MULTIPLIER,
   roundMoney,
@@ -120,10 +121,18 @@ async function executeSpin(userId, betAmountInput) {
     throw new ApiError("No bonus spins remaining", 400);
   }
 
-  // Purchased free spins use denser bonus strips — trees land often and
-  // expand, but are never forced onto every spin.
+  // Purchased free spins: first spin always shows trees on reels 2–4
+  // (0-based 1,2,3). Later spins still land that triple often. Reels 1 and 5
+  // (cols 0 and 4) never carry a tree.
+  const isFirstPurchasedSpin =
+    isBonusSpin &&
+    bonusSession.freeSpinsRemaining === FREE_SPINS_PER_BONUS;
+  const forceTrees =
+    isBonusSpin && (isFirstPurchasedSpin || secureRandomInt(10) < 7);
+
   const { matrix, wildMultipliers } = generateSpin({
     bonusMode: isBonusSpin,
+    forceTrees,
   });
 
   // Backend is the sole win authority (Flutter client is display-only).
