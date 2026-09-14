@@ -157,7 +157,7 @@ test("a diagonal / zig-zag route pays like a straight one of the same length", (
   assert.equal(wins[0].payout, payoutFor(SYMBOLS.POT, 5));
 });
 
-test("routes must start on reel 0 — a mid-board run pays nothing", () => {
+test("a route pays anywhere on the board, not only from reel 0", () => {
   const board = boardWith(
     [
       [1, 1],
@@ -168,7 +168,51 @@ test("routes must start on reel 0 — a mid-board run pays nothing", () => {
     ],
     SYMBOLS.QUEEN,
   );
-  assert.equal(findWins(board).length, 0);
+  const wins = findWins(board);
+  assert.equal(wins.length, 1);
+  assert.equal(wins[0].length, 5);
+  assert.equal(wins[0].positions[0][0], 1);
+  assert.equal(wins[0].payout, payoutFor(SYMBOLS.QUEEN, 5));
+});
+
+test("a route that ends before the last reel still pays", () => {
+  const board = boardWith(
+    [
+      [0, 3],
+      [1, 3],
+      [2, 3],
+      [3, 3],
+    ],
+    SYMBOLS.THRONE,
+  );
+  const wins = findWins(board);
+  assert.equal(wins.length, 1);
+  assert.equal(wins[0].length, MIN_ROUTE);
+});
+
+test("a run shorter than MIN_ROUTE pays nothing wherever it sits", () => {
+  for (let start = 0; start + MIN_ROUTE - 1 <= REEL_COUNT - 1; start += 1) {
+    const cells = [];
+    for (let i = 0; i < MIN_ROUTE - 1; i += 1) cells.push([start + i, 2]);
+    assert.equal(findWins(boardWith(cells, SYMBOLS.QUEEN)).length, 0);
+  }
+});
+
+test("a mid-board run is not counted twice against the longer run holding it", () => {
+  const board = boardWith(
+    [
+      [0, 2],
+      [1, 2],
+      [2, 2],
+      [3, 2],
+      [4, 2],
+    ],
+    SYMBOLS.POT,
+  );
+  const wins = findWins(board);
+  assert.equal(wins.length, 1);
+  assert.equal(wins[0].length, 5);
+  assert.equal(wins[0].positions[0][0], 0);
 });
 
 test("steps further than one row apart break the route", () => {
@@ -221,15 +265,22 @@ test("two geometrically distinct routes of the same symbol both pay", () => {
     [0, 0],
     [1, 0],
     [2, 0],
-    [0, 4],
-    [1, 4],
+    [3, 0],
     [2, 4],
+    [3, 4],
+    [4, 4],
+    [5, 4],
   ]) {
     board[c][r] = SYMBOLS.RING;
   }
   const wins = findWins(board);
   assert.equal(wins.length, 2);
-  assert.ok(wins.every((w) => w.length === 3));
+  assert.ok(wins.every((w) => w.length === MIN_ROUTE));
+  // Ordered left-most start first, so the client replays them L→R.
+  assert.deepEqual(
+    wins.map((w) => w.positions[0][0]),
+    [0, 2],
+  );
 });
 
 test("keepMaximalRoutes drops prefixes but keeps genuine branches", () => {
@@ -561,7 +612,13 @@ function simulate(spins, seed) {
 }
 
 test("overall RTP sits within tolerance of the target", () => {
-  const { rtp } = simulate(120_000, 20260907);
+  // The free-spins tail is heavy — one capped 5000× round moves a 120k-spin
+  // estimate by 4pp, which is the whole tolerance. Average several independent
+  // streams so the number under test is the economy, not the seed.
+  const seeds = [20260907, 771, 1313];
+  const rtp =
+    seeds.reduce((sum, seed) => sum + simulate(400_000, seed).rtp, 0) /
+    seeds.length;
   assert.ok(
     Math.abs(rtp - TARGET_RTP) <= 0.03,
     `RTP ${(rtp * 100).toFixed(2)}% is outside ${(TARGET_RTP * 100).toFixed(1)}% ± 3pp`,

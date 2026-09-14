@@ -57,9 +57,9 @@ const FREE_SPINS_BOUGHT = 10;
 const RETRIGGER_AWARD = 5;
 
 /** Buy bonus cost in bet multiples (EV-matched by the sim). */
-const BUY_BONUS_COST = 42;
+const BUY_BONUS_COST = 40.7;
 /** Super buy bonus — richer plaque table, never below [SUPER_MULTIPLIER_MIN]. */
-const SUPER_BUY_BONUS_COST = 155;
+const SUPER_BUY_BONUS_COST = 152;
 
 const SYMBOLS = Object.freeze({
   // low pays — carved stone letters (all pay the same)
@@ -138,14 +138,14 @@ const PAYING_SYMBOLS = Object.freeze([
  * The bands are deliberately modest — a route is the *entry* to a win here, and
  * the Bonus Box plaque total is what turns one into a big one.
  */
-const LETTER_PAYS = Object.freeze([0, 0, 0, 0, 0.15, 0.45, 1.5]);
+const LETTER_PAYS = Object.freeze([0, 0, 0, 0, 0.143, 0.432, 1.44]);
 const PAYTABLE = Object.freeze({
-  [SYMBOLS.QUEEN]: Object.freeze([0, 0, 0, 0, 0.75, 2.25, 6.0]),
-  [SYMBOLS.THRONE]: Object.freeze([0, 0, 0, 0, 0.6, 1.8, 4.8]),
-  [SYMBOLS.NECKLACE]: Object.freeze([0, 0, 0, 0, 0.45, 1.35, 3.5]),
-  [SYMBOLS.POT]: Object.freeze([0, 0, 0, 0, 0.35, 1.05, 2.7]),
-  [SYMBOLS.SPEAR]: Object.freeze([0, 0, 0, 0, 0.27, 0.78, 2.1]),
-  [SYMBOLS.RING]: Object.freeze([0, 0, 0, 0, 0.21, 0.6, 1.65]),
+  [SYMBOLS.QUEEN]: Object.freeze([0, 0, 0, 0, 0.73, 2.18, 5.8]),
+  [SYMBOLS.THRONE]: Object.freeze([0, 0, 0, 0, 0.58, 1.75, 4.65]),
+  [SYMBOLS.NECKLACE]: Object.freeze([0, 0, 0, 0, 0.44, 1.31, 3.4]),
+  [SYMBOLS.POT]: Object.freeze([0, 0, 0, 0, 0.34, 1.02, 2.62]),
+  [SYMBOLS.SPEAR]: Object.freeze([0, 0, 0, 0, 0.26, 0.76, 2.04]),
+  [SYMBOLS.RING]: Object.freeze([0, 0, 0, 0, 0.2, 0.58, 1.6]),
   [SYMBOLS.A]: LETTER_PAYS,
   [SYMBOLS.E]: LETTER_PAYS,
   [SYMBOLS.N]: LETTER_PAYS,
