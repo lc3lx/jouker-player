@@ -5,6 +5,7 @@ const {
   getPrivateTables,
   getTable,
   getPokerQueueStatus,
+  preparePokerOverflow,
   createTable,
   joinTable,
   leaveTable,
@@ -48,6 +49,13 @@ router.get(
 router
   .route("/:id")
   .get(authService.protect, getTableValidator, getTable);
+
+router.post(
+  "/:id/poker-overflow",
+  authService.protect,
+  getTableValidator,
+  preparePokerOverflow
+);
 
 router.post(
   "/:id/join",

@@ -37,6 +37,7 @@ exports.joinTableValidator = [
   body("buyIn").notEmpty().isInt({ min: 1 }).withMessage("buyIn must be a positive whole number"),
   body("seatIndex").optional().isInt({ min: 0, max: 8 }).withMessage("seatIndex must be 0-8"),
   body("preferQueue").optional().isBoolean().withMessage("preferQueue must be boolean"),
+  body("strictTable").optional().isBoolean(),
   body("password").optional().isString(),
   validatorMiddleware,
 ];

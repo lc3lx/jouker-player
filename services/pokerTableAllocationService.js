@@ -54,11 +54,16 @@ async function findAvailablePokerTable(tier, buyIn, session, opts = {}) {
   const q = {
     gameType: "poker",
     tier,
-    minBuyIn: buyIn,
-    maxBuyIn: buyIn,
+    minBuyIn: opts.minBuyIn ?? buyIn,
+    maxBuyIn: opts.maxBuyIn ?? buyIn,
+    isPrivate: { $ne: true },
+    owner: null,
+    tableKind: { $in: ["static", "dynamic"] },
     status: { $nin: ["full", "closed", "archived"] },
     $expr: { $lt: [{ $size: "$seats" }, cap] },
   };
+  if (opts.smallBlind != null) q.smallBlind = opts.smallBlind;
+  if (opts.bigBlind != null) q.bigBlind = opts.bigBlind;
   if (excludeIds.length > 0) q._id = { $nin: excludeIds };
   let query = Table.findOne(q).sort({ tableNumber: 1 });
   if (session) query = query.session(session);
@@ -66,7 +71,7 @@ async function findAvailablePokerTable(tier, buyIn, session, opts = {}) {
   if (table) return table;
 
   for (let attempt = 0; attempt < 3; attempt += 1) {
-    const maxDoc = await Table.findOne({ gameType: "poker", tier, minBuyIn: buyIn, maxBuyIn: buyIn })
+    const maxDoc = await Table.findOne({ gameType: "poker", tier })
       .sort({ tableNumber: -1 })
       .select("tableNumber")
       .session(session || null);
@@ -83,8 +88,10 @@ async function findAvailablePokerTable(tier, buyIn, session, opts = {}) {
         buyIn,
         capacity: cap,
         tableNumber,
-        smallBlind,
-        bigBlind,
+        smallBlind: opts.smallBlind ?? smallBlind,
+        bigBlind: opts.bigBlind ?? bigBlind,
+        minBuyIn: opts.minBuyIn ?? buyIn,
+        maxBuyIn: opts.maxBuyIn ?? buyIn,
         session,
       });
       return created;
@@ -268,6 +275,7 @@ async function joinPokerWithRetry({
   initialTableId,
   tier,
   preferQueue = false,
+  strictTable = false,
   clientIp = null,
   deviceId = null,
   seatIndex = null,
@@ -309,7 +317,7 @@ async function joinPokerWithRetry({
         err.message === "TABLE_FULL" ||
         err.message === "TABLE_CLOSED" ||
         err.message === "TABLE_NOT_FOUND";
-      if (retryable && attempt < maxAttempts - 1) {
+      if (retryable && !strictTable && attempt < maxAttempts - 1) {
         if (err.message === "TABLE_FULL") excludeIds.push(targetId);
         const next = await withPokerAllocationLock(tier, buyIn, () =>
           findAvailablePokerTable(tier, buyIn, null, { excludeIds })

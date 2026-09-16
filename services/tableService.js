@@ -20,6 +20,8 @@ const {
 const {
   joinPokerWithRetry,
   syncPokerTableStatusById,
+  findAvailablePokerTable,
+  withPokerAllocationLock,
 } = require("./pokerTableAllocationService");
 const {
   findUserSeatedTable,
@@ -55,6 +57,40 @@ const FIXED_TIER_TABLES = {
 };
 
 const FIXED_TABLE_NUMBERS = [1, 2, 3, 4];
+
+// Prepare another public room without charging or seating the viewer. Reuse an
+// available room at the same stakes so overflow players can play together.
+exports.preparePokerOverflow = asyncHandler(async (req, res, next) => {
+  const source = await Table.findById(req.params.id);
+  if (!source || source.gameType !== "poker") {
+    return next(new ApiError("Poker table not found", 404));
+  }
+  if (source.isPrivate || source.owner ||
+      !["static", "dynamic"].includes(source.tableKind) ||
+      ["closed", "archived"].includes(source.status)) {
+    return next(new ApiError("Only public poker tables support overflow", 400));
+  }
+  let target = source;
+  if (source.seats.length >= normalizeCapacity(source.capacity)) {
+    target = await withPokerAllocationLock(source.tier, source.minBuyIn, () =>
+      findAvailablePokerTable(source.tier, source.minBuyIn, null, {
+        excludeIds: [String(source._id)],
+        minBuyIn: source.minBuyIn,
+        maxBuyIn: source.maxBuyIn,
+        smallBlind: source.smallBlind,
+        bigBlind: source.bigBlind,
+      })
+    );
+  }
+  res.json({ data: {
+    _id: target._id, tier: target.tier, tableNumber: target.tableNumber,
+    smallBlind: target.smallBlind, bigBlind: target.bigBlind,
+    minBuyIn: target.minBuyIn, maxBuyIn: target.maxBuyIn,
+    capacity: normalizeCapacity(target.capacity),
+    seatedCount: target.seats.length, tableKind: target.tableKind,
+    tableStatus: target.status, isPrivate: false,
+  } });
+});
 let fixedTablesReady = false;
 let fixedTablesReadyPromise = null;
 /** After Mongo had only { tier, tableNumber } unique, trix+poker rows conflict. Drop once. */
@@ -1089,6 +1125,7 @@ exports.joinTable = asyncHandler(async (req, res, next) => {
         initialTableId: id,
         tier: table.tier,
         preferQueue,
+        strictTable: req.body.strictTable === true,
         clientIp,
         deviceId: deviceId || null,
         seatIndex: reqSeat,
