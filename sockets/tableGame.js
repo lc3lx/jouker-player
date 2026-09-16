@@ -1234,6 +1234,11 @@ class PokerTable {
       if (this.round !== "idle") return;
     }
 
+    // A human who joined mid-hand may still be parked in Mongo without a live
+    // chair (bot-full table). Between hands there is room — pull them in before
+    // bots refill the seats.
+    await this.seatPendingMongoHumans();
+
     promoteWaitingToSeated(this.seats);
     await this.autoRebuyBustedHumans();
     for (const s of this.seats) {
@@ -1807,22 +1812,28 @@ class PokerTable {
       const mongoIds = new Set(table.seats.map((s) => String(s.user?._id || s.user)));
       for (const s of this.seats) {
         if (!mongoIds.has(String(s.userId)) && !s.isBot) {
+          // Zeroing a stack mid-hand removes chips from the live total, so the
+          // conservation baseline has to move with it or the next audit freezes
+          // a healthy table.
+          this.adjustHandBaselineForSeat(s.chips, -1);
           s.chips = 0;
         }
       }
       for (const ms of table.seats) {
         const uid = String(ms.user?._id || ms.user);
         if (this.findSeatIndexByUser(uid) >= 0) continue;
-        let chair =
-          ms.seatPosition != null ? clampSeatPosition(ms.seatPosition, this.capacity) : null;
-        // The Mongo-side seat allocator and the live engine's bot-aware seat
-        // picker are independent — a bot may already occupy this chair in
-        // the live engine mid-hand. Reassign rather than double-occupy it.
-        if (
-          chair != null &&
-          this.seats.some((s) => toSafeInt(s.seatPosition, -1) === chair)
-        ) {
-          chair = nextFreeSeatPosition(this.seats, this.capacity) ?? null;
+        // The Mongo-side seat allocator only knows about humans, so the chair it
+        // handed out is usually a bot's in the live engine. Bots yield: a paying
+        // player is never locked out of a table that is merely bot-full.
+        const chair = this.makeRoomForHumanChair(ms.seatPosition);
+        if (chair == null) {
+          // Every chair belongs to a seat that cannot move mid-hand. The
+          // next-hand backstop (seatPendingMongoHumans) picks them up.
+          logger.info("poker_midhand_seat_deferred", {
+            tableId: this.tableId,
+            userId: uid,
+          });
+          continue;
         }
         const row = {
           userId: uid,
@@ -1838,16 +1849,17 @@ class PokerTable {
           isBot: false,
           lastAction: null,
           actedThisStreet: false,
-          seatPosition: chair != null ? chair : undefined,
+          seatPosition: chair,
           cosmetics: emptyCosmetics(),
           vipLevel: null,
           playerState: PLAYER_STATE.WAITING,
           disconnectedAt: null,
           reconnectDeadline: null,
         };
-        if (this.seats.length < this.capacity) {
-          this.seats.push(row);
-        }
+        this.seats.push(row);
+        // The newcomer sits out the hand in flight, but their stack is now part
+        // of sum(stacks) — keep the audit baseline in step.
+        this.adjustHandBaselineForSeat(row.chips, 1);
       }
       await this.applyCosmeticsToSeats();
       return true;
@@ -1886,7 +1898,49 @@ class PokerTable {
       }
     }
 
+    // Bots that did not come back (their chair went to a human, or the table no
+    // longer needs them) must hand their persona back, or the pool slowly runs
+    // out of distinct identities for this process.
+    const liveBotIds = new Set(
+      this.seats.filter((s) => s.isBot && s.userId).map((s) => String(s.userId))
+    );
+    for (const b of previousBots) {
+      if (!b.userId || liveBotIds.has(String(b.userId))) continue;
+      try {
+        botPoolService.release(b.userId);
+      } catch (_) {
+        /* pool release is best-effort */
+      }
+    }
+
     return true;
+  }
+
+  /**
+   * Seat humans that exist in Mongo but have no chair in the live engine — the
+   * mid-hand joiner that a bot-full table could not fit. Only safe between
+   * hands, where a full reload does not disturb pot math.
+   * @returns {Promise<boolean>} true when a refresh was performed.
+   */
+  async seatPendingMongoHumans() {
+    if (this.isHandActive()) return false;
+    try {
+      const table = await Table.findById(this.tableId).select("seats.user");
+      if (!table) return false;
+      const pending = (table.seats || []).some((ms) => {
+        const uid = String(ms.user?._id || ms.user || "");
+        return uid && this.findSeatIndexByUser(uid) < 0;
+      });
+      if (!pending) return false;
+      await this.refreshSeatsFromDb();
+      return true;
+    } catch (e) {
+      logger.warn("poker_pending_seat_refresh_failed", {
+        tableId: this.tableId,
+        reason: e?.message || "unknown",
+      });
+      return false;
+    }
   }
 
   async applyCosmeticsToSeats() {
@@ -2494,10 +2548,154 @@ class PokerTable {
     if (toAdd === 0) return 0;
 
     for (let i = 0; i < toAdd; i++) {
-      this.seats.push(this.createBotSeat());
+      const bot = this.createBotSeat();
+      this.seats.push(bot);
+      // A bot dropped in mid-hand adds a stack the audit baseline never saw.
+      this.adjustHandBaselineForSeat(bot.chips, 1);
     }
     this.reindexSeatsByPosition();
     return toAdd;
+  }
+
+  /** True while a hand is dealt and unresolved — seat changes touch live pot math. */
+  isHandActive() {
+    return !!(this.running && this.round && String(this.round) !== "idle");
+  }
+
+  /**
+   * Seats added or removed mid-hand change sum(stacks) without a single chip
+   * crossing into or out of the pot. `handStartTotal` is the baseline the
+   * conservation audit measures against, so it has to move by the same amount —
+   * otherwise the very next audit freezes a perfectly healthy table.
+   * @param {number} chips stack that entered (sign 1) or left (sign -1)
+   * @param {1|-1} sign
+   */
+  adjustHandBaselineForSeat(chips, sign) {
+    if (!this.isHandActive()) return;
+    this.handStartTotal =
+      toSafeInt(this.handStartTotal, 0) + sign * toSafeInt(chips, 0);
+  }
+
+  /**
+   * Bot seats a human may take over. Mid-hand only bots with nothing at stake
+   * qualify: evicting a bot that already put chips in would rewrite pot
+   * eligibility for the hand in flight.
+   * @returns {Array<{ index: number, seat: object }>}
+   */
+  listReplaceableBotSeats() {
+    const handActive = this.isHandActive();
+    const out = [];
+    this.seats.forEach((seat, index) => {
+      if (!seat || !seat.isBot) return;
+      if (
+        handActive &&
+        (seat.inHand ||
+          toSafeInt(seat.bet, 0) !== 0 ||
+          toSafeInt(seat.invested, 0) !== 0)
+      ) {
+        return;
+      }
+      out.push({ index, seat });
+    });
+    return out;
+  }
+
+  /**
+   * Remove one bot seat and give its chair back to the table. Role indices are
+   * remapped by userId because the splice shifts every seat behind it.
+   * @returns {object|null} the removed seat
+   */
+  releaseBotSeatAt(index) {
+    const seat = this.seats[index];
+    if (!seat || !seat.isBot) return null;
+
+    const roleIds = {
+      dealer: this.seats[this.dealerIndex]?.userId ?? null,
+      current: this.seats[this.currentIndex]?.userId ?? null,
+      sb: this.sbSeatIndex >= 0 ? this.seats[this.sbSeatIndex]?.userId ?? null : null,
+      bb: this.bbSeatIndex >= 0 ? this.seats[this.bbSeatIndex]?.userId ?? null : null,
+    };
+    const chair = toSafeInt(seat.seatPosition, -1);
+    const wasHandActive = this.isHandActive();
+
+    this.adjustHandBaselineForSeat(seat.chips, -1);
+    try {
+      if (seat.userId) botPoolService.release(seat.userId);
+    } catch (_) {
+      /* pool release is best-effort */
+    }
+    this.seats.splice(index, 1);
+
+    const find = (uid) =>
+      uid == null
+        ? -1
+        : this.seats.findIndex((s) => String(s?.userId) === String(uid));
+    const len = this.seats.length;
+    const clampIdx = (i) => (len > 0 ? Math.max(0, Math.min(toSafeInt(i, 0), len - 1)) : 0);
+    const di = find(roleIds.dealer);
+    this.dealerIndex = di >= 0 ? di : clampIdx(this.dealerIndex);
+    const ci = find(roleIds.current);
+    this.currentIndex = ci >= 0 ? ci : clampIdx(this.currentIndex);
+    if (this.sbSeatIndex >= 0) this.sbSeatIndex = find(roleIds.sb);
+    if (this.bbSeatIndex >= 0) this.bbSeatIndex = find(roleIds.bb);
+
+    logger.info("poker_bot_seat_released", {
+      tableId: this.tableId,
+      chair,
+      handActive: wasHandActive,
+    });
+    return seat;
+  }
+
+  /**
+   * Find a physical chair for a human who is seated in Mongo but has none in the
+   * live engine. Bots always yield — a table that is merely bot-full must never
+   * lock out a paying player, and a player who picked a bot's chair gets that
+   * exact chair whenever the bot can be removed.
+   * @param {number|null} preferredChair chair the player asked for
+   * @returns {number|null} chair index, or null when every chair is held by a
+   *   seat that cannot be moved until the hand ends.
+   */
+  makeRoomForHumanChair(preferredChair = null) {
+    const cap = this.capacity;
+    const chairTaken = (chair) =>
+      this.seats.some((s) => toSafeInt(s.seatPosition, -1) === chair);
+
+    const wanted =
+      preferredChair != null && Number.isFinite(Number(preferredChair))
+        ? clampSeatPosition(preferredChair, cap)
+        : null;
+
+    if (wanted != null && !chairTaken(wanted) && this.seats.length < cap) {
+      return wanted;
+    }
+
+    // "Sit where the bot sits": the requested chair is a bot's → hand it over.
+    if (wanted != null) {
+      const victim = this.listReplaceableBotSeats().find(
+        ({ seat }) => toSafeInt(seat.seatPosition, -1) === wanted
+      );
+      if (victim) {
+        this.releaseBotSeatAt(victim.index);
+        return wanted;
+      }
+    }
+
+    if (this.seats.length < cap) {
+      const free = nextFreeSeatPosition(this.seats, cap);
+      if (free != null) return free;
+    }
+
+    // Bot-full table: free the shortest bot stack so the human still gets in.
+    const replaceable = this.listReplaceableBotSeats();
+    if (replaceable.length === 0) return null;
+    replaceable.sort(
+      (a, b) => toSafeInt(a.seat.chips, 0) - toSafeInt(b.seat.chips, 0)
+    );
+    const chosen = replaceable[0];
+    const freed = toSafeInt(chosen.seat.seatPosition, -1);
+    this.releaseBotSeatAt(chosen.index);
+    return freed >= 0 ? freed : nextFreeSeatPosition(this.seats, cap);
   }
 
   /**

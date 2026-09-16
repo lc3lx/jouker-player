@@ -49,6 +49,10 @@ function mkGame(seatCount, overrides = {}) {
   g.autoRebuyBustedHumans = async () => 0;
   g.startHand = async () => {
     g.handStarted = true;
+    // startIfReady treats a still-idle round after startHand as a deal that
+    // never happened and resets running=false, so the stub has to leave the
+    // round where a real deal leaves it.
+    g.round = "preflop";
   };
   return g;
 }
