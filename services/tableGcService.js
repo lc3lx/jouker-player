@@ -57,8 +57,13 @@ const SANITIZE_OPEN_LOBBY_ON_BOOT =
 
 /** tableId -> firstSeenWithZeroSocketsAt */
 const cardIdleSince = new Map();
-/** tableId -> { recoveredAt, noSocketsSince } */
+/** tableId -> { recoveredAt, noSocketsSince, reason } */
 const pokerRecoveryWatch = new Map();
+/**
+ * Card tables whose Mongo seats were preserved across a boot. tableId ->
+ * { gameType, recoveredAt, noSocketsSince }. Released when nobody claims them.
+ */
+const cardSeatWatch = new Map();
 
 let gcTimer = null;
 let gameNsp = null;
@@ -244,6 +249,17 @@ async function sanitizeCardTableOnBoot(table) {
   }
 
   if (!isBootZombieCardTable(table)) {
+    // An "open" lobby row is preserved so a reconnecting player keeps their
+    // seat, but a seat left behind here used to survive every reboot forever —
+    // the owner stayed blocked by the one-table-per-player gate with their
+    // buy-in locked. Watch it: the sweep frees it if nobody claims it.
+    if ((table.seats || []).length > 0) {
+      cardSeatWatch.set(tableId, {
+        gameType,
+        recoveredAt: Date.now(),
+        noSocketsSince: null,
+      });
+    }
     return { tableId, action: "skipped", reason: "open_lobby_preserved" };
   }
 
@@ -367,6 +383,7 @@ async function sanitizePokerTableOnBoot(table, redis) {
     pokerRecoveryWatch.set(tableId, {
       recoveredAt: Date.now(),
       noSocketsSince: null,
+      reason: "redis_recovery_no_sockets",
     });
     logger.info("poker_table_deferred_redis_recovery", {
       tableId,
@@ -376,6 +393,17 @@ async function sanitizePokerTableOnBoot(table, redis) {
   }
 
   if (humanSeats > 0 || activeVacating > 0) {
+    // Keep the seat so a player who is merely restarting gets it back — but
+    // PROVISIONALLY. Without a watch this branch made a seat immortal: every
+    // reboot re-preserved it, so a player who never returned stayed seated for
+    // months, blocked from every table by the one-table-per-player gate with
+    // their buy-in locked forever. The sweep below releases and refunds the
+    // table if no socket joins its room within POKER_RECOVERED_NO_SOCKETS_MS.
+    pokerRecoveryWatch.set(tableId, {
+      recoveredAt: Date.now(),
+      noSocketsSince: null,
+      reason: "reboot_seat_unclaimed",
+    });
     logger.info("poker_table_kept_after_reboot", {
       tableId,
       humanSeats,
@@ -656,6 +684,77 @@ async function sweepCardIdleTables() {
   }
 }
 
+/**
+ * Release card-table seats that were preserved across a boot but never claimed.
+ * Mirrors sweepPokerRecoveredTables: the grace window lets a reconnecting player
+ * back in, and anything still unclaimed after it is refunded and freed so the
+ * owner is no longer pinned to a table they left months ago.
+ */
+async function sweepCardSeatWatch() {
+  if (!gameNsp || cardSeatWatch.size === 0) return;
+
+  const now = Date.now();
+  for (const [tableId, watch] of [...cardSeatWatch.entries()]) {
+    const { gameType } = watch;
+    const memGame =
+      gameType === "trix"
+        ? roomManager.getTrixGameForTable(tableId)
+        : roomManager.getTarneeb41GameForTable(tableId);
+    const connected = Math.max(
+      countConnectedHumansCard(gameType, tableId),
+      countSocketsInRoom(gameNsp, cardRoomName(gameType, tableId))
+    );
+
+    // Someone is here, or the table went live again — the normal idle sweep owns
+    // it from now on.
+    if (connected > 0 || (memGame && memGame.state !== "game_end")) {
+      cardSeatWatch.delete(tableId);
+      continue;
+    }
+
+    if (watch.noSocketsSince == null) {
+      watch.noSocketsSince = now;
+      continue;
+    }
+    if (now - watch.noSocketsSince < POKER_RECOVERED_NO_SOCKETS_MS) continue;
+
+    cardSeatWatch.delete(tableId);
+    try {
+      const table = await Table.findById(tableId);
+      if (!table || (table.seats || []).length === 0) continue;
+
+      const seatCount = table.seats.length;
+      const refunded = await refundCardTableSeatsTransactional(
+        table,
+        `${gameType}_orphan_seat_release`
+      );
+      clearCardMemory(gameType, tableId);
+      if (table.tableKind !== "static") {
+        await reopenFixedCardTable(tableId);
+      }
+      logAbortedMatch({
+        gameType,
+        tableId,
+        reason: "orphan_seat_unclaimed",
+        seatCount,
+      });
+      logger.warn("card_orphan_seats_released", {
+        gameType,
+        tableId,
+        seatCount,
+        refunded,
+      });
+      emitTablesUpdated({ gameType, reason: "orphan_seats_released", tableId });
+    } catch (err) {
+      logger.error("card_orphan_seat_release_failed", {
+        gameType,
+        tableId,
+        reason: err?.message || "unknown",
+      });
+    }
+  }
+}
+
 async function sweepPokerRecoveredTables() {
   if (!pokerNsp || pokerRecoveryWatch.size === 0) return;
 
@@ -693,7 +792,7 @@ async function sweepPokerRecoveredTables() {
         logAbortedMatch({
           gameType: "poker",
           tableId,
-          reason: "redis_recovery_no_sockets",
+          reason: watch.reason || "redis_recovery_no_sockets",
         });
         continue;
       }
@@ -709,7 +808,11 @@ async function sweepPokerRecoveredTables() {
 
       pokerRecoveryWatch.delete(tableId);
       emitTablesUpdated({ gameType: "poker", reason: "recovery_aborted", tableId });
-      logAbortedMatch({ gameType: "poker", tableId, reason: "redis_recovery_no_sockets" });
+      logAbortedMatch({
+        gameType: "poker",
+        tableId,
+        reason: watch.reason || "redis_recovery_no_sockets",
+      });
     } catch (err) {
       logger.error("poker_recovery_watch_failed", {
         tableId,
@@ -726,6 +829,13 @@ async function gcSweep() {
     await sweepCardIdleTables();
   } catch (err) {
     logger.error("table_gc_card_sweep_failed", { reason: (err && err.message) || "unknown" });
+  }
+  try {
+    await sweepCardSeatWatch();
+  } catch (err) {
+    logger.error("table_gc_card_seat_sweep_failed", {
+      reason: (err && err.message) || "unknown",
+    });
   }
   try {
     await sweepPokerRecoveredTables();
@@ -770,7 +880,28 @@ function registerPokerRecoveryWatch(tableId) {
   pokerRecoveryWatch.set(String(tableId), {
     recoveredAt: Date.now(),
     noSocketsSince: null,
+    reason: "redis_recovery_no_sockets",
   });
+}
+
+/**
+ * Diagnostic: which preserved seats are still waiting to be claimed. Exposed for
+ * tests and for the health dashboard — never mutate the returned entries.
+ */
+function getSeatWatchState() {
+  return {
+    poker: [...pokerRecoveryWatch.entries()].map(([tableId, w]) => ({
+      tableId,
+      ...w,
+    })),
+    card: [...cardSeatWatch.entries()].map(([tableId, w]) => ({ tableId, ...w })),
+  };
+}
+
+/** Test seam: forget every pending watch. */
+function clearSeatWatches() {
+  pokerRecoveryWatch.clear();
+  cardSeatWatch.clear();
 }
 
 module.exports = {
@@ -781,7 +912,11 @@ module.exports = {
   isBootZombieCardTable,
   sanitizePokerTableOnBoot,
   gcSweep,
+  sweepCardSeatWatch,
+  sweepPokerRecoveredTables,
   registerPokerRecoveryWatch,
+  getSeatWatchState,
+  clearSeatWatches,
   TABLE_IDLE_TIMEOUT_MS,
   POKER_RECOVERED_NO_SOCKETS_MS,
   countSocketsInRoom,
