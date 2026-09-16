@@ -1,6 +1,8 @@
 const crypto = require("crypto");
 const asyncHandler = require("express-async-handler");
 const IslandPool = require("../models/islandPoolModel");
+const IslandTicket = require("../models/islandTicketModel");
+const tickets = require("./islandTicketService");
 const IslandMember = require("../models/islandMemberModel");
 const IslandHistory = require("../models/islandHistoryModel");
 const IslandWinner = require("../models/islandWinnerModel");
@@ -102,7 +104,7 @@ async function buildStatusSnapshot(userId = null) {
     payoutPercentages: {
       royalFlush: pool.payoutPercentages?.royalFlush ?? 0.8,
       straightFlush: pool.payoutPercentages?.straightFlush ?? 0.3,
-      fourOfAKind: pool.payoutPercentages?.fourOfAKind ?? 0.2,
+      fourOfAKind: pool.payoutPercentages?.fourOfAKind ?? 0.1,
     },
     payoutPolicy: {
       maxWinnersPerEvent: pool.payoutPolicy?.maxWinnersPerEvent ?? 1,
@@ -150,12 +152,8 @@ exports.getIslandStatus = asyncHandler(async (req, res) => {
   const userId = req.user?._id || null;
   // Shared cache must stay user-agnostic — isMember is overlaid per request.
   const snapshot = await getCachedStatus(() => buildStatusSnapshot(null));
-  let isMember = false;
-  if (userId) {
-    const m = await IslandMember.findOne({ userId, active: true }).select("_id").lean();
-    isMember = !!m;
-  }
-  res.status(200).json({ status: "success", data: { ...snapshot, isMember } });
+  const personal = await tickets.personalStatus(userId, req.query?.tableId, req.query?.handId);
+  res.status(200).json({ status: 'success', data: { ...snapshot, ...personal } });
 });
 
 exports.getIslandHistory = asyncHandler(async (req, res) => {
@@ -240,132 +238,22 @@ exports.getIslandLeaderboard = asyncHandler(async (req, res) => {
 });
 
 exports.joinIslandJackpot = asyncHandler(async (req, res) => {
-  if (!isEnabledEnv()) throw new ApiError("Island Jackpot is disabled", 403);
-
   const userId = req.user._id;
-  if (isBotUserId(String(userId))) throw new ApiError("Bots cannot join", 403);
-
-  const uid = String(userId);
-
-  const idempotencyKey = (req.headers["idempotency-key"] || req.body?.idempotencyKey || "")
-    .toString()
-    .trim();
-  if (idempotencyKey) {
-    const dup = await JackpotTransaction.findOne({ idempotencyKey }).lean();
-    if (dup) {
-      const snapshot = await buildStatusSnapshot(userId);
-      return res.status(200).json({ status: "success", data: { ...snapshot, duplicate: true } });
-    }
-  }
-
-  const lastJoin = _joinCooldown.get(uid) || 0;
-  if (Date.now() - lastJoin < JOIN_COOLDOWN_MS) {
-    throw new ApiError("Please wait before joining again", 429);
-  }
-
-  const pool = await IslandPool.getSingleton();
-  if (!pool.enabled) throw new ApiError("Island Jackpot is disabled", 403);
-
-  const fee = toSafeInt(pool.entryFee, 0);
-  if (fee <= 0) throw new ApiError("Invalid entry fee configuration", 500);
-
-  const txnId = crypto.randomUUID();
-  let resultSnapshot = null;
-  let enteredHot = false;
-  const wasHotBefore = computePoolFlags(pool).hotJackpot;
-
-  await walletLedgerService.withMongoTransaction(async (session) => {
-    await walletLedgerService.ledgerWithdraw({
-      session,
-      userId,
-      amount: fee,
-      ledgerType: "island_jackpot_entry",
-      meta: { source: "island_jackpot", txnId },
-    });
-
-    const freshPool = await IslandPool.findOne({ key: "default" }).session(session);
-    freshPool.poolBalance = toSafeInt(freshPool.poolBalance, 0) + fee;
-    freshPool.stats = freshPool.stats || {};
-    freshPool.stats.totalEntries = toSafeInt(freshPool.stats.totalEntries, 0) + 1;
-    if (freshPool.poolBalance > toSafeInt(freshPool.stats.peakPoolBalance, 0)) {
-      freshPool.stats.peakPoolBalance = freshPool.poolBalance;
-    }
-    syncArmedFlags(freshPool);
-    enteredHot = !wasHotBefore && computePoolFlags(freshPool).hotJackpot;
-    freshPool.version = toSafeInt(freshPool.version, 0) + 1;
-    await freshPool.save(session ? { session } : undefined);
-
-    const [history] = await IslandHistory.create(
-      [
-        {
-          type: "join",
-          userId,
-          amount: fee,
-          poolAfter: freshPool.poolBalance,
-          meta: { txnId },
-        },
-      ],
-      session ? { session } : undefined
-    );
-
-    await IslandMember.findOneAndUpdate(
-      { userId },
-      {
-        $set: { active: true, lastEntryTxnId: txnId },
-        $inc: { totalContributed: fee },
-        $setOnInsert: { joinedAt: new Date() },
-      },
-      { upsert: true, new: true, ...(session ? { session } : {}) }
-    );
-
-    await JackpotTransaction.create(
-      [
-        {
-          txnId,
-          userId,
-          direction: "debit_entry",
-          amount: fee,
-          islandHistoryId: history._id,
-          idempotencyKey: idempotencyKey || undefined,
-          status: "completed",
-          meta: { entryFee: fee },
-        },
-      ],
-      session ? { session } : undefined
-    );
-  });
-
-  await invalidateStatusCache();
-  resultSnapshot = await buildStatusSnapshot(userId);
-  _joinCooldown.set(uid, Date.now());
-
-  if (isEffectsEnabled(pool)) {
-    broadcastPoolTick({
-    poolBalance: resultSnapshot.poolBalance,
-    membersCount: resultSnapshot.membersCount,
-    todayEntries: resultSnapshot.todayEntries,
-    hotJackpot: resultSnapshot.hotJackpot,
-      delta: fee,
-    });
-  }
-
-  if (enteredHot && isAnnouncementsEnabled(pool)) {
-    await IslandHistory.create({
-      type: "hot_entered",
-      amount: 0,
-      poolAfter: resultSnapshot.poolBalance,
-      meta: { minTrigger: resultSnapshot.minTriggerAmount },
-    });
-    broadcastHotJackpot({
-      poolBalance: resultSnapshot.poolBalance,
-      minTriggerAmount: resultSnapshot.minTriggerAmount,
-    });
-  }
-
-  res.status(200).json({ status: "success", data: resultSnapshot });
+  await tickets.buyNext(userId, req.body?.tableId,
+    req.headers['idempotency-key'] || req.body?.idempotencyKey);
+  const snapshot = await buildStatusSnapshot(null);
+  const personal = await tickets.personalStatus(userId, req.body?.tableId);
+  res.status(200).json({ status: 'success', data: { ...snapshot, ...personal } });
 });
 
-/** Admin: read config */
+exports.setIslandAutoBuy = asyncHandler(async (req, res) => {
+  if (typeof req.body?.enabled !== 'boolean') throw new ApiError('enabled must be boolean', 400);
+  await tickets.setAutoBuy(req.user._id, req.body?.tableId, req.body.enabled);
+  const snapshot = await buildStatusSnapshot(null);
+  const personal = await tickets.personalStatus(req.user._id, req.body?.tableId);
+  res.status(200).json({ status: 'success', data: { ...snapshot, ...personal } });
+});
+
 exports.adminGetConfig = asyncHandler(async (req, res) => {
   const pool = await IslandPool.getSingleton();
   res.status(200).json({ status: "success", data: pool });
@@ -491,7 +379,7 @@ async function reservePayoutForHand({ session = null, handId, tableId, gameType,
   if (!candidates.length) return { status: "skipped", reason: "no_candidates" };
 
   const memberIds = candidates.map((seat) => seat.userId);
-  const memberQuery = IslandMember.find({ userId: { $in: memberIds }, active: true });
+  const memberQuery = IslandTicket.find({ userId: { $in: memberIds }, handId: String(handId), tableId: String(tableId) });
   const activeMembers = session ? await memberQuery.session(session).lean() : await memberQuery.lean();
   const members = new Set(activeMembers.map((member) => String(member.userId)));
   const qualifiers = [];
@@ -687,9 +575,9 @@ async function onHandSettled({
     if (candidateSeats.length === 0) return { status: "skipped", reason: "no_candidates" };
 
     const memberIds = candidateSeats.map((s) => s.userId);
-    const activeMembers = await IslandMember.find({
+    const activeMembers = await IslandTicket.find({
       userId: { $in: memberIds },
-      active: true,
+      handId: String(handId), tableId: String(tableId),
     }).lean();
     const memberSet = new Set(activeMembers.map((m) => String(m.userId)));
 

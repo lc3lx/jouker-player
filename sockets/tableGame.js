@@ -3467,6 +3467,18 @@ class PokerTable {
     ).root;
     await this.persistFairnessCommit();
 
+    // Lock round tickets before hole cards can reach any player.
+    try {
+      await require('../services/islandTicketService').prepareHand({
+        tableId: this.tableId,
+        handId: this.currentHandId,
+        startedAt: this.handStartedAt,
+        userIds: this.seats.filter(s => !s.isBot && canBeDealtIntoHand(s)).map(s => s.userId),
+      });
+    } catch (error) {
+      logger.warn('island_ticket_prepare_failed', { handId: this.currentHandId, message: error.message });
+    }
+
     for (const s of this.seats) {
       s.handStartChips = s.chips;
       s.lastAction = null;

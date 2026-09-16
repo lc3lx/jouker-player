@@ -4,7 +4,7 @@ const payoutPercentagesSchema = new mongoose.Schema(
   {
     royalFlush: { type: Number, default: 0.8, min: 0, max: 1 },
     straightFlush: { type: Number, default: 0.3, min: 0, max: 1 },
-    fourOfAKind: { type: Number, default: 0.2, min: 0, max: 1 },
+    fourOfAKind: { type: Number, default: 0.1, min: 0, max: 1 },
   },
   { _id: false }
 );
