@@ -30,8 +30,11 @@ async function sendFriendRequest(fromId, toId, message = "") {
   if (await isBlocked(fromId, toId)) {
     throw new ApiError("Player is blocked", 403);
   }
+  // `active` is only absent on documents written before the field existed.
+  // searchUsers treats those as active ({ $ne: false }), so requiring a truthy
+  // value here made such a player findable but impossible to add.
   const target = await User.findById(toId).select("_id active");
-  if (!target || !target.active) throw new ApiError("User not found", 404);
+  if (!target || target.active === false) throw new ApiError("User not found", 404);
 
   const [u1, u2] = pairKey(fromId, toId);
   const existingFriend = await Friendship.findOne({ users: [u1, u2] });
@@ -77,14 +80,34 @@ async function acceptFriendRequest(userId, requestId) {
   await req.save();
 
   const [u1, u2] = pairKey(req.from, req.to);
-  const friendship = await Friendship.findOneAndUpdate(
-    { users: [u1, u2] },
-    { $setOnInsert: { users: [u1, u2], createdAt: new Date() } },
-    { upsert: true, new: true }
-  );
+  let friendship;
+  try {
+    friendship = await Friendship.findOneAndUpdate(
+      { users: [u1, u2] },
+      { $setOnInsert: { users: [u1, u2], createdAt: new Date() } },
+      { upsert: true, new: true }
+    );
+  } catch (e) {
+    // Two accepts racing (or mirrored A→B and B→A requests accepted at once)
+    // both upsert the same pair. The unique pair index rejects the loser — the
+    // friendship exists either way, so read it back instead of failing.
+    if (e?.code !== 11000) throw e;
+    friendship = await Friendship.findOne({ users: [u1, u2] });
+    if (!friendship) throw e;
+  }
 
+  // Clear pending requests in BOTH directions. Cancelling only from→to left a
+  // mirrored request from the new friend sitting in the list forever, offering
+  // to befriend someone who already is a friend.
   await FriendRequest.updateMany(
-    { from: req.from, to: req.to, status: "pending", _id: { $ne: req._id } },
+    {
+      status: "pending",
+      _id: { $ne: req._id },
+      $or: [
+        { from: req.from, to: req.to },
+        { from: req.to, to: req.from },
+      ],
+    },
     { $set: { status: "cancelled", respondedAt: new Date() } }
   );
 

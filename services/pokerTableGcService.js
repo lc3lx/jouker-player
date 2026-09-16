@@ -55,7 +55,16 @@ async function resetPokerTableWhenEmpty(tableId) {
     });
   }
 
-  await getTableGameBridge().resetLivePokerTableWhenEmpty(tid);
+  const liveReset = await getTableGameBridge().resetLivePokerTableWhenEmpty(tid);
+  if (liveReset === false && live?.running) {
+    // The engine refused: a hand is still resolving and wiping its seats mid
+    // settlement wedges the table. Leave everything alone and retry next sweep.
+    logger.info("poker_table_reset_retry_hand_in_flight", {
+      tableId: tid,
+      round: live.round,
+    });
+    return { reset: false, reason: "hand_in_flight" };
+  }
 
   table.status = "waiting";
   table.rejoinBlockedUsers = [];

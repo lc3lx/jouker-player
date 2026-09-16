@@ -647,6 +647,22 @@ class PokerTable {
   }
 
   /**
+   * acquireActionLock is non-blocking. This waits the current holder out, for
+   * callers that must not run concurrently with a hand (a table reset) yet also
+   * must not barge in on one.
+   * @param {number} timeoutMs give up after this long
+   * @returns {Promise<boolean>} true when the lock is held by this caller
+   */
+  async acquireActionLockWithin(timeoutMs = 15000, pollMs = 200) {
+    const deadline = Date.now() + Math.max(0, timeoutMs);
+    for (;;) {
+      if (await this.acquireActionLock()) return true;
+      if (Date.now() >= deadline) return false;
+      await sleep(pollMs);
+    }
+  }
+
+  /**
    * H-2: the paced advance (ACTION_REVEAL_MS + street sleeps) and the showdown
    * tail (1.5s pause + 4s hold + settlement) run INSIDE the action lock and can
    * exceed its Redis TTL. Renew the lease on a sub-TTL cadence so it stays held
@@ -951,6 +967,41 @@ class PokerTable {
       1,
       toSafeInt(this.minimumBet, 0) || toSafeInt(this.bigBlind, 1)
     );
+  }
+
+  /**
+   * A throw inside the action loop (bot turn, paced advance) used to leave the
+   * table running with no armed timer and no further broadcast — clients hung on
+   * "syncing" with nothing to render until they returned to the lobby. Bring the
+   * table back to a renderable idle and tell everyone about it.
+   * @param {string} context what failed, for the log
+   */
+  async healAfterActionLoopFailure(context) {
+    try {
+      if (this.frozen) return;
+      this.running = false;
+      this.starting = false;
+      this.clearActionScheduling();
+      this.healStaleRoundIfNotRunning();
+      logger.warn("poker_action_loop_healed", {
+        tableId: this.tableId,
+        context,
+        round: this.round,
+        seats: Array.isArray(this.seats) ? this.seats.length : -1,
+      });
+      await this.syncMongoTableStatus();
+      await this.broadcastState();
+      // Empty (everyone left mid-hand) → clear the ghost; otherwise deal on.
+      if (await this.resetIfMongoHasNoSeats()) return;
+      if (this.seatedHumanCount() >= 1) this.scheduleNextHand();
+      else this.scheduleWaitForPlayers();
+    } catch (e) {
+      logger.error("poker_action_loop_heal_failed", {
+        tableId: this.tableId,
+        context,
+        reason: e?.message || "unknown",
+      });
+    }
   }
 
   healStaleRoundIfNotRunning() {
@@ -1272,6 +1323,11 @@ class PokerTable {
         active: this.activeSeatCount(),
         seats: Array.isArray(this.seats) ? this.seats.length : -1,
       });
+      // The last human may have left mid-hand, which defers the empty-table
+      // reset (it must not wipe seats a settlement is still indexing). The hand
+      // is over now, so run the reset here instead of leaving a bot-only ghost
+      // table looping the wait window until the 15-minute GC notices.
+      if (await this.resetIfMongoHasNoSeats()) return;
       this.scheduleWaitForPlayers();
       await this.broadcastState();
       return;
@@ -1723,6 +1779,29 @@ class PokerTable {
    * Full zero when Mongo has no seated players — pot/cards/timers cleared.
    */
   async resetToEmptyIdle(tableDoc) {
+    // The paced advance, the showdown tail and settlement all run inside the
+    // action lock and index into this.seats across their awaits. Replacing the
+    // array from under them threw mid-settlement and left the table wedged with
+    // no final broadcast — every client stranded on "syncing" until it rejoined.
+    // Wait the hand out; if it outlasts the wait, defer so the caller retries
+    // instead of corrupting a hand that is still resolving.
+    const locked = await this.acquireActionLockWithin(POKER_TIMINGS.RESET_LOCK_WAIT_MS);
+    if (!locked) {
+      logger.warn("poker_reset_deferred_hand_in_flight", {
+        tableId: this.tableId,
+        round: this.round,
+        running: this.running,
+      });
+      return { reset: false, deferred: true };
+    }
+    try {
+      return await this._resetToEmptyIdleLocked(tableDoc);
+    } finally {
+      await this.releaseActionLock();
+    }
+  }
+
+  async _resetToEmptyIdleLocked(tableDoc) {
     this.running = false;
     this.starting = false;
     this.frozen = false;
@@ -1741,7 +1820,9 @@ class PokerTable {
     }
     this.vacateTimers.clear();
     this.pendingVacates.clear();
-    this.stopLockHeartbeat();
+    // The heartbeat is NOT stopped here: this body runs holding the action lock,
+    // and killing the renewal mid-reset could let the lease expire under a slow
+    // Mongo write below. releaseActionLock stops it on the way out.
     this.stopSpectatorDrain();
     this.lastSpectatorEmittedRev = -1;
     require("../services/spectatorDelayService").clearTable(this.tableId);
@@ -1775,6 +1856,7 @@ class PokerTable {
     }
     await this.syncMongoTableStatus();
     await this.broadcastState();
+    return { reset: true, deferred: false };
   }
 
   async refreshSeatsFromDb() {
@@ -1922,6 +2004,27 @@ class PokerTable {
    * hands, where a full reload does not disturb pot math.
    * @returns {Promise<boolean>} true when a refresh was performed.
    */
+  /**
+   * Clear a bot-only ghost table once Mongo confirms nobody is seated. Used to
+   * retry an empty-table reset that had to be deferred while a hand resolved.
+   * @returns {Promise<boolean>} true when the table was reset.
+   */
+  async resetIfMongoHasNoSeats() {
+    if (this.isHandActive()) return false;
+    try {
+      const table = await Table.findById(this.tableId).select("seats.user");
+      if (!table || (table.seats || []).length > 0) return false;
+      const outcome = await resetLivePokerTableWhenEmpty(this.tableId);
+      return outcome !== false;
+    } catch (e) {
+      logger.warn("poker_empty_reset_retry_failed", {
+        tableId: this.tableId,
+        reason: e?.message || "unknown",
+      });
+      return false;
+    }
+  }
+
   async seatPendingMongoHumans() {
     if (this.isHandActive()) return false;
     try {
@@ -3501,6 +3604,10 @@ class PokerTable {
             seatIndex: this.currentIndex,
             reason: err?.message || "unknown",
           });
+          // Logging alone left the loop dead with no final broadcast: clients
+          // sat on "syncing" until they backed out to the lobby. Put the table
+          // back in a state they can render and let the lobby flow resume.
+          void this.healAfterActionLoopFailure("bot_turn");
         });
       }, thinkMs);
       return;
@@ -3572,6 +3679,33 @@ class PokerTable {
   }
 
   async playBotTurn(seatIndex) {
+    // Bot turns mutate the same hand state human actions and timeouts do, and
+    // their paced advance can carry the hand all the way through the showdown
+    // tail and settlement. Running that outside the action lock let an
+    // empty-table reset wipe this.seats mid-settlement — the crash that wedged
+    // the table and left clients on "syncing".
+    const lockAcquired = await this.acquireActionLock();
+    if (!lockAcquired) {
+      setTimeout(() => {
+        void this.playBotTurn(seatIndex).catch((err) => {
+          logger.error("poker_bot_turn_failed", {
+            tableId: this.tableId,
+            seatIndex,
+            reason: err?.message || "unknown",
+          });
+          void this.healAfterActionLoopFailure("bot_turn_retry");
+        });
+      }, 300);
+      return;
+    }
+    try {
+      return await this._playBotTurnLocked(seatIndex);
+    } finally {
+      await this.releaseActionLock();
+    }
+  }
+
+  async _playBotTurnLocked(seatIndex) {
     if (!this.running) return;
     if (seatIndex !== this.currentIndex) return;
     const seat = this.seats[seatIndex];
@@ -4385,6 +4519,13 @@ class PokerTable {
 
   async persistAndPrepareNext(community, payoutBySeat, winnerIdxs, meta = {}, opts = {}) {
     const manageLifecycle = opts.manageLifecycle !== false;
+    // Every payout/rank/summary below is keyed by seat INDEX into the array this
+    // hand was dealt from. Settlement spans several awaits, and a table reset
+    // (last human leaves) replaces `this.seats` wholesale — indexing the live
+    // array afterwards dereferenced undefined rows and threw mid-settlement,
+    // wedging the table so clients hung on "syncing". Bind the array once and
+    // finish resolving the hand against it.
+    const seats = this.seats;
     const payouts = payoutBySeat instanceof Map ? new Map(payoutBySeat) : new Map();
     const uncalledReturns = meta.uncalledReturns instanceof Map
       ? new Map(meta.uncalledReturns)
@@ -4452,15 +4593,15 @@ class PokerTable {
     // mutating the live seats. The engine's RAM stacks are advanced only after the
     // DB transaction commits (below), so a settlement failure can never leave the
     // engine ahead of the wallet/DB — the two always stay reconcilable.
-    const intendedChips = this.seats.map((s) => toSafeInt(s.chips, 0));
+    const intendedChips = seats.map((s) => toSafeInt(s.chips, 0));
     const winners = [];
     for (const [idx, share] of payouts.entries()) {
       if (!Number.isFinite(share) || share <= 0) continue;
       intendedChips[idx] = toSafeInt(intendedChips[idx], 0) + share;
       const returned = Math.max(0, toSafeInt(uncalledReturns.get(idx), 0));
       const potShare = Math.max(0, share - returned);
-      if (potShare > 0 && !this.seats[idx].isBot && !isBotUserId(this.seats[idx].userId)) {
-        winners.push({ user: this.seats[idx].userId, share: potShare });
+      if (potShare > 0 && !seats[idx].isBot && !isBotUserId(seats[idx].userId)) {
+        winners.push({ user: seats[idx].userId, share: potShare });
       }
     }
 
@@ -4468,22 +4609,22 @@ class PokerTable {
     for (const [idx, share] of payouts.entries()) {
       if (!Number.isFinite(share) || share <= 0) continue;
       const rankInfo = showdownRanks ? showdownRanks.get(idx) : null;
-      const playerId = this.seats[idx]?.userId;
+      const playerId = seats[idx]?.userId;
       const returned = Math.max(0, toSafeInt(uncalledReturns.get(idx), 0));
       const potShare = Math.max(0, share - returned);
       if (potShare <= 0) continue;
       winnerSummaries.push({
-        userId: this.seats[idx].userId,
+        userId: seats[idx].userId,
         playerId: playerId,
-        name: this.seats[idx].name,
-        isBot: !!this.seats[idx].isBot,
+        name: seats[idx].name,
+        isBot: !!seats[idx].isBot,
         share: potShare,
         amountWon: potShare,
         handCategory: rankInfo?.name || null,
       });
     }
 
-    const seatSummaries = this.seats.map((s, idx) => {
+    const seatSummaries = seats.map((s, idx) => {
       const chipsBefore = toSafeInt(s.handStartChips, s.chips);
       const chipsAfter = toSafeInt(intendedChips[idx], 0);
       const returned = Math.max(0, toSafeInt(uncalledReturns.get(idx), 0));
@@ -4513,13 +4654,13 @@ class PokerTable {
         .filter((p) => p.kind !== "uncalled_return")
         .map((p) => {
           const eligiblePlayers = p.eligibleSeatIndices
-            .map((seatIdx) => this.seats[seatIdx]?.userId)
+            .map((seatIdx) => seats[seatIdx]?.userId)
             .filter(Boolean);
 
           const winners = p.winners
             .filter((w) => w.amountWon > 0)
             .map((w) => ({
-              playerId: this.seats[w.seatIndex]?.userId,
+              playerId: seats[w.seatIndex]?.userId,
               amountWon: w.amountWon,
             }))
             .filter((w) => w.playerId);
@@ -4546,7 +4687,7 @@ class PokerTable {
       contestedPot,
       uncalledReturns: [...uncalledReturns.entries()].map(([seatIndex, amount]) => ({
         seatIndex,
-        userId: this.seats[seatIndex]?.userId || null,
+        userId: seats[seatIndex]?.userId || null,
         amount: toSafeInt(amount, 0),
       })),
       rake,
@@ -4575,7 +4716,7 @@ class PokerTable {
 
     // Occasional, rate-limited bot reaction chat/emoji through the human chat path.
     try {
-      const bots = this.seats.filter((s) => s.isBot).map((s) => botChatService.botFromSeat(s));
+      const bots = seats.filter((s) => s.isBot).map((s) => botChatService.botFromSeat(s));
       const res = botChatService.maybeChat({ bots, tableId: this.tableId, event: "hand_end" });
       if (res) {
         const room = `tg:${this.tableId}`;
@@ -4586,7 +4727,7 @@ class PokerTable {
     } catch (_) { /* chat is best-effort */ }
 
     // Atomic financial + history settlement
-    const auditLog = buildHandAuditLog(this.currentHandActions, this.seats, community);
+    const auditLog = buildHandAuditLog(this.currentHandActions, seats, community);
     let settledHandHistoryId = null;
     let alreadySettled = false;
     let settlementFailed = false;
@@ -4625,10 +4766,10 @@ class PokerTable {
               smallBlind: this.smallBlind,
               bigBlind: this.bigBlind,
               startedAt: this.handStartedAt ? new Date(this.handStartedAt) : new Date(),
-              players: this.seats
+              players: seats
                 .filter((s) => !s.isBot)
                 .map((s) => {
-                  const seatIdx = this.seats.findIndex(
+                  const seatIdx = seats.findIndex(
                     (x) => String(x.userId) === String(s.userId)
                   );
                   return {
@@ -4649,21 +4790,21 @@ class PokerTable {
               })),
               auditLog,
               community,
-              dealtSeatIndices: this.seats
+              dealtSeatIndices: seats
                 .map((s, index) => (Array.isArray(s.hole) && s.hole.length === 2 ? index : -1))
                 .filter((index) => index >= 0),
               pot: potTotal,
               contestedPot,
               uncalledReturns: [...uncalledReturns.entries()].map(([seatIndex, amount]) => ({
                 seatIndex,
-                user: this.seats[seatIndex]?.isBot ? undefined : this.seats[seatIndex]?.userId,
+                user: seats[seatIndex]?.isBot ? undefined : seats[seatIndex]?.userId,
                 amount: toSafeInt(amount, 0),
               })),
               rake,
               winners,
               potDistribution: potDistributionFinal || [],
               handCategory: handCategory || null,
-              seats: this.seats.map((s, i) => {
+              seats: seats.map((s, i) => {
                 const summary = seatSummaries[i] || {};
                 const chipsBefore = toSafeInt(s.handStartChips, s.chips);
                 const chipsAfter = toSafeInt(intendedChips[i], 0);
@@ -4700,7 +4841,7 @@ class PokerTable {
           handId: this.currentHandId,
           tableId: String(this.tableId || ""),
           alreadySettled: false,
-          seatCount: Array.isArray(this.seats) ? this.seats.length : 0,
+          seatCount: Array.isArray(seats) ? seats.length : 0,
           holesStored: Array.isArray(handDoc?.seats)
             ? handDoc.seats.filter((s) => Array.isArray(s?.hole) && s.hole.length > 0).length
             : 0,
@@ -4768,7 +4909,7 @@ class PokerTable {
             throw new Error("POKER_FENCE_LOST");
           }
           let humanNetDelta = 0;
-          this.seats.forEach((s, i) => {
+          seats.forEach((s, i) => {
             if (s.isBot || isBotUserId(s.userId)) return;
             const chipsBefore = toSafeInt(s.handStartChips, s.chips);
             const chipsAfter = toSafeInt(intendedChips[i], 0);
@@ -4794,10 +4935,10 @@ class PokerTable {
           }
 
           for (const tSeat of table.seats) {
-            const s = this.seats.find((x) => String(x.userId) === String(tSeat.user));
+            const s = seats.find((x) => String(x.userId) === String(tSeat.user));
             if (!s) continue;
 
-            const seatIdx = this.seats.findIndex(
+            const seatIdx = seats.findIndex(
               (x) => String(x.userId) === String(tSeat.user)
             );
             const chipsBefore = toSafeInt(s.handStartChips, s.chips);
@@ -4832,7 +4973,7 @@ class PokerTable {
       // leaving RAM equal to the rolled-back DB.) On an idempotent replay the
       // wallets were untouched, so RAM must not be re-advanced either.
       if (!alreadySettled) {
-        this.seats.forEach((s, i) => {
+        seats.forEach((s, i) => {
           s.chips = toSafeInt(intendedChips[i], 0);
         });
         this.resetHandBettingState();
@@ -4844,7 +4985,7 @@ class PokerTable {
 
       // Stats / analytics / archive only fire for the FIRST persist of a hand.
       if (!alreadySettled) try {
-        const humanIds = this.seats
+        const humanIds = seats
           .filter((s) => !s.isBot && !isBotUserId(s.userId))
           .map((s) => s.userId);
         const wonIds = winners.map((w) => w.user).filter(Boolean);
@@ -4984,9 +5125,12 @@ class PokerTable {
         reason: err?.message || "unknown",
       }));
 
-    // Prepare next hand: move dealer to next alive seat
+    // Prepare next hand: move dealer to next alive seat. This one reads the LIVE
+    // array on purpose — a table reset during settlement legitimately empties it,
+    // and the next hand must be prepared from what is actually seated now.
     const order = this.seatOrderFrom(this.dealerIndex);
-    const nextDealer = order.find((i) => this.seats[i].chips > 0) ?? this.dealerIndex;
+    const nextDealer =
+      order.find((i) => toSafeInt(this.seats[i]?.chips, 0) > 0) ?? this.dealerIndex;
     this.dealerIndex = nextDealer;
 
     this.running = false;
@@ -5904,8 +6048,12 @@ function initTableGame(io, options = {}) {
         const table = await Table.findById(cmd.tableId).select(
           "seats smallBlind bigBlind minBuyIn maxBuyIn capacity status gameType"
         );
-        await game.resetToEmptyIdle(table || { seats: [] });
-        evictTableFromRegistry(String(cmd.tableId));
+        const outcome = await game.resetToEmptyIdle(table || { seats: [] });
+        // A deferred reset means a hand is still resolving — evicting now would
+        // orphan it mid-settlement. The GC sweep retries.
+        if (outcome?.deferred !== true) {
+          evictTableFromRegistry(String(cmd.tableId));
+        }
         break;
       }
       case "resync": {
@@ -6636,11 +6784,18 @@ async function resetLivePokerTableWhenEmpty(tableId) {
   const tid = String(tableId);
   if (!activeRegistry) return false;
 
+  let deferred = false;
   const resetOnOwner = async (game) => {
     const table = await Table.findById(tid).select(
       "seats smallBlind bigBlind minBuyIn maxBuyIn capacity status gameType"
     );
-    await game.resetToEmptyIdle(table || { seats: [] });
+    const outcome = await game.resetToEmptyIdle(table || { seats: [] });
+    // A deferred reset means a hand is still resolving — evicting now would
+    // orphan it mid-settlement. The GC sweep retries.
+    if (outcome?.deferred === true) {
+      deferred = true;
+      return;
+    }
     evictTableFromRegistry(tid);
   };
 
@@ -6653,7 +6808,7 @@ async function resetLivePokerTableWhenEmpty(tableId) {
       { type: "reset-empty", tableId: tid },
       resetOnOwner
     );
-    return true;
+    return !deferred;
   }
 
   const entry = activeRegistry.map.get(tid);
@@ -6693,6 +6848,7 @@ async function resetLivePokerTableWhenEmpty(tableId) {
     activeRegistry.nsp.to(room).emit("state", emptyPayload);
   }
 
+  if (deferred) return false;
   evictTableFromRegistry(tid);
   return true;
 }

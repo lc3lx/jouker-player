@@ -388,6 +388,10 @@ async function startServer() {
   } = require("./services/pokerProductionSchemaService");
   await ensurePokerProductionIndexes();
   const {
+    ensureFriendshipIndexes,
+  } = require("./services/friendSchemaService");
+  await ensureFriendshipIndexes();
+  const {
     resumePendingPermanentLeaves,
   } = require("./services/pokerVacateService");
   await resumePendingPermanentLeaves();

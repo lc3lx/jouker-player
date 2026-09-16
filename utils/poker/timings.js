@@ -24,6 +24,14 @@ const POKER_TIMINGS = {
   VACATE_WINDOW_MS: envMs("POKER_VACATE_WINDOW_MS", 30000),
   /** Lobby wait window while seated alone before bot fill + start. */
   WAIT_FOR_PLAYERS_MS: envMs("POKER_WAIT_FOR_PLAYERS_MS", 8000),
+  /**
+   * How long an empty-table reset waits for an in-flight hand before deferring.
+   * Deliberately short: the reset is awaited inline on the leaving player's
+   * request, and a showdown tail holds the action lock for ~10s. Deferring is
+   * cheap — the table has no humans left by then, and beginNextHandIfPossible
+   * retries the reset as soon as the hand finishes.
+   */
+  RESET_LOCK_WAIT_MS: envMs("POKER_TIMING_RESET_LOCK_WAIT_MS", 500),
 };
 
 function sleep(ms) {
