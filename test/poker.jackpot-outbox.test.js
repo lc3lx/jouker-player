@@ -9,6 +9,7 @@ const HandHistory = require("../models/handHistoryModel");
 const Wallet = require("../models/walletModel");
 const IslandPool = require("../models/islandPoolModel");
 const IslandMember = require("../models/islandMemberModel");
+const IslandTicket = require('../models/islandTicketModel');
 const IslandWinner = require("../models/islandWinnerModel");
 const PokerPostSettlementJob = require("../models/pokerPostSettlementJobModel");
 const {
@@ -58,6 +59,7 @@ test("durable jackpot job pays exactly once after a hand commits", async () => {
 
   await Wallet.create({ user: userId, balance: 0, lockedBalance: 0 });
   await IslandMember.create({ userId, active: true });
+  await IslandTicket.create({ userId, tableId: String(tableId), handId, amount: 10000 });
   await IslandPool.create({
     key: "default",
     enabled: true,
@@ -109,6 +111,7 @@ test("reserved payout keeps its winners and amount when membership or pool chang
   const handId = "outbox-frozen-reservation";
   await Wallet.create({ user: userId, balance: 0, lockedBalance: 0 });
   await IslandMember.create({ userId, active: true });
+  await IslandTicket.create({ userId, tableId: String(tableId), handId, amount: 10000 });
   await IslandPool.updateOne(
     { key: "default" },
     {
@@ -137,6 +140,7 @@ test("reserved payout keeps its winners and amount when membership or pool chang
   // These are deliberately changed after the hand: the outbox must not
   // recalculate eligibility or debit the pool a second time.
   await IslandMember.updateOne({ userId }, { $set: { active: false } });
+  await IslandTicket.deleteOne({ userId, handId });
   await IslandPool.updateOne({ key: "default" }, { $set: { poolBalance: 250000 } });
   await enqueueIslandJackpotJob({
     handId,

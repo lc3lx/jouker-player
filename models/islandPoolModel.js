@@ -62,6 +62,7 @@ const islandPoolSchema = new mongoose.Schema(
     armed: { type: Boolean, default: false },
     hotJackpot: { type: Boolean, default: false },
     version: { type: Number, default: 0 },
+    roundTicketsVersion: { type: Number, default: 1 },
     stats: { type: statsSchema, default: () => ({}) },
     settings: { type: settingsSchema, default: () => ({}) },
     lastWinner: lastWinnerSchema,
@@ -72,6 +73,11 @@ const islandPoolSchema = new mongoose.Schema(
 );
 
 islandPoolSchema.statics.getSingleton = async function getSingleton() {
+  // One-time upgrade for existing pools when deploying round tickets.
+  await this.updateOne({ key: 'default', roundTicketsVersion: { $exists: false } }, {
+    $set: { roundTicketsVersion: 1, 'payoutPercentages.royalFlush': 0.8,
+      'payoutPercentages.straightFlush': 0.3, 'payoutPercentages.fourOfAKind': 0.1 },
+  });
   let doc = await this.findOne({ key: "default" });
   if (!doc) {
     doc = await this.create({ key: "default" });

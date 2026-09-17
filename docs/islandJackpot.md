@@ -1,5 +1,35 @@
 # Island Jackpot — Production Readiness
 
+## Round tickets
+
+The table island button opens a dialog over the current poker table. A purchase
+reserves one ticket for the next hand in which the seated player is dealt cards.
+Purchases made after the hand-start cutoff cannot qualify for that hand.
+`POST /join` requires `tableId`; duplicate pending purchases do not charge again.
+Idempotency keys are scoped to the authenticated user and remain valid after the
+ticket has been consumed.
+
+`POST /auto-buy` accepts `{tableId, enabled}`. The server buys once per dealt hand
+at this table, using a prepaid ticket first. It stops automatic buying on
+insufficient wallet funds. Disabling auto-buy preserves an already paid ticket.
+Tickets are not consumed while the island is disabled. Leaving the table causes
+no further charges; an unused paid ticket remains reserved for that table.
+
+`GET /status` now requires authentication and accepts `tableId` and optional
+`handId`. Personal fields are `nextHandPurchased`, `currentHandPurchased` and
+`autoBuy`. They are never cached as shared pool state.
+
+Payout eligibility uses the immutable `(userId, handId, tableId)` ticket, not
+legacy lifetime membership. The final non-folded hand must qualify at showdown.
+Existing trigger and multiple-winner policies still apply. The initial rollout
+migrates older pool percentages to royal flush **80%**, straight flush **30%**,
+and four of a kind **10%**; later admin configuration remains supported.
+
+Deploy backend and client together. Production schema startup installs the
+ticket unique index and repairs the legacy transaction-key index. Duplicate
+non-empty transaction keys stop startup for review; history is never deleted.
+No production database or deployment is changed by the local test suite.
+
 ## Feature flag
 
 ```env

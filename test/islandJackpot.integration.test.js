@@ -20,7 +20,7 @@ for (const [name, cards] of Object.entries(ISLAND_HANDS)) {
 }
 
 describe("Island Jackpot — integration (MongoDB replica set)", () => {
-  test("join twice — second buy adds another entry fee to the pool", async () => {
+  test("join twice reserves one next-hand ticket and charges once", async () => {
     await withHarness(async (h) => {
       const user = await h.createUser({ balance: 500_000 });
       await h.configurePool({ minTriggerAmount: 100_000, entryFee: 50_000, poolBalance: 0 });
@@ -31,11 +31,11 @@ describe("Island Jackpot — integration (MongoDB replica set)", () => {
       const second = await h.joinMember(user);
       assert.equal(second.statusCode, 200);
       assert.equal(second.data.data.isMember, true);
-      assert.equal(second.data.data.poolBalance, 100_000);
+      assert.equal(second.data.data.poolBalance, 50_000);
 
-      assert.equal(await h.getWalletBalance(user._id), 400_000);
+      assert.equal(await h.getWalletBalance(user._id), 450_000);
       const pool = await h.getPool();
-      assert.equal(pool.poolBalance, 100_000);
+      assert.equal(pool.poolBalance, 50_000);
       assert.equal(await IslandMember.countDocuments({ userId: user._id, active: true }), 1);
     });
   });
@@ -161,7 +161,7 @@ describe("Island Jackpot — integration (MongoDB replica set)", () => {
     });
   });
 
-  test("four of a kind payout — 20% pool", async () => {
+  test("four of a kind payout — 10% pool", async () => {
     await withHarness(async (h) => {
       const user = await h.createUser({ balance: 500_000 });
       await h.configurePool({ minTriggerAmount: 50_000, entryFee: 5_000, poolBalance: 500_000 });
@@ -178,7 +178,7 @@ describe("Island Jackpot — integration (MongoDB replica set)", () => {
       });
 
       const winner = await IslandWinner.findOne({ handId }).lean();
-      assert.equal(winner.payoutAmount, 101_000);
+      assert.equal(winner.payoutAmount, 50_500);
       assert.equal(winner.handType, "fourOfAKind");
     });
   });
@@ -251,7 +251,7 @@ describe("Island Jackpot — integration (MongoDB replica set)", () => {
       const dup = await h.joinMember(user, { idempotencyKey: key });
       assert.equal(dup.data.data.duplicate, true);
       assert.equal(await IslandMember.countDocuments({ userId: user._id }), 1);
-      assert.equal(await JackpotTransaction.countDocuments({ idempotencyKey: key }), 1);
+      assert.equal(await JackpotTransaction.countDocuments({ idempotencyKey: `island:${user._id}:${key}` }), 1);
     });
   });
 

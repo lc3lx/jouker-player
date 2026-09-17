@@ -11,6 +11,16 @@ const ApiError = require('../utils/apiError');
 const { computePoolFlags } = require('../utils/islandJackpotLogic');
 const { invalidateStatusCache } = require('../utils/islandJackpotCache');
 const logger = require('../utils/logger');
+const { broadcastPoolTick } = require('../utils/islandJackpotRealtime');
+
+async function publishPool() {
+  await invalidateStatusCache();
+  const pool = await Pool.findOne({ key: 'default' }).lean();
+  if (pool && pool.settings?.effectsEnabled !== false) {
+    const flags = computePoolFlags(pool);
+    broadcastPoolTick({ poolBalance: flags.balance, armed: flags.armed, hotJackpot: flags.hotJackpot });
+  }
+}
 
 async function requireSeat(userId, tableId) {
   if (!mongoose.isValidObjectId(tableId) || !await Table.exists({
@@ -27,8 +37,13 @@ async function charge(userId, tableId, session, idempotencyKey) {
   const fee = Math.trunc(pool.entryFee);
   if (!(fee > 0)) throw new Error('INVALID_ENTRY_FEE');
   const txnId = crypto.randomUUID();
-  await ledger.ledgerWithdraw({ session, userId, amount: fee,
-    ledgerType: 'island_jackpot_entry', meta: { txnId, tableId } });
+  try {
+    await ledger.ledgerWithdraw({ session, userId, amount: fee,
+      ledgerType: 'island_jackpot_entry', meta: { txnId, tableId } });
+  } catch (error) {
+    if (error.message?.includes('INSUFFICIENT')) throw new ApiError('INSUFFICIENT_BALANCE', 402);
+    throw error;
+  }
   pool.poolBalance += fee;
   pool.stats.totalEntries += 1;
   pool.stats.peakPoolBalance = Math.max(pool.stats.peakPoolBalance, pool.poolBalance);
@@ -48,13 +63,19 @@ async function buyNext(userId, tableId, requestKey) {
   await requireSeat(userId, tableId);
   await Pool.getSingleton();
   const key = requestKey ? `island:${userId}:${requestKey}` : null;
+  let duplicate = false;
   await ledger.withMongoTransaction(async session => {
     if (!session) throw new Error('MONGO_TRANSACTIONS_REQUIRED');
-    if (key && await Transaction.exists({ idempotencyKey: key }).session(session)) return;
+    duplicate = false;
+    if (key && await Transaction.findOne({ idempotencyKey: key }).select('_id').session(session)) {
+      duplicate = true;
+      return;
+    }
     const member = await Member.findOneAndUpdate({ userId },
       { $setOnInsert: { userId } }, { upsert: true, new: true, session });
     if (member.pendingTableId) {
       if (member.pendingTableId !== String(tableId)) throw new ApiError('Ticket reserved at another table', 409);
+      duplicate = true;
       return;
     }
     const { fee, txnId } = await charge(userId, tableId, session, key);
@@ -66,7 +87,8 @@ async function buyNext(userId, tableId, requestKey) {
     member.totalContributed += fee;
     await member.save({ session });
   });
-  await invalidateStatusCache();
+  await publishPool();
+  return { duplicate };
 }
 
 async function setAutoBuy(userId, tableId, enabled) {
@@ -81,17 +103,22 @@ async function setAutoBuy(userId, tableId, enabled) {
 // to the following hand; a unique ticket makes retries harmless.
 async function prepareHand({ tableId, handId, userIds, startedAt }) {
   if (process.env.ISLAND_JACKPOT_ENABLED === 'false') return;
+  if (!userIds.length) return;
   const cutoff = new Date(startedAt);
   const members = await Member.find({ userId: { $in: userIds }, $or: [
     { pendingTableId: String(tableId), pendingAt: { $lte: cutoff } },
     { autoBuyTableId: String(tableId), autoBuySince: { $lte: cutoff } },
   ] }).lean();
+  if (!members.length) return;
   for (const original of members) {
     try {
       await ledger.withMongoTransaction(async session => {
         if (!session) throw new Error('MONGO_TRANSACTIONS_REQUIRED');
-        if (await Ticket.exists({ userId: original.userId, handId }).session(session)) return;
+        if (await Ticket.findOne({ userId: original.userId, handId }).select('_id').session(session)) return;
+        const pool = await Pool.findOne({ key: 'default' }).select('enabled').session(session);
+        if (!pool?.enabled) return;
         const member = await Member.findById(original._id).session(session);
+        if (!member) return;
         const prepaid = member.pendingTableId === String(tableId) && member.pendingAt <= cutoff;
         const automatic = member.autoBuyTableId === String(tableId) && member.autoBuySince <= cutoff;
         if (!prepaid && !automatic) return;
@@ -117,7 +144,7 @@ async function prepareHand({ tableId, handId, userIds, startedAt }) {
       logger.warn('island_ticket_hand_failed', { handId, userId: String(original.userId), message: error.message });
     }
   }
-  await invalidateStatusCache();
+  await publishPool();
 }
 
 async function personalStatus(userId, tableId, handId) {

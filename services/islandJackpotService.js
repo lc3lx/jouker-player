@@ -143,7 +143,7 @@ async function buildStatusSnapshot(userId = null) {
     handRequirements: [
       { handType: "royalFlush", label: handTypeLabel("royalFlush"), percentage: pool.payoutPercentages?.royalFlush ?? 0.8 },
       { handType: "straightFlush", label: handTypeLabel("straightFlush"), percentage: pool.payoutPercentages?.straightFlush ?? 0.3 },
-      { handType: "fourOfAKind", label: handTypeLabel("fourOfAKind"), percentage: pool.payoutPercentages?.fourOfAKind ?? 0.2 },
+      { handType: "fourOfAKind", label: handTypeLabel("fourOfAKind"), percentage: pool.payoutPercentages?.fourOfAKind ?? 0.1 },
     ],
   };
 }
@@ -239,11 +239,11 @@ exports.getIslandLeaderboard = asyncHandler(async (req, res) => {
 
 exports.joinIslandJackpot = asyncHandler(async (req, res) => {
   const userId = req.user._id;
-  await tickets.buyNext(userId, req.body?.tableId,
+  const result = await tickets.buyNext(userId, req.body?.tableId,
     req.headers['idempotency-key'] || req.body?.idempotencyKey);
   const snapshot = await buildStatusSnapshot(null);
   const personal = await tickets.personalStatus(userId, req.body?.tableId);
-  res.status(200).json({ status: 'success', data: { ...snapshot, ...personal } });
+  res.status(200).json({ status: 'success', data: { ...snapshot, ...personal, ...result } });
 });
 
 exports.setIslandAutoBuy = asyncHandler(async (req, res) => {

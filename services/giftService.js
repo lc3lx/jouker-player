@@ -16,6 +16,7 @@ const mongoose = require("mongoose");
 const ApiError = require("../utils/apiError");
 const logger = require("../utils/logger");
 const User = require("../models/userModel");
+const GiftDailyTotal = require("../models/giftDailyTotalModel");
 const Cosmetic = require("../models/cosmeticModel");
 const UserCosmetics = require("../models/userCosmeticsModel");
 const VipLevel = require("../models/vipLevelModel");
@@ -27,11 +28,82 @@ const playerProfileService = require("./playerProfileService");
 const COINS_MIN = Math.max(1, parseInt(process.env.GIFT_COINS_MIN || "100", 10));
 const COINS_MAX = Math.max(COINS_MIN, parseInt(process.env.GIFT_COINS_MAX || "10000000", 10));
 const PER_MINUTE = Math.max(1, parseInt(process.env.GIFT_PER_MINUTE || "10", 10));
+/**
+ * Coins one player may gift one other player in a day. Counts coin gifts only —
+ * a cosmetic or VIP gift is an item, not a balance transfer, so it is bounded by
+ * its own price rather than by this cap.
+ */
+const COINS_DAILY_PER_RECIPIENT = Math.max(
+  0,
+  parseInt(process.env.GIFT_COINS_DAILY_PER_RECIPIENT || "100000", 10)
+);
+/** Keep a spent bucket around past its own day before the TTL sweeps it. */
+const DAILY_BUCKET_TTL_MS = 3 * 24 * 60 * 60 * 1000;
 
 const _minuteBuckets = new Map(); // senderId -> { resetAt, count }
 
 function toObjectId(id) {
   try { return new mongoose.Types.ObjectId(String(id)); } catch { return null; }
+}
+
+/** UTC calendar day key — the window the daily cap resets on. */
+function _dayKey(now = new Date()) {
+  return now.toISOString().slice(0, 10);
+}
+
+/**
+ * Reserve [amount] against today's sender→recipient allowance.
+ *
+ * The limit lives in the filter, so the increment only applies when the result
+ * would still be within the cap: one atomic step, no read-then-write gap for a
+ * second concurrent gift to slip through. Returns the coins already spent when
+ * the reservation is refused, so the caller can say how much is left.
+ */
+async function _reserveDailyCoins({ senderId, targetId, amount, session }) {
+  if (COINS_DAILY_PER_RECIPIENT <= 0) return { ok: true };
+
+  const day = _dayKey();
+  const filter = {
+    sender: senderId,
+    recipient: targetId,
+    day,
+    coins: { $lte: COINS_DAILY_PER_RECIPIENT - amount },
+  };
+  const update = {
+    $inc: { coins: amount },
+    $setOnInsert: {
+      sender: senderId,
+      recipient: targetId,
+      day,
+      expiresAt: new Date(Date.now() + DAILY_BUCKET_TTL_MS),
+    },
+  };
+  const options = { upsert: true, new: true, session: session || undefined };
+
+  try {
+    await GiftDailyTotal.findOneAndUpdate(filter, update, options);
+    return { ok: true };
+  } catch (e) {
+    // The bucket exists and is already over the cap: the filter excluded it, so
+    // the upsert tried to insert a second row for the pair and the unique index
+    // refused. That is the "limit reached" answer, not a failure.
+    if (e?.code !== 11000) throw e;
+    const row = await GiftDailyTotal.findOne({ sender: senderId, recipient: targetId, day })
+      .select("coins")
+      .session(session || null)
+      .lean();
+    return { ok: false, spent: Math.max(0, Number(row?.coins) || 0) };
+  }
+}
+
+/** Give back a reservation whose transfer did not happen. */
+async function _releaseDailyCoins({ senderId, targetId, amount, session }) {
+  if (COINS_DAILY_PER_RECIPIENT <= 0) return;
+  await GiftDailyTotal.updateOne(
+    { sender: senderId, recipient: targetId, day: _dayKey() },
+    { $inc: { coins: -amount } },
+    { session: session || undefined }
+  ).catch(() => {});
 }
 
 function _rateOk(senderId) {
@@ -61,12 +133,37 @@ async function _giftCoins(senderId, targetId, payload) {
   if (amount < COINS_MIN || amount > COINS_MAX) {
     throw new ApiError(`Coin gift must be between ${COINS_MIN} and ${COINS_MAX}`, 400);
   }
+  if (COINS_DAILY_PER_RECIPIENT > 0 && amount > COINS_DAILY_PER_RECIPIENT) {
+    throw new ApiError(
+      `Daily gift limit to one player is ${COINS_DAILY_PER_RECIPIENT}`,
+      400
+    );
+  }
+
+  let overLimit = null;
   try {
     await withMongoTransaction(async (session) => {
+      // Reserve inside the transfer's own transaction: if the withdraw fails the
+      // whole thing rolls back and the allowance is not consumed.
+      const reserved = await _reserveDailyCoins({ senderId, targetId, amount, session });
+      if (!reserved.ok) {
+        overLimit = reserved.spent;
+        throw new Error("GIFT_DAILY_LIMIT");
+      }
       await ledgerWithdraw({ session, userId: senderId, amount, ledgerType: "gift_sent", meta: { to: String(targetId) } });
       await ledgerDeposit({ session, userId: targetId, amount, ledgerType: "gift_received", meta: { from: String(senderId) } });
     });
   } catch (e) {
+    if (overLimit !== null) {
+      const remaining = Math.max(0, COINS_DAILY_PER_RECIPIENT - overLimit);
+      throw new ApiError(
+        `Daily gift limit to this player reached — ${remaining} of ${COINS_DAILY_PER_RECIPIENT} left today`,
+        429
+      );
+    }
+    // Standalone Mongo runs without a session, so the reservation is not rolled
+    // back for us — hand it back before surfacing the failure.
+    await _releaseDailyCoins({ senderId, targetId, amount });
     if (e.message === "INSUFFICIENT_BALANCE") throw new ApiError("Insufficient balance", 402);
     throw e;
   }

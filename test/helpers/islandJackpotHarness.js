@@ -8,6 +8,9 @@ const { resetCacheForTests } = require("../../utils/islandJackpotCache");
 
 const IslandPool = require("../../models/islandPoolModel");
 const IslandMember = require("../../models/islandMemberModel");
+const IslandTicket = require("../../models/islandTicketModel");
+const Table = require("../../models/tableModel");
+const tickets = require("../../services/islandTicketService");
 const IslandWinner = require("../../models/islandWinnerModel");
 const IslandHistory = require("../../models/islandHistoryModel");
 const JackpotTransaction = require("../../models/jackpotTransactionModel");
@@ -65,6 +68,7 @@ class IslandJackpotHarness {
       await mongoose.disconnect();
     }
     await mongoose.connect(uri, { dbName: "island_jackpot_test" });
+    await Promise.all([IslandMember.init(), IslandTicket.init(), JackpotTransaction.init()]);
 
     // Lazy-load service after mongoose connect so txn probe uses replica set.
     delete require.cache[require.resolve("../../services/islandJackpotService")];
@@ -94,6 +98,8 @@ class IslandJackpotHarness {
     await Promise.all([
       IslandPool.deleteMany({}),
       IslandMember.deleteMany({}),
+      IslandTicket.deleteMany({}),
+      Table.deleteMany({}),
       IslandWinner.deleteMany({}),
       IslandHistory.deleteMany({}),
       JackpotTransaction.deleteMany({}),
@@ -143,7 +149,7 @@ class IslandJackpotHarness {
       payoutPercentages: {
         royalFlush: 0.8,
         straightFlush: 0.3,
-        fourOfAKind: 0.2,
+        fourOfAKind: 0.1,
         ...payoutPercentages,
       },
       payoutPolicy: { maxWinnersPerEvent, requireShowdown: true },
@@ -168,15 +174,24 @@ class IslandJackpotHarness {
   }
 
   async joinMember(user, { idempotencyKey = null } = {}) {
+    if (!this.tableId) this.tableId = new mongoose.Types.ObjectId();
+    await Table.collection.updateOne({ _id: this.tableId }, {
+      $setOnInsert: { gameType: 'poker' },
+      $addToSet: { seats: { user: user._id, chips: 10000 } },
+    }, { upsert: true });
     return this._invokeHandler(this.service.joinIslandJackpot, {
       user: { _id: user._id },
       headers: idempotencyKey ? { "idempotency-key": idempotencyKey } : {},
-      body: {},
+      body: { tableId: String(this.tableId) },
     });
   }
 
   async onHandSettled(params) {
-    await this.service.onHandSettled(params);
+    // These payout fixtures start a hand with the previously purchased ticket.
+    const tableId = String(this.tableId);
+    await tickets.prepareHand({ tableId, handId: params.handId,
+      startedAt: Date.now(), userIds: params.seats.map(s => s.userId) });
+    await this.service.onHandSettled({ ...params, tableId });
   }
 
   buildSeat(user, handKey, { folded = false, isBot = false } = {}) {
