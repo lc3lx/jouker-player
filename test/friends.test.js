@@ -97,6 +97,45 @@ guarded("friendships are stored once per pair, in either direction", async () =>
   assert.equal(rows.length, 1);
 });
 
+guarded("a sent request reaches the recipient's incoming list", async () => {
+  const [from, to] = await Promise.all([mkUser(), mkUser()]);
+  await friendService.sendFriendRequest(from._id, to._id);
+
+  const forRecipient = await friendService.listPendingRequests(to._id);
+  assert.equal(forRecipient.incoming.length, 1, "recipient must see the request");
+  assert.equal(forRecipient.outgoing.length, 0);
+
+  // The client reads the request id and the populated sender off these rows —
+  // a missing `_id` or `from.name` leaves an un-actionable tile in the list.
+  const row = forRecipient.incoming[0];
+  assert.ok(row._id, "request id is what accept/reject is called with");
+  assert.equal(String(row.from._id), String(from._id));
+  assert.equal(row.from.name, from.name);
+  assert.equal(row.status, "pending");
+
+  const forSender = await friendService.listPendingRequests(from._id);
+  assert.equal(forSender.outgoing.length, 1, "sender must see it as outgoing");
+  assert.equal(forSender.incoming.length, 0);
+  assert.equal(String(forSender.outgoing[0].to._id), String(to._id));
+});
+
+guarded("accepting clears the request from both players' lists", async () => {
+  const [from, to] = await Promise.all([mkUser(), mkUser()]);
+  const req = await friendService.sendFriendRequest(from._id, to._id);
+  await friendService.acceptFriendRequest(to._id, req._id);
+
+  const forRecipient = await friendService.listPendingRequests(to._id);
+  const forSender = await friendService.listPendingRequests(from._id);
+  assert.equal(forRecipient.incoming.length, 0);
+  assert.equal(forSender.outgoing.length, 0);
+
+  // And both now see each other as a friend.
+  const mine = await friendService.listFriends(to._id);
+  const theirs = await friendService.listFriends(from._id);
+  assert.equal(mine.length, 1);
+  assert.equal(theirs.length, 1);
+});
+
 guarded("accepting clears the mirrored request from the other side", async () => {
   const [a, b] = await Promise.all([mkUser(), mkUser()]);
 
