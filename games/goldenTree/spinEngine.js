@@ -5,8 +5,9 @@ const {
   SYMBOLS,
   WILD_REELS,
   WILD_ROW,
-  MAIN_WILD_MULTIPLIERS,
-  BONUS_WILD_MULTIPLIERS,
+  MAIN_WILD_MULTIPLIER_WEIGHTS,
+  BONUS_WILD_MULTIPLIER_WEIGHTS,
+  BONUS_FORCED_TREE_WEIGHTS,
 } = require("./constants");
 const {
   MAIN_REEL_STRIPS,
@@ -24,6 +25,22 @@ function secureRandomInt(max) {
 
 function pickFromArray(arr, rng = secureRandomInt) {
   return arr[rng(arr.length)];
+}
+
+/**
+ * Pick one value from [value, weight] pairs — higher weight, more often.
+ */
+function weightedPick(entries, rng = secureRandomInt) {
+  let total = 0;
+  for (const [, weight] of entries) total += weight;
+  if (total <= 0) return entries[0][0];
+
+  let roll = rng(total);
+  for (const [value, weight] of entries) {
+    roll -= weight;
+    if (roll < 0) return value;
+  }
+  return entries[entries.length - 1][0];
 }
 
 /**
@@ -142,11 +159,38 @@ function forceTreesOnMiddleReels(matrix) {
   }
 }
 
-function assignWildMultipliers(matrix, multiplierPool, rng = secureRandomInt) {
+/**
+ * Plant exactly [count] trees on random wild reels, clearing the rest, so a
+ * bonus spin can land anywhere from an empty board to the full triple.
+ */
+function placeForcedTrees(matrix, count, rng = secureRandomInt) {
+  const reels = [...WILD_REELS];
+  for (let i = reels.length - 1; i > 0; i -= 1) {
+    const j = rng(i + 1);
+    [reels[i], reels[j]] = [reels[j], reels[i]];
+  }
+
+  const planted = reels.slice(0, Math.max(0, Math.min(count, reels.length)));
+  for (const col of reels) {
+    const isTree = planted.includes(col);
+    if (isTree) {
+      matrix[col][WILD_ROW] = SYMBOLS.WILD;
+    } else if (matrix[col][WILD_ROW] === SYMBOLS.WILD) {
+      matrix[col][WILD_ROW] = SYMBOLS.CHERRY;
+    }
+  }
+}
+
+/** Roll how many trees a non-opening bonus spin gets (0–3). */
+function pickForcedTreeCount(rng = secureRandomInt) {
+  return weightedPick(BONUS_FORCED_TREE_WEIGHTS, rng);
+}
+
+function assignWildMultipliers(matrix, multiplierWeights, rng = secureRandomInt) {
   const wildMultipliers = {};
   for (const col of WILD_REELS) {
     if (matrix[col][WILD_ROW] === SYMBOLS.WILD) {
-      wildMultipliers[col] = pickFromArray(multiplierPool, rng);
+      wildMultipliers[col] = weightedPick(multiplierWeights, rng);
     }
   }
   return wildMultipliers;
@@ -154,13 +198,21 @@ function assignWildMultipliers(matrix, multiplierPool, rng = secureRandomInt) {
 
 /**
  * Generate a 5×3 outcome matrix.
- * When forceTrees is true (buy bonus initial spin), forces wild trees on
- * columns 1, 2, 3 at middle row.
+ * [forceTrees] plants the full triple on columns 1, 2, 3 (buy bonus opening
+ * spin). [forceTreeCount] instead plants exactly that many trees on random wild
+ * reels — the luck roll for the rest of a bonus round.
  * @returns {{ matrix: string[][], wildMultipliers: Record<number, number>, stopIndices: number[] }}
  */
-function generateSpin({ bonusMode = false, forceTrees = false, rng = secureRandomInt } = {}) {
+function generateSpin({
+  bonusMode = false,
+  forceTrees = false,
+  forceTreeCount = null,
+  rng = secureRandomInt,
+} = {}) {
   const strips = bonusMode ? BONUS_REEL_STRIPS : MAIN_REEL_STRIPS;
-  const multiplierPool = bonusMode ? BONUS_WILD_MULTIPLIERS : MAIN_WILD_MULTIPLIERS;
+  const multiplierWeights = bonusMode
+    ? BONUS_WILD_MULTIPLIER_WEIGHTS
+    : MAIN_WILD_MULTIPLIER_WEIGHTS;
 
   const matrix = Array.from({ length: REEL_COUNT }, () =>
     Array.from({ length: ROW_COUNT }, () => SYMBOLS.CHERRY),
@@ -178,12 +230,14 @@ function generateSpin({ bonusMode = false, forceTrees = false, rng = secureRando
 
   sanitizeWildPlacements(matrix);
 
-  // Buy bonus: force exactly 3 trees on columns 1-3 at middle row
+  // Buy bonus opening spin: the full triple. Later bonus spins: a rolled count.
   if (forceTrees) {
     forceTreesOnMiddleReels(matrix);
+  } else if (Number.isInteger(forceTreeCount)) {
+    placeForcedTrees(matrix, forceTreeCount, rng);
   }
 
-  const wildMultipliers = assignWildMultipliers(matrix, multiplierPool, rng);
+  const wildMultipliers = assignWildMultipliers(matrix, multiplierWeights, rng);
 
   return { matrix, wildMultipliers, stopIndices };
 }
@@ -193,8 +247,11 @@ module.exports = {
   windowAtStop,
   secureRandomInt,
   pickFromArray,
+  weightedPick,
   pickColumnWindow,
   pickRareJackpotColumnWindow,
   sanitizeWildPlacements,
   forceTreesOnMiddleReels,
+  placeForcedTrees,
+  pickForcedTreeCount,
 };

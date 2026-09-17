@@ -1,4 +1,8 @@
-/** King Earth uses the Poseidon-style 7+ tumble rules and supplied art IDs. */
+/**
+ * King Earth uses Poseidon-style tumble rules on the supplied art IDs, but its
+ * own paytable and bonus prices: it draws from 8 symbol faces where Poseidon
+ * has 9, so the same grid hits MIN_MATCH far more often.
+ */
 const test = require("node:test");
 const assert = require("node:assert/strict");
 const engine = require("../games/dice/DiceEngine");
@@ -9,16 +13,23 @@ test("uses the eight supplied symbols and multiplier plaque values", () => {
   assert.deepEqual(engine.MULTIPLIER_VALUES, [2, 5, 10, 20, 50, 100, 200, 500, 1000]);
   assert.equal(engine.FREE_SPINS_AWARD, 5);
   assert.equal(engine.FREE_SPINS_BOUGHT, 10);
-  assert.equal(engine.BUY_COST_MULT, 30);
-  assert.equal(engine.SUPER_BUY_COST_MULT, 90);
+  // Prices are derived from the measured return of a round — assert the shape
+  // (a super round costs meaningfully more) rather than pinning the numbers,
+  // which move with every retune via tool/atlantisRtp.js.
+  assert.ok(engine.BUY_COST_MULT > 0);
+  assert.ok(engine.SUPER_BUY_COST_MULT > engine.BUY_COST_MULT);
   assert.equal(engine.MAX_WIN_MULTIPLIER, 5000);
 });
 
-test("pays any 7+ matching symbols with Poseidon bands", () => {
-  assert.equal(engine.symbolMultiplier(0, 6), 0);
-  assert.equal(engine.symbolMultiplier(0, 7), 1);
-  assert.equal(engine.symbolMultiplier(0, 10), 1.15);
-  assert.equal(engine.symbolMultiplier(7, 12), 5);
+test("pays only from the minimum match up, in rising bands", () => {
+  const min = engine.MIN_MATCH;
+  assert.equal(engine.symbolMultiplier(0, min - 1), 0);
+  assert.ok(engine.symbolMultiplier(0, min) > 0);
+  assert.ok(engine.symbolMultiplier(0, 10) > engine.symbolMultiplier(0, min));
+  assert.ok(engine.symbolMultiplier(0, 12) > engine.symbolMultiplier(0, 10));
+  // The crown outranks a letter at every band.
+  assert.ok(engine.symbolMultiplier(7, min) > engine.symbolMultiplier(0, min));
+  assert.ok(engine.symbolMultiplier(7, 12) > engine.symbolMultiplier(0, 12));
 });
 
 test("seeded spins are deterministic and only yield known symbol IDs", () => {

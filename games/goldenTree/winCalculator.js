@@ -112,6 +112,35 @@ function wildMultiplierSum(positions, matrix, wildMultipliers) {
 }
 
 /**
+ * Two paylines can cross so that a short run sits entirely inside a longer run
+ * of the same symbol. Only the longer one pays — a player reading the grid sees
+ * one win of N symbols, not an N-win plus a 3-win on the very same cells.
+ */
+function dropSubsumedLineWins(lineWins) {
+  const cellKeys = lineWins.map(
+    (w) => new Set(w.positions.map((p) => `${p.col}.${p.row}`)),
+  );
+
+  return lineWins.filter((win, i) => {
+    for (let j = 0; j < lineWins.length; j += 1) {
+      if (i === j) continue;
+      const other = lineWins[j];
+      if (other.symbol !== win.symbol || other.count <= win.count) continue;
+      const outer = cellKeys[j];
+      let contained = true;
+      for (const key of cellKeys[i]) {
+        if (!outer.has(key)) {
+          contained = false;
+          break;
+        }
+      }
+      if (contained) return false;
+    }
+    return true;
+  });
+}
+
+/**
  * Check that positions follow a valid payline pattern starting from col 0.
  */
 function isContiguousFromCol0(positions) {
@@ -218,15 +247,16 @@ function calculateWins(matrix, wildMultipliers, betAmount, options = {}) {
     evalMatrix = landed.map((col) => [...col]);
   }
 
-  const lineWins = [];
-  let lineTotal = 0;
-
+  const candidates = [];
   for (let i = 0; i < PAYLINES.length; i += 1) {
     const win = evaluatePayline(PAYLINES[i], i, evalMatrix, wildMultipliers, betAmount);
-    if (win) {
-      lineTotal = roundMoney(lineTotal + win.amount);
-      lineWins.push(win);
-    }
+    if (win) candidates.push(win);
+  }
+
+  const lineWins = dropSubsumedLineWins(candidates);
+  let lineTotal = 0;
+  for (const win of lineWins) {
+    lineTotal = roundMoney(lineTotal + win.amount);
   }
 
   const scatterWins = [];
@@ -261,6 +291,7 @@ function calculateWins(matrix, wildMultipliers, betAmount, options = {}) {
 module.exports = {
   applyExpandingWilds,
   calculateWins,
+  dropSubsumedLineWins,
   evaluatePayline,
   matchPayline,
   basePayout,

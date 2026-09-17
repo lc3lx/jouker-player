@@ -55,14 +55,19 @@ beforeEach(() => {
 
 // --- constants / paytable -------------------------------------------------
 
-test("payoutFor respects the 7-9 / 10-11 / 12+ bands and the design ranking", () => {
-  assert.equal(payoutFor(SYMBOLS.CROWN, 6), 0);
-  assert.equal(payoutFor(SYMBOLS.CROWN, 7), 2.0);
-  assert.equal(payoutFor(SYMBOLS.CROWN, 10), 3.5);
-  assert.equal(payoutFor(SYMBOLS.CROWN, 12), 5);
+test("payoutFor respects the match bands and the design ranking", () => {
+  // Values come from PAYTABLE so a retune does not have to edit this test;
+  // what is asserted is the shape: below MIN_MATCH pays nothing, and each
+  // band pays strictly more than the one under it.
+  assert.equal(payoutFor(SYMBOLS.CROWN, MIN_MATCH - 1), 0);
+  assert.ok(payoutFor(SYMBOLS.CROWN, MIN_MATCH) > 0);
+  assert.ok(
+    payoutFor(SYMBOLS.CROWN, 10) > payoutFor(SYMBOLS.CROWN, MIN_MATCH),
+  );
+  assert.ok(payoutFor(SYMBOLS.CROWN, 12) > payoutFor(SYMBOLS.CROWN, 10));
 
-  assert.equal(payoutFor(SYMBOLS.A, 7), 1.0);
-  assert.equal(payoutFor(SYMBOLS.A, 12), 1.5);
+  assert.ok(payoutFor(SYMBOLS.A, MIN_MATCH) > 0);
+  assert.ok(payoutFor(SYMBOLS.A, 12) > payoutFor(SYMBOLS.A, MIN_MATCH));
 
   // crown > fish > pearl > starfish > coral > letters
   const order = [
@@ -75,7 +80,7 @@ test("payoutFor respects the 7-9 / 10-11 / 12+ bands and the design ranking", ()
   ];
   for (let i = 1; i < order.length; i += 1) {
     assert.ok(
-      payoutFor(order[i - 1], 7) > payoutFor(order[i], 7),
+      payoutFor(order[i - 1], MIN_MATCH) > payoutFor(order[i], MIN_MATCH),
       `${order[i - 1]} must outrank ${order[i]}`,
     );
   }
@@ -178,9 +183,11 @@ test("super buy-bonus plaques are always x20+ even when stacking suppresses", ()
 
 // --- win calculator ---------------------------------------------------------
 
-test("findWins detects 7+ anywhere and ignores multiplier plaques", () => {
+test("findWins detects MIN_MATCH+ anywhere and ignores multiplier plaques", () => {
   const matrix = fullMatrix(SYMBOLS.S);
-  const crownCells = [[0, 0], [0, 1], [1, 0], [2, 3], [3, 4], [4, 2], [5, 0]];
+  const crownCells = [
+    [0, 0], [0, 1], [1, 0], [2, 3], [3, 4], [4, 2], [5, 0], [5, 1],
+  ];
   for (const [c, r] of crownCells) matrix[c][r] = SYMBOLS.CROWN;
   matrix[1][1] = "x10";
   matrix[1][2] = "x1000";
@@ -189,11 +196,13 @@ test("findWins detects 7+ anywhere and ignores multiplier plaques", () => {
   const crown = wins.find((w) => w.symbol === SYMBOLS.CROWN);
   assert.ok(crown, "crown win detected");
   assert.equal(crown.count, MIN_MATCH);
-  assert.equal(crown.payout, 2.0);
+  assert.equal(crown.payout, payoutFor(SYMBOLS.CROWN, MIN_MATCH));
 
-  // Six crowns must not pay.
+  // One short of MIN_MATCH must not pay.
   const six = fullMatrix(SYMBOLS.S);
-  for (const [c, r] of crownCells.slice(0, 6)) six[c][r] = SYMBOLS.CROWN;
+  for (const [c, r] of crownCells.slice(0, MIN_MATCH - 1)) {
+    six[c][r] = SYMBOLS.CROWN;
+  }
   assert.equal(findWins(six).find((w) => w.symbol === SYMBOLS.CROWN), undefined);
 
   const sWin = wins.find((w) => w.symbol === SYMBOLS.S);
@@ -615,6 +624,11 @@ test("seeded RTP simulation stays in the tuned band", () => {
   }
 
   const rtp = totalWon / totalBet;
-  // Player-friendly paytable (letters ≥1×, crown ≤5×) runs hot; keep a sane band.
-  assert.ok(rtp > 1.05 && rtp < 1.75, `RTP out of band: ${(rtp * 100).toFixed(1)}%`);
+  // Tuned to ~96.5% with `node tool/atlantisRtp.js`. The band is wide because a
+  // single x1000 plaque dominates a 30k-spin sample; a real drift shows up as a
+  // number well outside it, not as sampling noise.
+  assert.ok(
+    rtp > 0.8 && rtp < 1.15,
+    `RTP out of band: ${(rtp * 100).toFixed(1)}% — re-tune with tool/atlantisRtp.js`,
+  );
 });

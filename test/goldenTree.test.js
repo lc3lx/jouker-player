@@ -7,11 +7,19 @@ const {
   PAYLINES,
   SYMBOLS,
   roundMoney,
+  BUY_BONUS_COST,
+  BONUS_FORCED_TREE_WEIGHTS,
+  MAIN_WILD_MULTIPLIER_WEIGHTS,
+  BONUS_WILD_MULTIPLIER_WEIGHTS,
+  TARGET_RTP,
+  FREE_SPINS_PER_BONUS,
+  WILD_ROW,
 } = require("../games/goldenTree/constants");
 const { matchPayline, calculateWins, basePayout } = require("../games/goldenTree/winCalculator");
 const {
   generateSpin,
   pickColumnWindow,
+  pickForcedTreeCount,
   windowAtStop,
 } = require("../games/goldenTree/spinEngine");
 const {
@@ -111,10 +119,27 @@ test("payline parser — left-to-right with wild substitution", () => {
 });
 
 test("seven symbol wins with 2 matches; others need at least 3 matches", () => {
-  assert.equal(basePayout(SYMBOLS.SEVEN, 2, 10000), 5000);
-  assert.equal(basePayout(SYMBOLS.SEVEN, 3, 10000), 10000);
+  assert.ok(basePayout(SYMBOLS.SEVEN, 2, 10000) > 0);
+  assert.ok(
+    basePayout(SYMBOLS.SEVEN, 3, 10000) > basePayout(SYMBOLS.SEVEN, 2, 10000),
+  );
   assert.equal(basePayout(SYMBOLS.CHERRY, 2, 10000), 0);
-  assert.equal(basePayout(SYMBOLS.CHERRY, 3, 10000), 2000);
+  assert.ok(basePayout(SYMBOLS.CHERRY, 3, 10000) > 0);
+});
+
+test("every paytable row grows with the run length", () => {
+  for (const symbol of Object.values(SYMBOLS)) {
+    let previous = 0;
+    for (let count = 2; count <= 5; count += 1) {
+      const pay = basePayout(symbol, count, 10000);
+      if (pay === 0) continue;
+      assert.ok(
+        pay > previous,
+        `${symbol} pays ${pay} for ${count} but ${previous} for ${count - 1}`,
+      );
+      previous = pay;
+    }
+  }
 });
 
 test("corner-touch diagonal cherries DO pay", () => {
@@ -133,7 +158,7 @@ test("corner-touch diagonal cherries DO pay", () => {
   const cherry = result.lineWins.find((w) => w.symbol === SYMBOLS.CHERRY);
   assert.ok(cherry, "expected corner-adjacent cherry path");
   assert.equal(cherry.count, 3);
-  assert.equal(cherry.amount, 2000);
+  assert.equal(cherry.amount, basePayout(SYMBOLS.CHERRY, 3, 10000));
 });
 
 test("bananas not forming one of the 10 paylines do not pay", () => {
@@ -166,7 +191,7 @@ test("horizontal 3 cherries on one row pay", () => {
   assert.equal(result.lineWins.length, 1);
   assert.equal(result.lineWins[0].symbol, SYMBOLS.CHERRY);
   assert.equal(result.lineWins[0].count, 3);
-  assert.equal(result.totalWin, 2000);
+  assert.equal(result.totalWin, basePayout(SYMBOLS.CHERRY, 3, 10000));
 });
 
 test("screenshot-style separated sevens do not form a win", () => {
@@ -252,7 +277,7 @@ test("horizontal contiguous run from col 0 pays", () => {
       w.positions.every((p, i) => p.col === i && p.row === 1),
   );
   assert.ok(win, "expected horizontal cherry win from col 0");
-  assert.equal(win.amount, 2000);
+  assert.equal(win.amount, basePayout(SYMBOLS.CHERRY, 3, 10000));
 });
 
 test("landscape screenshot board — oranges with reel gaps pay nothing", () => {
@@ -328,7 +353,10 @@ test("orange cluster — every maximal path pays", () => {
   const result = calculateWins(matrix, {}, bet, { bonusMode: false });
   assert.ok(result.lineWins.length > 1);
   assert.ok(result.lineWins.every((w) => w.symbol === SYMBOLS.ORANGE));
-  assert.equal(result.totalWin, result.lineWins.length * bet * 0.2);
+  assert.equal(
+    result.totalWin,
+    result.lineWins.length * basePayout(SYMBOLS.ORANGE, 3, bet),
+  );
   const mid = result.lineWins.some(
     (w) =>
       w.positions.length === 3 &&
@@ -355,7 +383,7 @@ test("screenshot oranges — fixed paylines matching matrix pay", () => {
   assert.ok(keys.has("0,1>1,1>2,1"), "middle row");
   assert.ok(keys.has("0,0>1,1>2,2"), "V-shape");
   assert.equal(result.lineWins.length, 6);
-  assert.equal(result.totalWin, 6 * bet * 0.2);
+  assert.equal(result.totalWin, 6 * basePayout(SYMBOLS.ORANGE, 3, bet));
 });
 
 test("orange and cherry use identical match rules on the same shape", () => {
@@ -428,7 +456,10 @@ test("seven cluster — paylines with sevens pay", () => {
   const result = calculateWins(matrix, {}, bet, { bonusMode: false });
   assert.ok(result.lineWins.length > 1);
   assert.ok(result.lineWins.every((w) => w.symbol === SYMBOLS.SEVEN));
-  assert.equal(result.totalWin, 200000000);
+  assert.equal(
+    result.totalWin,
+    result.lineWins.reduce((sum, w) => sum + basePayout(w.symbol, w.count, bet), 0),
+  );
 });
 
 test("two sevens do not pay across missing reels", () => {
@@ -551,7 +582,7 @@ test("wild connector in the middle completes a match (main)", () => {
   );
   assert.ok(win);
   assert.equal(win.wildMultiplier, 2);
-  assert.equal(win.amount, 20000);
+  assert.equal(win.amount, basePayout(SYMBOLS.SEVEN, 3, 10000) * 2);
 });
 
 test("an unmultiplied tree connects two matching symbols on the same row", () => {
@@ -568,7 +599,7 @@ test("an unmultiplied tree connects two matching symbols on the same row", () =>
 
   assert.ok(win, "expected cherry → plain tree → cherry on one row");
   assert.equal(win.wildMultiplier, 1);
-  assert.equal(win.amount, 2000);
+  assert.equal(win.amount, basePayout(SYMBOLS.CHERRY, 3, 10000));
   assert.ok(win.positions.every((p) => p.row === 1));
 });
 
@@ -584,8 +615,8 @@ test("main tree between matching symbols applies assigned multiplier", () => {
   );
   assert.ok(win);
   assert.equal(win.wildMultiplier, 3);
-  assert.equal(win.baseAmount, 2000);
-  assert.equal(win.amount, 6000);
+  assert.equal(win.baseAmount, basePayout(SYMBOLS.CHERRY, 3, 10000));
+  assert.equal(win.amount, basePayout(SYMBOLS.CHERRY, 3, 10000) * 3);
   assert.equal(result.expandedWilds[0].expands, false);
 });
 
@@ -624,13 +655,13 @@ test("fruit needs 3; longer runs pay more", () => {
   const win3 = calculateWins(matrix3, {}, 10000, { bonusMode: false });
   const g3 = win3.lineWins.find((w) => w.symbol === SYMBOLS.GRAPES && w.count === 3);
   assert.ok(g3);
-  assert.equal(g3.baseAmount, 8000);
+  assert.equal(g3.baseAmount, basePayout(SYMBOLS.GRAPES, 3, 10000));
 
   matrix3[3][1] = SYMBOLS.GRAPES;
   const win4 = calculateWins(matrix3, {}, 10000, { bonusMode: false });
   const g4 = win4.lineWins.find((w) => w.symbol === SYMBOLS.GRAPES && w.count === 4);
   assert.ok(g4);
-  assert.equal(g4.baseAmount, 24000);
+  assert.equal(g4.baseAmount, basePayout(SYMBOLS.GRAPES, 4, 10000));
   assert.ok(g4.baseAmount > g3.baseAmount);
 });
 
@@ -681,9 +712,9 @@ test("bonus expanding wild substitutes the whole reel", () => {
       w.positions[1].row === 0,
   );
   assert.ok(win, "expected top-row bell win via expanded wild");
-  assert.equal(win.baseAmount, 4000);
+  assert.equal(win.baseAmount, basePayout(SYMBOLS.BELL, 3, 10000));
   assert.equal(win.wildMultiplier, 3);
-  assert.equal(win.amount, 12000);
+  assert.equal(win.amount, basePayout(SYMBOLS.BELL, 3, 10000) * 3);
 });
 
 test("main mode does not expand wilds", () => {
@@ -832,7 +863,7 @@ test("buy bonus creates 5 free spins session", async () => {
   wallet.seedStubBalance("u3", 10000000);
 
   const purchase = await goldenTreeService.executeBuyBonus("u3", "Triple", 10000);
-  assert.equal(purchase.cost, 3500000);
+  assert.equal(purchase.cost, 10000 * BUY_BONUS_COST);
   assert.equal(purchase.freeSpinsRemaining, 5);
   assert.equal(purchase.resolvedType, "Triple");
 
@@ -884,16 +915,52 @@ test("bonus spins never plant a tree on columns 0 or 4", () => {
   }
 });
 
-test("bonus strips land trees often but not always", () => {
-  const rounds = 2000;
-  let withTree = 0;
+test("a bonus round rolls its tree count instead of forcing three", () => {
+  const rounds = 4000;
+  const seen = new Map();
   for (let i = 0; i < rounds; i += 1) {
-    const { wildMultipliers } = generateSpin({ bonusMode: true });
-    if (Object.keys(wildMultipliers).length > 0) withTree += 1;
+    const count = pickForcedTreeCount();
+    seen.set(count, (seen.get(count) || 0) + 1);
   }
-  const rate = withTree / rounds;
-  // High chance (buy-bonus feel), never near-guaranteed.
-  assert.ok(rate >= 0.55 && rate <= 0.92, `bonus tree rate ${rate}`);
+
+  // Every tier the weights declare must actually occur — a bonus spin can come
+  // up empty, and the full triple must stay the rare one.
+  for (const [count] of BONUS_FORCED_TREE_WEIGHTS) {
+    assert.ok((seen.get(count) || 0) > 0, `tree count ${count} never rolled`);
+  }
+  assert.ok(
+    seen.get(3) / rounds < seen.get(0) / rounds,
+    "three trees must be rarer than an empty spin",
+  );
+});
+
+test("a rolled tree count lands exactly that many trees", () => {
+  for (let count = 0; count <= 3; count += 1) {
+    for (let i = 0; i < 200; i += 1) {
+      const { matrix } = generateSpin({ bonusMode: true, forceTreeCount: count });
+      const trees = [1, 2, 3].filter(
+        (col) => matrix[col][WILD_ROW] === SYMBOLS.WILD,
+      ).length;
+      assert.equal(trees, count);
+    }
+  }
+});
+
+test("tree multipliers follow the rarity ladder: plain > x2 > x3 > x5", () => {
+  for (const weights of [
+    MAIN_WILD_MULTIPLIER_WEIGHTS,
+    BONUS_WILD_MULTIPLIER_WEIGHTS,
+  ]) {
+    const byTier = new Map(weights);
+    const tiers = [...byTier.keys()].sort((a, b) => a - b);
+    for (let i = 1; i < tiers.length; i += 1) {
+      assert.ok(
+        byTier.get(tiers[i]) < byTier.get(tiers[i - 1]),
+        `x${tiers[i]} must be rarer than x${tiers[i - 1]}`,
+      );
+    }
+    assert.equal(tiers[0], 1, "the plain tree is the most common tier");
+  }
 });
 
 test("wild placements are staggered across bonus reels", () => {
@@ -949,21 +1016,11 @@ test("jackpot strips use isolated symbols at Zeus-scale rarity", () => {
   assert.ok(bonusRate >= 0.00009 && bonusRate <= zeusBonusRate * 1.45);
 });
 
-test("legacy stop-zero jackpot cluster cannot trigger a jackpot", () => {
+test("a degenerate rng cannot line up a jackpot cluster", () => {
   const goldenTreeJackpot = require("../games/goldenTree/goldenTreeJackpot");
 
-  // Before the rare-jackpot selector, stop zero displayed the tail jackpot
-  // together with the opening cherries on every reel and immediately made a
-  // 3+ scatter trigger.
-  const legacyCluster = MAIN_REEL_STRIPS.map(
-    (strip) => pickColumnWindow(strip, () => 0).column,
-  );
-  assert.equal(
-    legacyCluster.flat().filter((symbol) => symbol === SYMBOLS.JACKPOT).length,
-    5,
-  );
-  assert.equal(goldenTreeJackpot.isJackpotTriggered(legacyCluster), true);
-
+  // An rng stuck at zero used to hand every reel the same stop; the rare-jackpot
+  // selector must still keep that board clear of a 3+ scatter trigger.
   const { matrix } = generateSpin({ rng: () => 0 });
   assert.equal(
     matrix.flat().filter((symbol) => symbol === SYMBOLS.JACKPOT).length,
@@ -986,27 +1043,69 @@ test("bet validation rejects out-of-range amounts", async () => {
   );
 });
 
-test("RTP probe — main game simulation (informational)", () => {
-  // This is a regression guard for the current rule set, not an RTP target.
-  // Economics tuning remains a separate game-design decision.
-  const rounds = 20000;
+test("base game pays back close to the target RTP", () => {
+  const rounds = 120000;
   const bet = 10000;
-  let totalReturned = 0;
+  let returned = 0;
+  let hits = 0;
 
   for (let i = 0; i < rounds; i += 1) {
     const { matrix, wildMultipliers } = generateSpin({ bonusMode: false });
     const { totalWin } = calculateWins(matrix, wildMultipliers, bet, {
       bonusMode: false,
     });
-    totalReturned += totalWin;
+    returned += totalWin;
+    if (totalWin > 0) hits += 1;
   }
 
-  const rtp = totalReturned / (rounds * bet);
-  // Band reflects horizontal-from-col0 line wins only (no scatters).
+  const rtp = returned / (rounds * bet);
+  // Wide enough for sampling noise on a 120k run, tight enough that a paytable
+  // or reel-strip edit that breaks the economics fails here.
   assert.ok(
-    rtp > 0.01 && rtp < 1.0,
-    `horizontal-line RTP sample ${rtp.toFixed(4)} out of expected sanity band`,
+    Math.abs(rtp - TARGET_RTP) < 0.12,
+    `base RTP ${rtp.toFixed(4)} drifted from target ${TARGET_RTP} — re-tune with tool/goldenTreeRtp.js`,
   );
+
+  const hitRate = hits / rounds;
+  assert.ok(
+    hitRate > 0.2 && hitRate < 0.45,
+    `base hit rate ${hitRate.toFixed(4)} outside a playable band`,
+  );
+});
+
+test("a purchased bonus is priced at the target RTP", () => {
+  const rounds = 20000;
+  const bet = 10000;
+  let returned = 0;
+
+  for (let i = 0; i < rounds; i += 1) {
+    for (let spin = 0; spin < FREE_SPINS_PER_BONUS; spin += 1) {
+      const opening = spin === 0;
+      const { matrix, wildMultipliers } = generateSpin({
+        bonusMode: true,
+        forceTrees: opening,
+        forceTreeCount: opening ? null : pickForcedTreeCount(),
+      });
+      returned += calculateWins(matrix, wildMultipliers, bet, {
+        bonusMode: true,
+      }).totalWin;
+    }
+  }
+
+  const rtp = returned / rounds / bet / BUY_BONUS_COST;
+  assert.ok(
+    Math.abs(rtp - TARGET_RTP) < 0.15,
+    `buy-bonus RTP ${rtp.toFixed(4)} drifted from target ${TARGET_RTP} — re-price BUY_BONUS_COST with tool/goldenTreeRtp.js`,
+  );
+});
+
+test("the opening purchased spin always shows the full triple", () => {
+  for (let i = 0; i < 300; i += 1) {
+    const { matrix } = generateSpin({ bonusMode: true, forceTrees: true });
+    for (const col of [1, 2, 3]) {
+      assert.equal(matrix[col][WILD_ROW], SYMBOLS.WILD);
+    }
+  }
 });
 
 test("jackpot roll — miss does not award", () => {
@@ -1076,7 +1175,7 @@ test("two sevens on payline from reel 0 awards 2-match payout", () => {
   const sevenWin = result.lineWins.find((w) => w.symbol === SYMBOLS.SEVEN && w.lineIndex === 0);
   assert.ok(sevenWin, "expected 2-match seven win on payline 1");
   assert.equal(sevenWin.count, 2);
-  assert.equal(sevenWin.amount, 5000); // 0.5 × 10000
+  assert.equal(sevenWin.amount, basePayout(SYMBOLS.SEVEN, 2, 10000));
 });
 
 test("bonus mode with 3 trees on cols 1-3: all 3 symbols on col 0 win, and matching opposite symbol makes full win", () => {
@@ -1108,7 +1207,8 @@ test("bonus mode with 3 trees on cols 1-3: all 3 symbols on col 0 win, and match
   assert.equal(fullSevenWin.count, 5, "seven must be 5-of-a-kind (full win)");
   // Wild multiplier: 2 + 3 + 5 = 10
   assert.equal(fullSevenWin.wildMultiplier, 10);
-  // Base payout for 5 sevens at 10000 bet is 100 × 10000 = 1,000,000
-  // Multiplied by 10x wild multiplier = 10,000,000
-  assert.equal(fullSevenWin.amount, 10000000);
+  assert.equal(
+    fullSevenWin.amount,
+    basePayout(SYMBOLS.SEVEN, 5, 10000) * 10,
+  );
 });

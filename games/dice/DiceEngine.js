@@ -22,24 +22,30 @@ const FREE_SPINS_AWARD = 5;
 const FREE_SPINS_BOUGHT = 10;
 const RETRIGGER_AWARD = 5;
 const RETRIGGER_MIN_SCATTER = 3;
-const BUY_COST_MULT = 30;
-const SUPER_BUY_COST_MULT = 90;
+// Priced off the measured return of a round — re-derive with tool/atlantisRtp.js.
+const BUY_COST_MULT = 50;
+const SUPER_BUY_COST_MULT = 281;
 const SUPER_MULTIPLIER_MIN = 20;
 const MAX_WIN_MULTIPLIER = 5000;
 const BET_MIN = 10000;
 const BET_MAX = 1000000000;
-const MIN_MATCH = 7;
+const MIN_MATCH = 8;
 
 // Kept as aliases because the socket/client response historically calls the
 // plaque counter `scatterCount`.
 const SCATTER = MULTIPLIER;
 const GEM_SYMBOLS = [0, 1, 2, 3];
 
-// A, E, N, S, book, ring, class, crown.  The values and match bands are the
-// Poseidon paytable, applied to the new King Earth art.
+// A, E, N, S, book, ring, class, crown.  Bands: 8-9 / 10-11 / 12+ matches.
+// These used to be Poseidon's numbers verbatim, but King Earth draws from 8
+// symbol faces where Poseidon has 9, so the same grid hits 8-of-a-kind far more
+// often and the shared values paid several times too much.  Tuned on its own
+// with `node tool/atlantisRtp.js`.
 const PAYTABLE = {
-  0: [1, 1.15, 1.5], 1: [1, 1.15, 1.5], 2: [1, 1.15, 1.5], 3: [1, 1.15, 1.5],
-  4: [1.15, 1.5, 2.2], 5: [1.3, 1.85, 2.8], 6: [1.5, 2.3, 3.5], 7: [2, 3.5, 5],
+  0: [1.24, 1.42, 1.86], 1: [1.24, 1.42, 1.86],
+  2: [1.24, 1.42, 1.86], 3: [1.24, 1.42, 1.86],
+  4: [1.42, 1.86, 2.72], 5: [1.62, 2.29, 3.48],
+  6: [1.86, 2.85, 4.34], 7: [2.48, 4.34, 6.2],
 };
 // Scaled from Poseidon's non-plaque mass.  King Earth has four supplied
 // premium symbols rather than Poseidon's five, so scaling preserves the exact
@@ -79,7 +85,7 @@ function isJackpot(symbol) {
 }
 
 function pickSymbol(rng, isFreeSpin, bigAlready, superBonus = false) {
-  const plaqueWeight = isFreeSpin ? 0.55 : 0.22;
+  const plaqueWeight = isFreeSpin ? 0.55 : 0.44;
   const regular = isFreeSpin ? FREESPIN_WEIGHTS : BASE_WEIGHTS;
   const choice = weightedIndex(rng, [...regular, plaqueWeight, JACKPOT_WEIGHT]);
   if (choice < REGULAR_SYMBOLS) return choice;
@@ -165,4 +171,4 @@ function spin(baseBet, options = {}) {
   const jackpotSymbolCount = countJackpotSymbols(tumble.finalGrid);
   return { grid: initialGrid, initialGrid, finalGrid: tumble.finalGrid, stake, baseBet: stake, doubleChance: false, isFreeSpin, freeSpinPayoutMult: 1, volatility: normalizeVolatility(options.volatility), nearMiss: false, almostBonus: !isFreeSpin && scatterCount === 3, capped: tumble.multipliedWin > winCap, maxWin: winCap, totalWin, baseWin: tumble.baseWin, winningCells: [...tumble.winningCells].map((key) => { const [col, row] = key.split(",").map(Number); return { col, row }; }), lineWins: tumble.lineWins, scatterCount, jackpotSymbolCount, jackpotTriggered: jackpotSymbolCount >= JACKPOT_MIN_SYMBOLS, winType: classifyWinType(totalWin, stake), cascadeSteps: tumble.cascadeSteps, multipliers: { collected: tumble.collectedMultiplier, applied: tumble.appliedMultiplier, freeSpinTotal: tumble.nextFreeSpinMultiplier }, freeSpinsAwarded: !isFreeSpin && scatterCount >= 4 ? FREE_SPINS_AWARD : 0 };
 }
-module.exports = { COLS, ROWS, REGULAR_SYMBOLS, SYMBOL_COUNT, SCATTER, MULTIPLIER, JACKPOT, JACKPOT_WEIGHT, JACKPOT_MIN_SYMBOLS, GEM_SYMBOLS, FREE_SPINS_AWARD, FREE_SPINS_BOUGHT, RETRIGGER_AWARD, RETRIGGER_MIN_SCATTER, BUY_COST_MULT, SUPER_BUY_COST_MULT, SUPER_MULTIPLIER_MIN, MAX_WIN_MULTIPLIER, BET_MIN, BET_MAX, PAYTABLE, MULTIPLIER_VALUES, BASE_WEIGHTS, FREESPIN_WEIGHTS, MULTIPLIER_GATES, BASE_MULTIPLIER_WEIGHTS, BONUS_MULTIPLIER_WEIGHTS, SUPPRESSED_MULTIPLIER_WEIGHTS, BIG_MULTIPLIER_THRESHOLD, APPLIED_MULTIPLIER_CAP_BASE, APPLIED_MULTIPLIER_CAP_BONUS, appliedMultiplierFor, resolvePayoutMultiplier, normalizeVolatility, pickMultiplierValue, symbolMultiplier, isJackpot, countJackpotSymbols, generateGrid, calculateWins, spin, classifyWinType };
+module.exports = { COLS, ROWS, MIN_MATCH, REGULAR_SYMBOLS, SYMBOL_COUNT, SCATTER, MULTIPLIER, JACKPOT, JACKPOT_WEIGHT, JACKPOT_MIN_SYMBOLS, GEM_SYMBOLS, FREE_SPINS_AWARD, FREE_SPINS_BOUGHT, RETRIGGER_AWARD, RETRIGGER_MIN_SCATTER, BUY_COST_MULT, SUPER_BUY_COST_MULT, SUPER_MULTIPLIER_MIN, MAX_WIN_MULTIPLIER, BET_MIN, BET_MAX, PAYTABLE, MULTIPLIER_VALUES, BASE_WEIGHTS, FREESPIN_WEIGHTS, MULTIPLIER_GATES, BASE_MULTIPLIER_WEIGHTS, BONUS_MULTIPLIER_WEIGHTS, SUPPRESSED_MULTIPLIER_WEIGHTS, BIG_MULTIPLIER_THRESHOLD, APPLIED_MULTIPLIER_CAP_BASE, APPLIED_MULTIPLIER_CAP_BONUS, appliedMultiplierFor, resolvePayoutMultiplier, normalizeVolatility, pickMultiplierValue, symbolMultiplier, isJackpot, countJackpotSymbols, generateGrid, calculateWins, spin, classifyWinType };

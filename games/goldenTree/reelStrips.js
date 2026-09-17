@@ -16,23 +16,56 @@ const { SYMBOLS, WILD_REELS } = require("./constants");
 const JACKPOT_REEL_WEIGHT = 1;
 const JACKPOT_WINDOW_ACTIVATION_ODDS = 6;
 
-/** Main game: sparse middle-row trees on reels 2–4. */
-const MAIN_WILD_COUNT = 1;
 /**
- * Bonus / buy-bonus: frequent isolated trees (high chance, never guaranteed).
- * Wilds are placed by replacing fruit stops (strip length unchanged) so
- * jackpot rarity stays stable. Contiguous WWW clumps are avoided — the
- * mixed-column picker rejects them and collapses effective tree rate.
+ * Main game: middle-row trees on reels 2–4. The plain (×1) tree is the tier a
+ * player meets most, so the base game needs enough of them to feel alive.
  */
-const BONUS_WILD_COUNT = 26;
+const MAIN_WILD_COUNT = 10;
+/**
+ * Bonus / buy-bonus: trees that land on their own, on top of the count the
+ * round forces. Wilds replace fruit stops (strip length unchanged) so jackpot
+ * rarity stays stable, and `placeIsolatedWilds` keeps them non-adjacent.
+ */
+const BONUS_WILD_COUNT = 4;
 
+/**
+ * Lay the weighted symbols out evenly around the strip instead of in one solid
+ * block each.
+ *
+ * A blocked strip (14 cherries, then 14 oranges, …) collapses the game: almost
+ * every 3-row window falls inside a block, `pickColumnWindow` rejects it for
+ * being uniform, and the handful of surviving stops sit on block boundaries —
+ * one or two per symbol whatever its weight. The declared weights then mean
+ * nothing and every symbol lands about equally often.
+ *
+ * Spreading them (largest-remainder: each slot goes to the symbol furthest
+ * behind its ideal share) keeps the strip deterministic while making stop
+ * frequency actually track weight.
+ */
 function buildStrip(entries) {
+  const total = entries.reduce((sum, [, weight]) => sum + weight, 0);
+  if (total <= 0) return [];
+
+  const placed = entries.map(() => 0);
   const strip = [];
-  for (const [symbol, weight] of entries) {
-    for (let i = 0; i < weight; i += 1) {
-      strip.push(symbol);
+
+  for (let slot = 0; slot < total; slot += 1) {
+    let bestIndex = 0;
+    let bestDebt = -Infinity;
+    for (let i = 0; i < entries.length; i += 1) {
+      const [, weight] = entries[i];
+      if (placed[i] >= weight) continue;
+      // How far this symbol has fallen behind its ideal share by this slot.
+      const debt = (slot + 1) * (weight / total) - placed[i];
+      if (debt > bestDebt) {
+        bestDebt = debt;
+        bestIndex = i;
+      }
     }
+    strip.push(entries[bestIndex][0]);
+    placed[bestIndex] += 1;
   }
+
   return strip;
 }
 
@@ -69,18 +102,23 @@ function placeIsolatedWilds(baseStrip, count, reelIndex = 0) {
   return out;
 }
 
-/** Base symbol mix shared by non-special reels. */
+/**
+ * Base symbol mix shared by non-special reels.
+ *
+ * Low fruits carry most of the weight so three-in-a-row happens often enough to
+ * carry the base game (~28% of spins land a win); the premium symbols stay thin
+ * so their long runs keep their value.
+ */
 const BASE_MIX = [
-  // Extra low-fruit weight replaces removed dollar/star scatter stops.
-  [SYMBOLS.CHERRY, 14],
-  [SYMBOLS.ORANGE, 14],
-  [SYMBOLS.PINEAPPLE, 14],
-  [SYMBOLS.PLUM, 14],
-  [SYMBOLS.BANANA, 20],
-  [SYMBOLS.GRAPES, 9],
-  [SYMBOLS.WATERMELON, 9],
-  [SYMBOLS.BELL, 7],
-  [SYMBOLS.SEVEN, 4],
+  [SYMBOLS.CHERRY, 40],
+  [SYMBOLS.ORANGE, 38],
+  [SYMBOLS.PINEAPPLE, 36],
+  [SYMBOLS.PLUM, 36],
+  [SYMBOLS.BANANA, 42],
+  [SYMBOLS.GRAPES, 7],
+  [SYMBOLS.WATERMELON, 7],
+  [SYMBOLS.BELL, 5],
+  [SYMBOLS.SEVEN, 3],
 ];
 
 function stripForReel(reelIndex, mode) {

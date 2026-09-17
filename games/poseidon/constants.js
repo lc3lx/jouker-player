@@ -33,9 +33,15 @@ const FREE_SPINS_BOUGHT = 10;
 const RETRIGGER_AWARD = 5;
 
 /** Buy bonus: 10 free spins, cost in bet multiples (EV-matched by sim). */
-const BUY_BONUS_COST = 30;
+/**
+ * Bonus prices are derived from the measured average return of a round, so a
+ * purchase sits at the same RTP as an ordinary spin. Re-derive both with
+ * `node tool/atlantisRtp.js` after any change to the paytable, the symbol
+ * weights, the plaque rate, or MIN_MATCH.
+ */
+const BUY_BONUS_COST = 25;
 /** Super buy bonus — 3× standard cost (UI tier). */
-const SUPER_BUY_BONUS_COST = 90;
+const SUPER_BUY_BONUS_COST = 129;
 
 const SYMBOLS = Object.freeze({
   // low pays (royals — all pay the same)
@@ -135,16 +141,18 @@ const PAYING_SYMBOLS = Object.freeze([
 
 /**
  * Anywhere-pays paytable in bet multiples.
- * Bands: 7–9 matches / 10–11 matches / 12+ matches.
- * Ranking: crown (max 5×) > fish > pearl > starfish > coral > letters (min 1×).
+ * Bands: 8–9 matches / 10–11 matches / 12+ matches.
+ * Ranking: crown > fish > pearl > starfish > coral > letters.
+ * Re-derive every band with `node tool/atlantisRtp.js` after any rule change —
+ * raising MIN_MATCH from 7 to 8 cut the old values' return by more than half.
  */
-const LETTER_PAYS = Object.freeze([1.0, 1.15, 1.5]);
+const LETTER_PAYS = Object.freeze([2.12, 2.45, 3.2]);
 const PAYTABLE = Object.freeze({
-  [SYMBOLS.CROWN]: [2.0, 3.5, 5.0],
-  [SYMBOLS.FISH]: [1.7, 2.8, 4.2],
-  [SYMBOLS.PEARL]: [1.5, 2.3, 3.5],
-  [SYMBOLS.STARFISH]: [1.3, 1.85, 2.8],
-  [SYMBOLS.CORAL]: [1.15, 1.5, 2.2],
+  [SYMBOLS.CROWN]: [4.25, 7.4, 10.5],
+  [SYMBOLS.FISH]: [3.6, 5.9, 8.85],
+  [SYMBOLS.PEARL]: [3.2, 4.9, 7.4],
+  [SYMBOLS.STARFISH]: [2.73, 3.9, 5.9],
+  [SYMBOLS.CORAL]: [2.45, 3.2, 4.6],
   [SYMBOLS.A]: LETTER_PAYS,
   [SYMBOLS.E]: LETTER_PAYS,
   [SYMBOLS.N]: LETTER_PAYS,
@@ -172,7 +180,7 @@ const BASE_WEIGHTS = Object.freeze([
   [SYMBOLS.FISH, 7.5],
   [SYMBOLS.CROWN, 5.5],
   [SYMBOLS.PEARL, 5],
-  ["mult", 0.22],
+  ["mult", 0.44],
   ["jackpot", 0.25],
 ]);
 
@@ -199,7 +207,7 @@ const WIN_TIERS = Object.freeze([
   ["super", 25],
 ]);
 
-const MIN_MATCH = 7;
+const MIN_MATCH = 8;
 
 function isMultiplier(cell) {
   return typeof cell === "string" && cell.charCodeAt(0) === 120 /* 'x' */;
