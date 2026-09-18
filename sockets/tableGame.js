@@ -495,14 +495,28 @@ class PokerTable {
     this.tableStatusOverride = null;
     this.pacingBusy = false;
 
+    // A human who sits down gets this long for a real opponent to show up
+    // before any bot is offered.
     this.botFillDelayMs = Math.max(
       3000,
-      toSafeInt(process.env.POKER_BOT_FILL_DELAY_MS, 8000)
+      toSafeInt(process.env.POKER_BOT_FILL_DELAY_MS, 15000)
     );
     this.botFillTarget = clampInt(
       process.env.POKER_BOT_FILL_TARGET || POKER_CAPACITY,
       2,
       Math.max(2, this.capacity)
+    );
+    /**
+     * Hard ceiling on bots at this table, whatever the seat target works out to.
+     *
+     * Without it a nine-max table filled every empty chair, so a single human
+     * sat down to eight bots and there was nowhere left for a real player to
+     * join. The remaining chairs stay open.
+     */
+    this.maxBotsPerTable = clampInt(
+      process.env.POKER_BOT_MAX_PER_TABLE || 4,
+      0,
+      Math.max(0, this.capacity - 1)
     );
     const defaultBotBuyIn = Math.max(this.minBuyIn, this.bigBlind * 120);
     this.botBuyIn = clampInt(
@@ -1542,6 +1556,7 @@ class PokerTable {
 
     // At least 1 human is seated (even with 0 chips) — fill bots and start.
     if (this.seatedHumanCount() >= 1) {
+      const canFillWithBots = this.botsEnabled && this.botHeadroom() > 0;
       // #region agent log
       _agentDbg("E", "tableGame.js:onWaitForPlayersWindowEnd", "fill bots + start", {
         tableId: String(this.tableId),
@@ -1553,6 +1568,15 @@ class PokerTable {
       this.addBotsForMissingSeats();
       await this.broadcastState();
       await this.startIfReady({ refreshFromDb: false, allowBotFill: true });
+
+      // A humans-only table has nothing to fill its seats with, so the window
+      // ending changes nothing: re-arm it so the table keeps reporting
+      // "waiting for players" instead of showing a finished countdown with no
+      // timer behind it, and keeps waiting until a real opponent sits down.
+      if (!this.running && !canFillWithBots) {
+        this.armWaitForPlayersWindow();
+        await this.broadcastState();
+      }
       return;
     }
 
@@ -1564,11 +1588,17 @@ class PokerTable {
       seatsLen: Array.isArray(this.seats) ? this.seats.length : -1,
     });
     // #endregion
+    this.armWaitForPlayersWindow();
+    await this.broadcastState();
+  }
+
+  /** (Re)start the solo wait countdown. */
+  armWaitForPlayersWindow() {
+    this.clearWaitForPlayersTimer();
     this.waitForPlayersDeadline = Date.now() + POKER_TIMINGS.WAIT_FOR_PLAYERS_MS;
     this.waitForPlayersTimer = setTimeout(() => {
       void this.onWaitForPlayersWindowEnd();
     }, POKER_TIMINGS.WAIT_FOR_PLAYERS_MS);
-    await this.broadcastState();
   }
 
   clearActionScheduling() {
@@ -1979,7 +2009,12 @@ class PokerTable {
       const target = Math.min(this.capacity, Math.max(2, this.botFillTarget));
       const missing = Math.max(0, target - this.activeSeatCount());
       const freeSlots = Math.max(0, this.capacity - this.seats.length);
-      const toRestore = Math.min(missing, freeSlots, botsToRestore.length);
+      const toRestore = Math.min(
+        missing,
+        freeSlots,
+        botsToRestore.length,
+        this.botHeadroom(),
+      );
       if (toRestore > 0) {
         this.seats.push(...botsToRestore.slice(0, toRestore));
       }
@@ -2090,6 +2125,16 @@ class PokerTable {
   /** Humans still sitting, including a just-busted stack waiting for auto-rebuy. */
   seatedHumanCount() {
     return this.seats.filter((s) => isHumanSeat(s)).length;
+  }
+
+  /** Bots currently holding a seat — the ceiling [maxBotsPerTable] applies to. */
+  seatedBotCount() {
+    return this.seats.filter((s) => s && s.isBot).length;
+  }
+
+  /** How many more bots this table may take before hitting its ceiling. */
+  botHeadroom() {
+    return Math.max(0, this.maxBotsPerTable - this.seatedBotCount());
   }
 
   eligibleHumanCount() {
@@ -2652,7 +2697,8 @@ class PokerTable {
     const active = this.activeSeatCount();
     const missing = Math.max(0, target - active);
     const freeSlots = Math.max(0, this.capacity - this.seats.length);
-    const toAdd = Math.min(missing, freeSlots);
+    // Leave the rest of the chairs open for real players.
+    const toAdd = Math.min(missing, freeSlots, this.botHeadroom());
     if (toAdd === 0) return 0;
 
     for (let i = 0; i < toAdd; i++) {
@@ -2855,6 +2901,11 @@ class PokerTable {
       this.clearBotFillTimer();
       return;
     }
+    // At the ceiling the timer would fire forever and add nothing.
+    if (this.botHeadroom() <= 0) {
+      this.clearBotFillTimer();
+      return;
+    }
     if (this.botFillTimer) return;
 
     this.botFillDeadline = Date.now() + this.botFillDelayMs;
@@ -2864,6 +2915,7 @@ class PokerTable {
       if (!this.botsEnabled || !this.running || this.starting) return;
       if (this.seatedHumanCount() < 1) return;
       if (this.activeSeatCount() >= this.botFillTarget) return;
+      if (this.botHeadroom() <= 0) return;
 
       this.addBotsForMissingSeats();
       await this.broadcastState();

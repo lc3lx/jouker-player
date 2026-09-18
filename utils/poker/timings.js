@@ -23,8 +23,12 @@ const POKER_TIMINGS = {
   RECONNECT_WINDOW_MS: envMs("POKER_RECONNECT_WINDOW_MS", 90000),
   /** Seat vacate grace period before a bot replaces the leaving player. */
   VACATE_WINDOW_MS: envMs("POKER_VACATE_WINDOW_MS", 30000),
-  /** Lobby wait window while seated alone before bot fill + start. */
-  WAIT_FOR_PLAYERS_MS: envMs("POKER_WAIT_FOR_PLAYERS_MS", 8000),
+  /**
+   * How long a lone seated human waits for a real opponent before the table
+   * fills with bots and starts. On a humans-only table nothing fills the seats,
+   * so the window simply re-arms and the table stays in "waiting".
+   */
+  WAIT_FOR_PLAYERS_MS: envMs("POKER_WAIT_FOR_PLAYERS_MS", 15000),
   /**
    * How long an empty-table reset waits for an in-flight hand before deferring.
    * Deliberately short: the reset is awaited inline on the leaving player's

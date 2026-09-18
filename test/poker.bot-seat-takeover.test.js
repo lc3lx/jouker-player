@@ -49,8 +49,16 @@ function mkGame(humanCount = 1) {
   return g;
 }
 
-/** Fill the table with bots exactly the way a live solo-human table does. */
+/**
+ * Pack every remaining chair with bots.
+ *
+ * Live tables cap themselves at [maxBotsPerTable] so real players always have
+ * somewhere to sit, but the seat-takeover paths below are about what happens
+ * once a table *is* full — which still occurs with enough humans plus bots.
+ * Lifting the ceiling here builds that state directly.
+ */
 function fillWithBots(game) {
+  game.maxBotsPerTable = Math.max(0, game.capacity - 1);
   game.addBotsForMissingSeats();
   return game;
 }
@@ -68,10 +76,32 @@ function dealHand(game) {
   game.handStartTotal = game.seats.reduce((sum, s) => sum + s.chips, 0);
 }
 
-test("one human + bot fill occupies every chair", () => {
-  const g = fillWithBots(mkGame(1));
-  assert.equal(g.seats.length, POKER_CAPACITY);
-  assert.equal(g.seats.filter((s) => s.isBot).length, POKER_CAPACITY - 1);
+test("bot fill stops at the ceiling, leaving chairs for real players", () => {
+  const g = mkGame(1);
+  g.addBotsForMissingSeats();
+
+  const bots = g.seats.filter((s) => s.isBot).length;
+  assert.equal(bots, g.maxBotsPerTable, "fills exactly up to the ceiling");
+  assert.ok(bots < POKER_CAPACITY - 1, "and never every chair");
+  assert.ok(
+    g.seats.length < POKER_CAPACITY,
+    "a human arriving later still finds an empty chair",
+  );
+});
+
+test("a table already at the bot ceiling takes no more bots", () => {
+  const g = mkGame(1);
+  g.addBotsForMissingSeats();
+  const before = g.seats.length;
+  assert.equal(g.addBotsForMissingSeats(), 0);
+  assert.equal(g.seats.length, before);
+});
+
+test("a humans-only table never seats a bot", () => {
+  const g = mkGame(1);
+  g.botsEnabled = false;
+  assert.equal(g.addBotsForMissingSeats(), 0);
+  assert.equal(g.seats.filter((s) => s.isBot).length, 0);
 });
 
 test("a second human takes a bot chair on a bot-full idle table", () => {
