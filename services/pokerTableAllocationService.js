@@ -293,13 +293,6 @@ async function joinPokerWithRetry({
   let lastError = null;
   const excludeIds = [];
 
-  // A stake has both a nine-max and a five-max room. Overflow has to land on a
-  // table of the same size and bot policy as the one the player actually chose,
-  // so read both off it before the first attempt.
-  const origin = await Table.findById(targetId).select("capacity settings").lean();
-  const originCapacity = normalizeCapacity(origin?.capacity ?? POKER_CAPACITY);
-  const originBotsEnabled = origin?.settings?.botsEnabled !== false;
-
   for (let attempt = 0; attempt < maxAttempts; attempt += 1) {
     try {
       let result = { tableId: targetId };
@@ -334,11 +327,18 @@ async function joinPokerWithRetry({
         err.message === "TABLE_NOT_FOUND";
       if (retryable && !strictTable && attempt < maxAttempts - 1) {
         if (err.message === "TABLE_FULL") excludeIds.push(targetId);
+        // A stake runs both a nine-max and a five-max room, so the replacement
+        // must match the size and bot policy of the table the player chose —
+        // otherwise a full five-max spills into the nine-max room next door.
+        // Read that off the origin only here: the happy path never needs it.
+        const origin = await Table.findById(targetId)
+          .select("capacity settings")
+          .lean();
         const next = await withPokerAllocationLock(tier, buyIn, () =>
           findAvailablePokerTable(tier, buyIn, null, {
             excludeIds,
-            capacity: originCapacity,
-            botsEnabled: originBotsEnabled,
+            capacity: normalizeCapacity(origin?.capacity ?? POKER_CAPACITY),
+            botsEnabled: origin?.settings?.botsEnabled !== false,
           })
         );
         targetId = String(next._id);
