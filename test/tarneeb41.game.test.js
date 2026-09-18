@@ -26,8 +26,8 @@ function withGame(fn) {
   }
 }
 
-test("needsInitialDeal returns true only in waiting state", () => {
-  withGame((game) => {
+test("needsInitialDeal returns true only in waiting state", async () => {
+  withGame(async (game) => {
     assert.equal(game.needsInitialDeal(), true);
     game.state = "bidding_syrian";
     assert.equal(game.needsInitialDeal(), false);
@@ -40,19 +40,19 @@ test("needsInitialDeal returns true only in waiting state", () => {
   });
 });
 
-test("join guard — needsInitialDeal false after game started", () => {
-  withGame((game) => {
+test("join guard — needsInitialDeal false after game started", async () => {
+  withGame(async (game) => {
     assert.equal(game.needsInitialDeal(), true);
-    game.startGame();
+    await game.startGame();
     assert.equal(game.needsInitialDeal(), false);
     assert.equal(game.state, "bidding_syrian");
     assert.ok(game.hands[0].length > 0);
   });
 });
 
-test("redeal when declared sum is below minimum", () => {
-  withGame((game) => {
-    game.startGame();
+test("redeal when declared sum is below minimum", async () => {
+  withGame(async (game) => {
+    await game.startGame();
     game.currentPlayerIndex = 0;
     let result;
     for (let i = 0; i < 4; i += 1) {
@@ -66,9 +66,9 @@ test("redeal when declared sum is below minimum", () => {
   });
 });
 
-test("move deduplication rejects duplicate moveId", () => {
-  withGame((game) => {
-    game.startGame();
+test("move deduplication rejects duplicate moveId", async () => {
+  withGame(async (game) => {
+    await game.startGame();
     const idx = game.currentPlayerIndex;
     const payload = { value: 5, moveId: "move-abc" };
     const first = game.applyMove(idx, "tarneeb41_declare", payload);
@@ -80,9 +80,9 @@ test("move deduplication rejects duplicate moveId", () => {
   });
 });
 
-test("turn timeout auto-pass during bidding", () => {
-  withGame((game) => {
-    game.startGame();
+test("turn timeout auto-pass during bidding", async () => {
+  withGame(async (game) => {
+    await game.startGame();
     game.clearTurnTimer();
     const idx = game.currentPlayerIndex;
     assert.equal(game.players[idx].isBot, false);
@@ -92,8 +92,8 @@ test("turn timeout auto-pass during bidding", () => {
   });
 });
 
-test("turn timeout auto-plays lowest valid card during playing", () => {
-  withGame((game) => {
+test("turn timeout auto-plays lowest valid card during playing", async () => {
+  withGame(async (game) => {
     game.state = "playing";
     game.currentPlayerIndex = 0;
     game.hands[0] = [
@@ -109,9 +109,9 @@ test("turn timeout auto-plays lowest valid card during playing", () => {
   });
 });
 
-test("syncLobbyFromTable refreshes sockets without rebuilding roster in progress", () => {
-  withGame((game) => {
-    game.startGame();
+test("syncLobbyFromTable refreshes sockets without rebuilding roster in progress", async () => {
+  withGame(async (game) => {
+    await game.startGame();
     const rosterBefore = game.players.map((p) => p.userId);
     game.syncLobbyFromTable(
       {
@@ -130,8 +130,8 @@ test("syncLobbyFromTable refreshes sockets without rebuilding roster in progress
   });
 });
 
-test("getGameState includes turnTimer when active", () => {
-  withGame((game) => {
+test("getGameState includes turnTimer when active", async () => {
+  withGame(async (game) => {
     game.turnTimerPhase = "bidding";
     game.turnTimerEndsAt = Date.now() + 25000;
     const state = game.getGameState(0);
@@ -141,9 +141,9 @@ test("getGameState includes turnTimer when active", () => {
   });
 });
 
-test("turn timer events fire via setGameEventListener", () => {
-  withGame((game) => {
-    game.startGame();
+test("turn timer events fire via setGameEventListener", async () => {
+  withGame(async (game) => {
+    await game.startGame();
     game.clearTurnTimer();
     const events = [];
     game.setGameEventListener((event, payload) => {
@@ -155,9 +155,9 @@ test("turn timer events fire via setGameEventListener", () => {
   });
 });
 
-test("game_end clears bot and turn timers", () => {
-  withGame((game) => {
-    game.startGame();
+test("game_end clears bot and turn timers", async () => {
+  withGame(async (game) => {
+    await game.startGame();
     game.playerScores = [41, 10, 5, 8];
     game.endRound();
     assert.equal(game.state, "game_end");

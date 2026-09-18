@@ -58,16 +58,41 @@ test("shouldMisplay: expert never, easy sometimes", () => {
 
 // ── REGRESSION: default (no opts) card-bot output is unchanged ────────────────
 
-test("TrixBot.botChooseCard default behavior is unchanged (no opts)", () => {
-  // Follow suit → still lowest card.
-  const gs = { currentGameType: "Diamonds", leadingSuit: "Hearts", tableCards: [{}] };
+test("TrixBot.botChooseCard is deterministic with no opts", () => {
+  // The bot no longer dumps its lowest card: a ten is already down, so the
+  // deuce would win nothing while the ace hands over the whole trick. The
+  // right follow is the biggest card that still loses — here the nine.
+  const gs = {
+    currentGameType: "Diamonds",
+    leadingSuit: "Hearts",
+    players: [{ hand: [], takenCards: [] }],
+    roundPlayedCards: [],
+    tableCards: [{ playerIndex: 1, card: { suit: "Hearts", rank: "10", value: 10 } }],
+  };
+  const valid = [
+    { suit: "Hearts", rank: "2", value: 2 },
+    { suit: "Hearts", rank: "9", value: 9 },
+    { suit: "Hearts", rank: "A", value: 14 },
+  ];
+  for (let i = 0; i < 20; i++) {
+    assert.equal(
+      TrixBot.botChooseCard(gs, 0, valid).value,
+      9,
+      "the same play every time — no randomness without opts",
+    );
+  }
+});
+
+test("TrixBot survives a game state missing its roster", () => {
+  // A decision helper must degrade, never throw: a thrown error here would
+  // take the table's bot loop down mid-hand.
+  const gs = { currentGameType: "Tricks", leadingSuit: "Hearts", tableCards: [{}] };
   const valid = [
     { suit: "Hearts", rank: "2", value: 2 },
     { suit: "Hearts", rank: "A", value: 14 },
   ];
-  for (let i = 0; i < 20; i++) {
-    assert.equal(TrixBot.botChooseCard(gs, 0, valid).value, 2, "lowest follow card, deterministically");
-  }
+  const pick = TrixBot.botChooseCard(gs, 0, valid);
+  assert.ok(valid.includes(pick), "still a legal card");
 });
 
 test("TarneebBot default bid + card are unchanged (no opts)", () => {
@@ -95,13 +120,27 @@ test("expert opts still play optimally (mistakeRate 0)", () => {
   }
 });
 
-test("low-skill opts sometimes deviate from the optimal card", () => {
+test("low-skill opts still deviate, but at an advanced-play rate", () => {
+  // The pool's skill tiers were written for poker, where an `easy` bot
+  // misplaying 35% of the time reads as a loose player. At a trick-taking
+  // table it reads as someone who does not know the game, so the card bots
+  // hold every tier under cardBotMistakeCeiling(). The personality variance
+  // survives; the card-dumping does not.
   const opts = { personality: "beginner", skill: "easy", tuning: behavior.tuningFor("beginner", "easy") };
   const rules = { getValidCards: (h) => h };
+  const trials = 4000;
   let deviations = 0;
-  for (let i = 0; i < 300; i++) {
+  for (let i = 0; i < trials; i++) {
     const c = TarneebBot.pickAutoPlayCard([{ rank: 5 }, { rank: 2 }, { rank: 9 }], null, rules, opts);
     if (c.rank !== 2) deviations++;
   }
-  assert.ok(deviations > 20, "easy bots occasionally play a non-optimal card");
+
+  const ceiling = behavior.cardBotMistakeCeiling();
+  assert.ok(deviations > 0, "an easy bot is not flawless");
+  // A random legal card is the optimal one a third of the time, so the
+  // observed deviation rate sits below the raw mistake rate.
+  assert.ok(
+    deviations / trials <= ceiling * 1.5,
+    `deviation rate ${(deviations / trials).toFixed(3)} must stay under the ${ceiling} ceiling`,
+  );
 });

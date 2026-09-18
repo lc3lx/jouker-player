@@ -85,6 +85,37 @@ function shouldMisplay(skill, tuning = null) {
   return rand01() < rate;
 }
 
+/**
+ * Mistake rate ceiling for the CARD games (Trix, Tarneeb 41).
+ *
+ * The pool's skill tiers were written for poker, where an `easy` bot misplaying
+ * a third of the time reads as a loose player. At a trick-taking table the same
+ * rate reads as someone who does not know the game — which is exactly the
+ * complaint these bots drew. Trix and Tarneeb now run at an advanced level, so
+ * their slips are rare, and (in the bots themselves) are the second-best line
+ * rather than a random legal card.
+ *
+ * Tunable with CARD_BOT_MAX_MISTAKE_RATE for balancing; 0 makes them flawless.
+ */
+function cardBotMistakeCeiling() {
+  const raw = parseFloat(process.env.CARD_BOT_MAX_MISTAKE_RATE);
+  if (Number.isFinite(raw) && raw >= 0 && raw <= 1) return raw;
+  return 0.05;
+}
+
+/**
+ * The card-game counterpart of shouldMisplay: the same personality/skill input,
+ * held under the advanced-play ceiling above.
+ */
+function shouldMisplayCardGame(skill, tuning = null) {
+  const rate = (tuning && tuning.mistakeRate != null
+    ? tuning.mistakeRate
+    : (SKILL_TUNING[skill]?.mistakeRate ?? 0));
+  const capped = Math.min(rate, cardBotMistakeCeiling());
+  if (capped <= 0) return false;
+  return rand01() < capped;
+}
+
 /** Social event probability (chat/emoji), personality-scaled and clamped. */
 function socialChance(kind, tuning) {
   const base = kind === "emoji" ? _settings.emojiFrequency : _settings.chatFrequency;
@@ -103,6 +134,8 @@ module.exports = {
   thinkDelay,
   pokerThreshold,
   shouldMisplay,
+  shouldMisplayCardGame,
+  cardBotMistakeCeiling,
   socialChance,
   roll,
   rand01,

@@ -60,10 +60,31 @@ function parseSelectTimeoutSeconds() {
   return Math.min(n, 120);
 }
 
+/**
+ * Partnership trix (تركس شركة) differs from the individual game (اليهودية) in
+ * exactly one place: facing players are partners and their scores are summed.
+ * The five contracts, their penalties, the kingdom rotation and the Trix ladder
+ * are identical — so both modes share this engine, and only the unit that wins
+ * at the end changes.
+ */
+const TRIX_MODES = new Set(['solo', 'partnership']);
+
+function normalizeTrixMode(mode) {
+  const m = String(mode || '').toLowerCase();
+  return TRIX_MODES.has(m) ? m : 'solo';
+}
+
+/** Seats 0+2 form team 0, seats 1+3 team 1. */
+function teamOfSeat(seatIndex) {
+  return seatIndex % 2;
+}
+
 class TrixGame extends BaseGameEngine {
   constructor(roomId, options = {}) {
     super(roomId, 'trix', options);
     this.maxPlayers = 4;
+    /** @type {'solo'|'partnership'} */
+    this.gameMode = normalizeTrixMode(options.gameMode);
     this.gameState = null;
     this._fsm = new StateMachine(this.state, TRIX_TRANSITIONS, {
       onIllegal: (from, to) => {
@@ -742,7 +763,18 @@ class TrixGame extends BaseGameEngine {
           const botOpts = lp && lp.isBot && lp.botTuning
             ? { personality: lp.botPersonality, skill: lp.botSkill, tuning: lp.botTuning }
             : null;
-          const card = BotAI.botChooseCard(this.gameState, turnIndex, valid, botOpts);
+          // On a شركة table the facing seat is a partner, so a trick it is
+          // already winning is not worth overtaking.
+          const botCtx = this.isPartnership
+            ? { partnerIndex: (turnIndex + 2) % 4 }
+            : null;
+          const card = BotAI.botChooseCard(
+            this.gameState,
+            turnIndex,
+            valid,
+            botOpts,
+            botCtx,
+          );
           if (card) {
             const result = this.applyMove(turnIndex, 'play_card', {
               card,
@@ -801,6 +833,10 @@ class TrixGame extends BaseGameEngine {
     return {
       state: this.state,
       sessionId: this.sessionId,
+      // "solo" (يهودية) or "partnership" (شركة) — the client pairs facing
+      // seats and shows one combined total per team when partnership.
+      gameMode: this.gameMode,
+      teamScores: this.isPartnership ? this.teamScores() : null,
       // Additive lifecycle envelope (clients drop stale packets by revision).
       stateRevision: this.stateRevision,
       roundId: this.gameState.roundNumber,
@@ -997,22 +1033,62 @@ class TrixGame extends BaseGameEngine {
 
   getRoundResult() {
     return {
+      gameMode: this.gameMode,
       scores: [...this.gameState.scores],
+      teamScores: this.isPartnership ? this.teamScores() : null,
       finishedPlayers: [...this.gameState.finishedPlayers],
     };
   }
 
+  /** Summed scores per team; index 0 is seats 0+2, index 1 is seats 1+3. */
+  teamScores() {
+    const scores = this.gameState?.scores || [];
+    const totals = [0, 0];
+    for (let i = 0; i < 4; i += 1) {
+      const n = Number(scores[i]);
+      totals[teamOfSeat(i)] += Number.isFinite(n) ? n : 0;
+    }
+    return totals;
+  }
+
+  get isPartnership() {
+    return this.gameMode === 'partnership';
+  }
+
   getGameResult() {
+    const scores = [...this.gameState.scores];
+
     let winnerIndex = 0;
     let maxScore = -Infinity;
-    this.gameState.scores.forEach((s, i) => {
+    scores.forEach((s, i) => {
       if (s > maxScore) {
         maxScore = s;
         winnerIndex = i;
       }
     });
-    return { winnerIndex, scores: [...this.gameState.scores] };
+
+    if (!this.isPartnership) {
+      return { gameMode: 'solo', winnerIndex, scores };
+    }
+
+    // Partnership: the pair with the higher combined score takes the deal. A
+    // dead tie leaves winnerTeam null, which settlement reads as "no winner"
+    // and refunds every seat rather than guessing.
+    const totals = this.teamScores();
+    const winnerTeam =
+      totals[0] === totals[1] ? null : totals[0] > totals[1] ? 0 : 1;
+
+    return {
+      gameMode: 'partnership',
+      winnerTeam,
+      teamScores: totals,
+      // Kept so anything reading the solo shape still gets a sane seat.
+      winnerIndex,
+      scores,
+    };
   }
 }
 
 module.exports = TrixGame;
+module.exports.normalizeTrixMode = normalizeTrixMode;
+module.exports.teamOfSeat = teamOfSeat;

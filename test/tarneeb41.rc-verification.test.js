@@ -110,12 +110,12 @@ function countActiveHandles() {
 
 // --- RC scenarios ---
 
-test("RC-1: four human players complete multi-round game to game_end", () => {
+test("RC-1: four human players complete multi-round game to game_end", async () => {
   const game = mkGame({ allHuman: true });
   try {
     game.clearBotTimer();
     assert.equal(game.players.every((p) => !p.isBot), true);
-    game.startGame();
+    await game.startGame();
     assert.equal(game.state, "bidding_syrian");
     const { guard } = playUntilGameEnd(game, 3000);
     assert.ok(guard > 0);
@@ -133,14 +133,14 @@ function forceStartMixedGame(game) {
   game.startBotTimer();
 }
 
-test("RC-2: mixed human/bot game completes without human stall", () => {
+test("RC-2: mixed human/bot game completes without human stall", async () => {
   const game = mkGame({ allHuman: false });
   try {
     game.clearBotTimer();
     const humans = game.players.filter((p) => !p.isBot);
     assert.equal(humans.length, 2);
     // startGame now accepts mixed human/bot rosters (players.length === 4 is sufficient)
-    assert.equal(game.startGame(), true);
+    assert.equal(await game.startGame(), true);
     assert.equal(game.state, "bidding_syrian");
     playBidding(game);
     if (game.state === "playing") {
@@ -153,7 +153,7 @@ test("RC-2: mixed human/bot game completes without human stall", () => {
   }
 });
 
-test("RC-2b: fillWithBots starts game from 1-human waiting state", () => {
+test("RC-2b: fillWithBots starts game from 1-human waiting state", async () => {
   const game = new Tarneeb41Game("fill_test");
   game.players.push({
     userId: "u0",
@@ -167,7 +167,7 @@ test("RC-2b: fillWithBots starts game from 1-human waiting state", () => {
     game.clearBotTimer();
     assert.equal(game.players.length, 1);
     assert.equal(game.state, "waiting");
-    const started = game.fillWithBots();
+    const started = await game.fillWithBots();
     assert.equal(started, true);
     assert.equal(game.players.length, 4);
     assert.equal(game.players.filter((p) => p.isBot).length, 3);
@@ -177,11 +177,11 @@ test("RC-2b: fillWithBots starts game from 1-human waiting state", () => {
   }
 });
 
-test("RC-3: reconnect during bidding preserves hand and does not redeal", () => {
+test("RC-3: reconnect during bidding preserves hand and does not redeal", async () => {
   const game = mkGame({ allHuman: true, tableId: "rc_bid" });
   try {
     game.clearBotTimer();
-    game.startGame();
+    await game.startGame();
     const handBefore = JSON.stringify(game.hands[0]);
     const turnBefore = game.currentPlayerIndex;
     const scoresBefore = [...game.playerScores];
@@ -203,11 +203,11 @@ test("RC-3: reconnect during bidding preserves hand and does not redeal", () => 
   }
 });
 
-test("RC-4: reconnect during playing restores turn and trick state", () => {
+test("RC-4: reconnect during playing restores turn and trick state", async () => {
   const game = mkGame({ allHuman: true, tableId: "rc_play" });
   try {
     game.clearBotTimer();
-    game.startGame();
+    await game.startGame();
     playBidding(game);
     assert.equal(game.state, "playing");
     const handLen = game.hands[0].length;
@@ -225,11 +225,11 @@ test("RC-4: reconnect during playing restores turn and trick state", () => {
   }
 });
 
-test("RC-5: reconnect during settlement/game_end restores scores without restart", () => {
+test("RC-5: reconnect during settlement/game_end restores scores without restart", async () => {
   const game = mkGame({ allHuman: true, tableId: "rc_settle" });
   try {
     game.clearBotTimer();
-    game.startGame();
+    await game.startGame();
     game.playerScores = [41, 10, 5, 8];
     game.endRound();
     assert.equal(game.state, "game_end");
@@ -249,11 +249,11 @@ test("RC-5: reconnect during settlement/game_end restores scores without restart
   }
 });
 
-test("RC-5b: reconnect replays last settlement payload", () => {
+test("RC-5b: reconnect replays last settlement payload", async () => {
   const game = mkGame({ allHuman: true, tableId: "rc_settle_replay" });
   try {
     game.clearBotTimer();
-    game.startGame();
+    await game.startGame();
     game.playerScores = [41, 10, 5, 8];
     game.endRound();
     game._lastSettlementPayload = {
@@ -270,11 +270,11 @@ test("RC-5b: reconnect replays last settlement payload", () => {
   }
 });
 
-test("RC-4b: reconnect during trick resolving includes trick and timer", () => {
+test("RC-4b: reconnect during trick resolving includes trick and timer", async () => {
   const game = mkGame({ allHuman: true, tableId: "rc_trick" });
   try {
     game.clearBotTimer();
-    game.startGame();
+    await game.startGame();
     playBidding(game);
     assert.equal(game.state, "playing");
     while (game.trick.length < 4 && game.state === "playing") {
@@ -298,11 +298,11 @@ test("RC-4b: reconnect during trick resolving includes trick and timer", () => {
   }
 });
 
-test("RC-6: redeal when sum of bids below minimum", () => {
+test("RC-6: redeal when sum of bids below minimum", async () => {
   const game = mkGame({ allHuman: true });
   try {
     game.clearBotTimer();
-    game.startGame();
+    await game.startGame();
     const events = [];
     game.setAfterMoveListener((r) => events.push(r));
     for (let i = 0; i < 4; i += 1) {
@@ -317,11 +317,11 @@ test("RC-6: redeal when sum of bids below minimum", () => {
   }
 });
 
-test("RC-7: game finish produces valid game result", () => {
+test("RC-7: game finish produces valid game result", async () => {
   const game = mkGame({ allHuman: true });
   try {
     game.clearBotTimer();
-    game.startGame();
+    await game.startGame();
     game.playerScores = [41, 10, 5, 8];
     game.endRound();
     assert.equal(game.state, "game_end");
@@ -334,7 +334,7 @@ test("RC-7: game finish produces valid game result", () => {
   }
 });
 
-test("RC-8: settlement plan generated and idempotent for game finish", () => {
+test("RC-8: settlement plan generated and idempotent for game finish", async () => {
   const participants = [
     { userId: "u0", seatIndex: 0, buyIn: 1000, isBot: false },
     { userId: "u1", seatIndex: 1, buyIn: 1000, isBot: false },
@@ -361,7 +361,7 @@ test("RC-8: settlement plan generated and idempotent for game finish", () => {
   assert.equal(recon.balanced, true);
 });
 
-test("RC-9: wallet reconciliation — human net delta balances", () => {
+test("RC-9: wallet reconciliation — human net delta balances", async () => {
   const participants = Array.from({ length: 4 }, (_, i) => ({
     userId: `u${i}`,
     seatIndex: i,
@@ -382,7 +382,7 @@ test("RC-9: wallet reconciliation — human net delta balances", () => {
   }
 });
 
-test("RC-10: house wallet reconciliation with bots", () => {
+test("RC-10: house wallet reconciliation with bots", async () => {
   const botWin = [
     { userId: null, seatIndex: 0, buyIn: 1000, isBot: true },
     { userId: "u1", seatIndex: 1, buyIn: 1000, isBot: false },
@@ -413,7 +413,7 @@ test("RC-10: house wallet reconciliation with bots", () => {
   assert.ok(planHuman.houseNetDelta < 0);
 });
 
-test("RC-11: socket room cleanup — disconnect keeps mapping, leave clears it", () => {
+test("RC-11: socket room cleanup — disconnect keeps mapping, leave clears it", async () => {
   const tableId = `rc_room_${Date.now()}`;
   const game = roomManager.getOrCreateTarneeb41Game(tableId);
   try {
@@ -439,7 +439,7 @@ test("RC-11: socket room cleanup — disconnect keeps mapping, leave clears it",
   }
 });
 
-test("RC-11b: finished game evicted after settlement and all humans leave", () => {
+test("RC-11b: finished game evicted after settlement and all humans leave", async () => {
   const tableId = `rc_evict_${Date.now()}`;
   const game = roomManager.getOrCreateTarneeb41Game(tableId);
   try {
@@ -462,22 +462,22 @@ function cleanupTable(tableId) {
   roomManager.clearTarneeb41Game(tableId);
 }
 
-test("RC-12: memory leak — destroy clears timers after many game lifecycles", () => {
+test("RC-12: memory leak — destroy clears timers after many game lifecycles", async () => {
   const before = countActiveHandles();
   for (let i = 0; i < 200; i += 1) {
     const game = mkGame({ allHuman: true, tableId: `mem_${i}` });
-    game.startGame();
+    await game.startGame();
     game.destroy();
   }
   const after = countActiveHandles();
   assert.ok(after <= before + 2, `timer handles grew: before=${before} after=${after}`);
 });
 
-test("RC-13: duplicate event detection — moveId dedup and single afterMove per action", () => {
+test("RC-13: duplicate event detection — moveId dedup and single afterMove per action", async () => {
   const game = mkGame({ allHuman: true });
   try {
     game.clearBotTimer();
-    game.startGame();
+    await game.startGame();
     let afterMoveCount = 0;
     game.setAfterMoveListener(() => {
       afterMoveCount += 1;

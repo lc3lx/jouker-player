@@ -235,8 +235,8 @@ async function abortCardTableRestartZombie({ gameType, table, game, socket }) {
   return true;
 }
 
-function getOrCreateTrixGameWired(nsp, tableId) {
-  const game = roomManager.getOrCreateTrixGame(tableId);
+function getOrCreateTrixGameWired(nsp, tableId, gameMode) {
+  const game = roomManager.getOrCreateTrixGame(tableId, { gameMode });
   wireTrixGame(nsp, tableId, game);
   return game;
 }
@@ -276,10 +276,21 @@ async function handleTrixAfterMove(nsp, ctx, result) {
       const gameResult = game.getGameResult ? game.getGameResult() : null;
       if (gameResult) {
         emitToTrixHumans(nsp, tableId, "game_finished", gameResult);
-        if (Array.isArray(game.players) && gameResult.winnerIndex != null) {
-          const winner = game.players[gameResult.winnerIndex];
-          if (winner && !winner.isBot && winner.userId) {
-            trackTrixWin(winner.userId, { tableId: ctx.tableId });
+        // Partnership (شركة): both partners won, so both get the stat.
+        const winningSeats =
+          gameResult.gameMode === "partnership"
+            ? gameResult.winnerTeam === 0 || gameResult.winnerTeam === 1
+              ? [gameResult.winnerTeam, gameResult.winnerTeam + 2]
+              : []
+            : gameResult.winnerIndex != null
+              ? [gameResult.winnerIndex]
+              : [];
+        if (Array.isArray(game.players)) {
+          for (const seat of winningSeats) {
+            const winner = game.players[seat];
+            if (winner && !winner.isBot && winner.userId) {
+              trackTrixWin(winner.userId, { tableId: ctx.tableId });
+            }
           }
         }
         emitTablesUpdated({ gameType: "trix", reason: "game_end", tableId: String(tableId) });
@@ -675,7 +686,7 @@ function registerGameHandlers(nsp, jwtVerify) {
         roomManager.setTrixUserSocket(String(userId), socket.id);
         roomManager.setUserTrixTable(String(userId), String(table._id));
         await socketPresenceService.registerSocket(table._id, userId, socket.id);
-        game = getOrCreateTrixGameWired(nsp, table._id);
+        game = getOrCreateTrixGameWired(nsp, table._id, table.gameMode);
 
         if (
           await abortCardTableRestartZombie({
@@ -709,7 +720,7 @@ function registerGameHandlers(nsp, jwtVerify) {
           } catch (_) {}
           // #endregion
           await abandonTrixTableIfNoHumans(table._id);
-          game = getOrCreateTrixGameWired(nsp, table._id);
+          game = getOrCreateTrixGameWired(nsp, table._id, table.gameMode);
         }
 
         const liveHuman = game.players.find(

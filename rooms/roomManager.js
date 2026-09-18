@@ -266,14 +266,24 @@ class RoomManager {
     this.trixUserSocket.delete(String(userId));
   }
 
-  getOrCreateTrixGame(mongoTableId) {
+  /**
+   * @param {string} mongoTableId
+   * @param {{ gameMode?: "solo"|"partnership" }} [opts] the table's rule
+   *   variant. A live engine keeps the mode it was built with; the table row is
+   *   the authority, so a mismatch (only possible if a table row were edited
+   *   under a running game) is corrected here rather than left to drift.
+   */
+  getOrCreateTrixGame(mongoTableId, opts = {}) {
     const key = String(mongoTableId);
+    const TrixGame = require("../games/trix/TrixGame");
+    const gameMode = TrixGame.normalizeTrixMode(opts.gameMode);
     let game = this.trixGamesByTableId.get(key);
     if (!game) {
-      const TrixGame = require("../games/trix/TrixGame");
       const roomId = `trix_table_${key}`;
-      game = new TrixGame(roomId, { mongoTableId: key });
+      game = new TrixGame(roomId, { mongoTableId: key, gameMode });
       this.trixGamesByTableId.set(key, game);
+    } else if (opts.gameMode && game.gameMode !== gameMode && !game.gameState) {
+      game.gameMode = gameMode;
     }
     return game;
   }

@@ -7,6 +7,7 @@
  * (adminForceEndHandTable, TimerManager.clearAll) — no new game logic here.
  */
 const Table = require("../../models/tableModel");
+const { OVERFLOW_TABLE_NUMBER_QUERY } = require("../../utils/staticTableNumbers");
 const { LOBBY_EXCLUDED_STATUSES } = require("../tableLifecycleService");
 const {
   getLiveTableGameForAdmin,
@@ -204,8 +205,12 @@ async function checkAllocatorConsistency() {
     }
   }
 
+  // Not every high number is an overflow table any more: a stake can run more
+  // than one permanent room (poker's five-max, trix's شركة), and those are
+  // seeded from 101 up. Counting them here raised a critical alert on every
+  // sweep for twelve perfectly healthy rooms.
   const mismarked = await Table.countDocuments({
-    tableNumber: { $gt: 4 },
+    tableNumber: OVERFLOW_TABLE_NUMBER_QUERY,
     tableKind: { $nin: ["dynamic", "vip", "tournament"] },
   });
   if (mismarked > 0) {

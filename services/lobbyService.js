@@ -14,7 +14,7 @@ const MAX_LIMIT = 100;
 
 /** Fields included in every lobby row. */
 const LOBBY_SELECT =
-  "gameType tier tableKind tableNumber displayName owner settings " +
+  "gameType tier tableKind tableNumber displayName owner settings gameMode " +
   "smallBlind bigBlind minBuyIn maxBuyIn capacity seats status waitingQueue";
 
 function parsePagination(query) {

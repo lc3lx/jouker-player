@@ -120,6 +120,19 @@ const tableSchema = new mongoose.Schema(
       default: "static",
       index: true,
     },
+    /**
+     * Rule variant within a gameType. Trix runs two: every player scores for
+     * themselves ("solo", the يهودية game), or facing players are partners and
+     * their scores are summed ("partnership", تركس شركة). The contracts,
+     * penalties and kingdom rotation are identical — only the scoring unit
+     * differs — so both share one gameType and one engine.
+     */
+    gameMode: {
+      type: String,
+      enum: ["solo", "partnership"],
+      default: "solo",
+      index: true,
+    },
     /** Lobby display label. "Dynamic #N" for dynamic tables; custom for VIP. */
     displayName: { type: String },
     /** VIP table owner. */

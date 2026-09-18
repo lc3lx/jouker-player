@@ -36,6 +36,20 @@ function resolveWinnerSeatIndices(gameType, gameResult, seatCount = 4) {
   if (!gameResult) return [];
 
   if (gameType === "trix") {
+    // Partnership trix (تركس شركة): facing seats are one unit and their scores
+    // are summed, so the whole pair wins together — the same shape tarneeb41
+    // uses below. A dead tie leaves winnerTeam null and nobody wins, which
+    // makes the plan refund every seat instead of picking a pair at random.
+    if (gameResult.gameMode === "partnership") {
+      const winnerTeam = gameResult.winnerTeam;
+      if (winnerTeam !== 0 && winnerTeam !== 1) return [];
+      const winners = [];
+      for (let i = 0; i < seatCount; i++) {
+        if (i % 2 === winnerTeam) winners.push(i);
+      }
+      return winners;
+    }
+
     const scores = gameResult.scores || [];
     if (!scores.length) {
       if (gameResult.winnerIndex != null) return [gameResult.winnerIndex];

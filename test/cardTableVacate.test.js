@@ -11,15 +11,15 @@ const {
 } = require("../services/cardTableVacateService");
 const roomManager = require("../rooms/roomManager");
 
-test("VACATE_MS defaults to 60 seconds for tarneeb41", () => {
+test("VACATE_MS defaults to 60 seconds for tarneeb41", async () => {
   assert.equal(VACATE_MS, 60000);
 });
 
-test("TRIX_VACATE_MS defaults to 30 seconds", () => {
+test("TRIX_VACATE_MS defaults to 30 seconds", async () => {
   assert.equal(TRIX_VACATE_MS, 30000);
 });
 
-test("Tarneeb41Game.convertHumanToBot preserves seat and enables bot play", () => {
+test("Tarneeb41Game.convertHumanToBot preserves seat and enables bot play", async () => {
   const game = new Tarneeb41Game("r1", { mongoTableId: "t1" });
   game.players.push({
     userId: "u1",
@@ -36,7 +36,7 @@ test("Tarneeb41Game.convertHumanToBot preserves seat and enables bot play", () =
   game.destroy();
 });
 
-test("TrixGame.convertHumanToBot works", () => {
+test("TrixGame.convertHumanToBot works", async () => {
   const game = new TrixGame("r1", { mongoTableId: "t1" });
   game.players.push({
     userId: "u1",
@@ -52,7 +52,7 @@ test("TrixGame.convertHumanToBot works", () => {
   game.destroy();
 });
 
-test("scheduleCardTableVacate sets reconnectDeadline and can be cancelled on rejoin", () => {
+test("scheduleCardTableVacate sets reconnectDeadline and can be cancelled on rejoin", async () => {
   const tableId = `vacate_${Date.now()}`;
   const game = new Tarneeb41Game("r1", { mongoTableId: tableId });
   game.players.push({
@@ -83,7 +83,7 @@ test("scheduleCardTableVacate sets reconnectDeadline and can be cancelled on rej
   roomManager.userToTarneeb41TableId.delete("u1");
 });
 
-test("humanCount stays > 0 during vacate grace (no empty seat)", () => {
+test("humanCount stays > 0 during vacate grace (no empty seat)", async () => {
   const game = new Tarneeb41Game("r1", { mongoTableId: "t_grace" });
   for (let i = 0; i < 4; i += 1) {
     game.players.push({
@@ -137,7 +137,7 @@ test("finalizeCardTableVacate replaces disconnected human with bot during biddin
   roomManager.tarneeb41GamesByTableId.delete(tableId);
 });
 
-test("restoreHumanAtSeat only allows the original vacated user", () => {
+test("restoreHumanAtSeat only allows the original vacated user", async () => {
   const game = new Tarneeb41Game("r1", { mongoTableId: "t_restore" });
   game.players.push({
     userId: "bot_vacate_1",
@@ -148,17 +148,17 @@ test("restoreHumanAtSeat only allows the original vacated user", () => {
     chips: 1000,
     vacatedFromUserId: "u1",
   });
-  assert.equal(game.restoreHumanAtSeat(0, "u1", "sock_new", "Ali"), true);
+  assert.equal(await game.restoreHumanAtSeat(0, "u1", "sock_new", "Ali"), true);
   assert.equal(game.players[0].isBot, false);
   assert.equal(game.players[0].userId, "u1");
 
   game.convertHumanToBot("u1");
-  assert.equal(game.restoreHumanAtSeat(0, "u2", "sock_other", "Other"), false);
+  assert.equal(await game.restoreHumanAtSeat(0, "u2", "sock_other", "Other"), false);
 
   game.destroy();
 });
 
-test("TrixGame.restoreHumanAtSeat only allows the original vacated user", () => {
+test("TrixGame.restoreHumanAtSeat only allows the original vacated user", async () => {
   const game = new TrixGame("r1", { mongoTableId: "t_trix_restore" });
   game.players.push({
     userId: "bot_vacate_1",
@@ -169,13 +169,13 @@ test("TrixGame.restoreHumanAtSeat only allows the original vacated user", () => 
     chips: 1000,
     vacatedFromUserId: "u1",
   });
-  assert.equal(game.restoreHumanAtSeat(0, "u1", "sock_new", "Ali"), true);
+  assert.equal(await game.restoreHumanAtSeat(0, "u1", "sock_new", "Ali"), true);
   assert.equal(game.players[0].isBot, false);
   assert.equal(game.players[0].userId, "u1");
   game.destroy();
 });
 
-test("Trix checkBotTurn Trix skip notifies state listener", () => {
+test("Trix checkBotTurn Trix skip notifies state listener", async () => {
   const game = new TrixGame("r1", { mongoTableId: "t_skip" });
   for (let i = 0; i < 4; i += 1) {
     game.players.push({
@@ -187,7 +187,7 @@ test("Trix checkBotTurn Trix skip notifies state listener", () => {
       chips: 1000,
     });
   }
-  game.startGame();
+  await game.startGame();
   game.clearBotTimer();
   const king = game.gameState.currentKingIndex;
   game.applyMove(king, "select_game", {
@@ -205,7 +205,7 @@ test("Trix checkBotTurn Trix skip notifies state listener", () => {
   game.destroy();
 });
 
-test("onCardTableRejoin always clears vacate timer and deadline", () => {
+test("onCardTableRejoin always clears vacate timer and deadline", async () => {
   const { onCardTableRejoin } = require("../services/cardTableVacateService");
   const tableId = `no_cancel_${Date.now()}`;
   const game = new TrixGame("r1", { mongoTableId: tableId });
@@ -275,7 +275,7 @@ test("finalizeCardTableVacate holds trix game for reclaim when last human times 
   roomManager.userToTrixTableId.delete("u1");
 });
 
-test("getGameState exposes reconnectDeadline on disconnected seat", () => {
+test("getGameState exposes reconnectDeadline on disconnected seat", async () => {
   const game = new Tarneeb41Game("r1", { mongoTableId: "t_deadline" });
   const deadline = Date.now() + 15000;
   game.players.push({
@@ -294,7 +294,7 @@ test("getGameState exposes reconnectDeadline on disconnected seat", () => {
   game.destroy();
 });
 
-test("game_end getGameState replays settlement failure marker", () => {
+test("game_end getGameState replays settlement failure marker", async () => {
   const game = new Tarneeb41Game("r1", { mongoTableId: "t_fail" });
   game.state = "game_end";
   game.playerScores = [41, 10, 5, 8];
@@ -336,7 +336,7 @@ test("abandonTrixTableIfNoHumans waits while human is in vacate grace", async ()
   roomManager.trixGamesByTableId.delete(tableId);
 });
 
-test("intentionalLeaveCardTable is the permanent leave path for trix and tarneeb41", () => {
+test("intentionalLeaveCardTable is the permanent leave path for trix and tarneeb41", async () => {
   const {
     intentionalLeaveCardTable,
   } = require("../services/cardTableVacateService");

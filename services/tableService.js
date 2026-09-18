@@ -49,6 +49,10 @@ const {
   listReplaceableBotSeats: listReplaceableTrixBotSeats,
 } = require("./trixBotSeatService");
 const { withUserJoinLock } = require("../utils/userJoinLock");
+const {
+  VARIANT_TABLE_NUMBER_BASE,
+  OVERFLOW_TABLE_NUMBER_QUERY,
+} = require("../utils/staticTableNumbers");
 
 const FIXED_TIER_TABLES = {
   beginner: [10000, 40000, 100000, 150000],
@@ -70,7 +74,18 @@ const POKER_FIVE_MAX_CAPACITY = 5;
  * upsert land on top of a live dynamic table; a high base keeps the two ranges
  * from ever meeting.
  */
-const FIVE_MAX_TABLE_NUMBER_BASE = 100;
+const FIVE_MAX_TABLE_NUMBER_BASE = VARIANT_TABLE_NUMBER_BASE;
+
+/**
+ * Trix runs two rule variants side by side, one row each per stake:
+ * "solo" (اليهودية — every player scores for themselves) and "partnership"
+ * (شركة — facing players are partners and their scores are summed). They share
+ * gameType "trix", the engine and every contract; only the winning unit
+ * differs. Partnership rows number from 101 up for the same reason five-max
+ * poker does: the low numbers are already spoken for, and the overflow
+ * allocator claims `maxTableNumber + 1`.
+ */
+const TRIX_PARTNERSHIP_TABLE_NUMBER_BASE = VARIANT_TABLE_NUMBER_BASE;
 
 // Prepare another public room without charging or seating the viewer. Reuse an
 // available room at the same stakes so overflow players can play together.
@@ -169,8 +184,10 @@ async function ensureFixedTierTables() {
       { tableNumber: { $lte: 4 }, tableKind: { $exists: false } },
       { $set: { tableKind: "static" } }
     );
+    // Reserved variant numbers (101+) are permanent rooms, not overflow — a
+    // legacy row there must not be backfilled as dynamic and garbage-collected.
     await Table.updateMany(
-      { tableNumber: { $gt: 4 }, tableKind: { $exists: false } },
+      { tableNumber: OVERFLOW_TABLE_NUMBER_QUERY, tableKind: { $exists: false } },
       { $set: { tableKind: "dynamic" } }
     );
 
@@ -228,24 +245,41 @@ async function ensureFixedTierTables() {
       });
     }
 
+    // Both trix variants get a room at every stake.
     for (const [tier, buyIns] of Object.entries(FIXED_TIER_TABLES)) {
       buyIns.forEach((buyIn, index) => {
-        const tableNumber = index + 1;
+        const common = {
+          gameType: "trix",
+          tableKind: "static",
+          smallBlind: 0,
+          bigBlind: 0,
+          minBuyIn: buyIn,
+          maxBuyIn: buyIn,
+          capacity: 4,
+          isPrivate: false,
+          status: "open",
+        };
+
         ops.push({
           updateOne: {
-            filter: { gameType: "trix", tier, tableNumber },
+            filter: { gameType: "trix", tier, tableNumber: index + 1 },
             update: {
-              $set: {
-                gameType: "trix",
-                tableKind: "static",
-                smallBlind: 0,
-                bigBlind: 0,
-                minBuyIn: buyIn,
-                maxBuyIn: buyIn,
-                capacity: 4,
-                isPrivate: false,
-                status: "open",
-              },
+              $set: { ...common, gameMode: "solo" },
+              $unset: { password: 1 },
+            },
+            upsert: true,
+          },
+        });
+
+        ops.push({
+          updateOne: {
+            filter: {
+              gameType: "trix",
+              tier,
+              tableNumber: TRIX_PARTNERSHIP_TABLE_NUMBER_BASE + index + 1,
+            },
+            update: {
+              $set: { ...common, gameMode: "partnership" },
               $unset: { password: 1 },
             },
             upsert: true,
@@ -397,6 +431,7 @@ exports.joinTarneeb41WithRetry = (opts) =>
   joinFixedCapacityWithRetry({ ...opts, gameType: "tarneeb41" });
 exports.joinTrixWithRetry = (opts) =>
   joinFixedCapacityWithRetry({ ...opts, gameType: "trix" });
+exports.TRIX_PARTNERSHIP_TABLE_NUMBER_BASE = TRIX_PARTNERSHIP_TABLE_NUMBER_BASE;
 exports.refreshTarneeb41GameSeats = refreshTarneeb41GameSeats;
 exports.refreshTrixGameSeats = refreshTrixGameSeats;
 exports.markTrixTablePlaying = markTrixTablePlaying;
@@ -566,7 +601,7 @@ exports.getTables = asyncHandler(async (req, res) => {
     .skip(skip)
     .limit(limit)
     .select(
-      "gameType tier tableNumber smallBlind bigBlind minBuyIn maxBuyIn capacity seats status waitingQueue vacatingPlayers pendingPermanentLeaves rejoinBlockedUsers isPrivate owner tableKind"
+      "gameType gameMode tier tableNumber smallBlind bigBlind minBuyIn maxBuyIn capacity seats status waitingQueue vacatingPlayers pendingPermanentLeaves rejoinBlockedUsers isPrivate owner tableKind"
     );
 
   const summaryMatch = {
@@ -666,7 +701,7 @@ exports.getPrivateTables = asyncHandler(async (req, res) => {
     .sort({ updatedAt: -1 })
     .limit(100)
     .select(
-      "gameType tier tableNumber displayName smallBlind bigBlind minBuyIn maxBuyIn capacity seats status isPrivate tableKind owner settings pendingPermanentLeaves rejoinBlockedUsers"
+      "gameType gameMode tier tableNumber displayName smallBlind bigBlind minBuyIn maxBuyIn capacity seats status isPrivate tableKind owner settings pendingPermanentLeaves rejoinBlockedUsers"
     );
   const data = tables.map((table) => {
     const obj = table.toObject ? table.toObject() : table;
@@ -967,7 +1002,7 @@ exports.joinTable = asyncHandler(async (req, res, next) => {
       if (botSeats.length > 0) {
         // Keep this table — bot seat claim runs after wallet check.
       } else {
-        table = await findAvailableTrixTable(table.tier, buyIn);
+        table = await findAvailableTrixTable(table.tier, buyIn, null, table.gameMode);
         id = String(table._id);
       }
     }
@@ -1157,6 +1192,8 @@ exports.joinTable = asyncHandler(async (req, res, next) => {
           buyIn,
           initialTableId: id,
           tier: table.tier,
+          // Overflow must land in the same variant (يهودية vs شركة).
+          gameMode: table.gameMode,
         });
       }
     } else if (table.gameType === "poker") {

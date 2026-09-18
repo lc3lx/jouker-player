@@ -315,7 +315,7 @@ test("findAvailableTarneeb41Table creates dynamic table beyond tableNumber 4", a
 });
 
 for (const leaveAt of [14, 5, 1]) {
-  test(`countdown leave at ${leaveAt}s — game does not start with <4 humans`, () => {
+  test(`countdown leave at ${leaveAt}s — game does not start with <4 humans`, async () => {
     const game = mkFourHumans();
     try {
       game.setCountdownStartGate(async () => game.humanCount() === 4);
@@ -325,7 +325,7 @@ for (const leaveAt of [14, 5, 1]) {
       assert.equal(game.cancelGameCountdown("seats_changed"), true);
       assert.equal(game.humanCount(), 3);
       assert.equal(game.isReadyForCountdown(), false);
-      assert.equal(game.startGame(), false);
+      assert.equal(await game.startGame(), false);
       assert.notEqual(game.state, "bidding_syrian");
     } finally {
       game.destroy();
@@ -396,12 +396,12 @@ test("validateTarneeb41StartEligibility rejects roster below four at countdown e
   }
 });
 
-test("startGame requires exactly four humans even after countdown", () => {
+test("startGame requires exactly four humans even after countdown", async () => {
   const game = mkFourHumans();
   try {
     game.state = "countdown";
     game.players.pop();
-    assert.equal(game.startGame(), false);
+    assert.equal(await game.startGame(), false);
     assert.notEqual(game.state, "bidding_syrian");
   } finally {
     game.destroy();

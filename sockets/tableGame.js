@@ -1283,6 +1283,7 @@ class PokerTable {
       });
       return false;
     }
+    this._rebaseHandTotalBetweenHands(context);
     const probe = auditChipConservation(this, "unfreeze_probe");
     if (!probe.ok) return false;
     this.frozen = false;
@@ -2750,6 +2751,64 @@ class PokerTable {
   }
 
   /**
+   * Rake is the other way chips leave the table without crossing the pot: the
+   * house takes it out of the winner's payout at settlement, so the stacks end
+   * the hand short of `handStartTotal` by exactly the rake.
+   *
+   * Nothing moved the baseline to match, so after any raked hand every audit
+   * failed with `delta: -rake` — and the unfreeze probe, which measures against
+   * the same stale baseline, could never clear it either. One 100-chip rake
+   * froze a healthy table permanently.
+   *
+   * Unlike a seat leaving, this is applied after the hand has finished, so it
+   * must NOT be gated on `isHandActive()`.
+   * @param {number} rake chips the house removed from the table
+   */
+  /**
+   * Between hands, `handStartTotal` is only "what the table held when the last
+   * hand was dealt" — the rake has legitimately left since, and `startHand`
+   * re-derives the baseline from the stacks at the next deal anyway. So a stale
+   * one carries no information the audit can act on, while a table frozen
+   * against it can never clear: the unfreeze probe measures against the same
+   * number, and the monitor's auto-repair calls that probe. That is how one
+   * 100-chip rake left a table frozen with no way back.
+   *
+   * Re-derive it while no hand is in flight, and log the gap so a real
+   * discrepancy is still visible rather than silently absorbed. A live hand is
+   * never rebased — that is where the invariant actually has teeth.
+   */
+  _rebaseHandTotalBetweenHands(context) {
+    // Deliberately NOT isHandActive(): freezing sets `running = false`, so that
+    // would read a table frozen mid-flop as "between hands" and rebase away the
+    // very discrepancy it was frozen for. The round is what survives a freeze.
+    const round = this.round ? String(this.round) : "idle";
+    if (round !== "idle") return false;
+    const stacks = this.seats.reduce(
+      (sum, s) => sum + toSafeInt(s?.chips, 0) + toSafeInt(s?.bet, 0),
+      0
+    );
+    const derived = stacks + toSafeInt(this.pot, 0) + toSafeInt(this.uncollectedRake, 0);
+    const previous = toSafeInt(this.handStartTotal, 0);
+    if (derived === previous) return false;
+
+    this.handStartTotal = derived;
+    logger.warn("poker_hand_baseline_rebased", {
+      tableId: this.tableId,
+      context,
+      previous,
+      rebased: derived,
+      delta: derived - previous,
+    });
+    return true;
+  }
+
+  adjustHandBaselineForRake(rake) {
+    const taken = toSafeInt(rake, 0);
+    if (taken <= 0) return;
+    this.handStartTotal = toSafeInt(this.handStartTotal, 0) - taken;
+  }
+
+  /**
    * Bot seats a human may take over. Mid-hand only bots with nothing at stake
    * qualify: evicting a bot that already put chips in would rewrite pot
    * eligibility for the hand in flight.
@@ -4162,6 +4221,12 @@ class PokerTable {
 
   async advance() {
     if (this.frozen) return;
+    // A paced advance sleeps ACTION_REVEAL_MS before running, so the last one
+    // of a hand lands *after* the showdown has settled and reset the table.
+    // There is nothing left to advance, and auditing a table between hands
+    // measures a half-torn-down state — which is how a stray advance came to
+    // be the thing that froze a healthy table.
+    if (!this.isHandActive()) return;
     const okPre = await this.auditChipConservation("advance_pre");
     if (!okPre) return;
     // If one alive -> award
@@ -5084,6 +5149,9 @@ class PokerTable {
         seats.forEach((s, i) => {
           s.chips = toSafeInt(intendedChips[i], 0);
         });
+        // The rake left the table with this commit — the conservation baseline
+        // has to come down with it or the next audit freezes the table.
+        this.adjustHandBaselineForRake(rake);
         this.resetHandBettingState();
       } else {
         this.logSuspicious("settlement_replay_skipped", {

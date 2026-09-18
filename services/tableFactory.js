@@ -54,6 +54,8 @@ async function createDynamicTable({
   tableNumber,
   smallBlind = 0,
   bigBlind = 0,
+  /** Rule variant of the table this one overflowed from (trix solo/partnership). */
+  gameMode,
   /** Carried from the table this one overflowed from — notably botsEnabled. */
   settings,
   session,
@@ -75,6 +77,7 @@ async function createDynamicTable({
         isPrivate: false,
         status: gameType === "poker" ? "waiting" : "open",
         seats: [],
+        ...(gameMode ? { gameMode } : {}),
         ...(settings ? { settings } : {}),
       },
     ],

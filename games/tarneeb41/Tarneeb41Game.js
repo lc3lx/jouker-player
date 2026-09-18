@@ -60,6 +60,12 @@ class Tarneeb41Game extends BaseGameEngine {
     this.trick = [];
     this.lastTrick = [];
     this.ledSuit = null;
+    /**
+     * Every card played this round, in order. Public information — each one was
+     * face up on the table — and what lets a bot know whether its king is still
+     * good. Reset with the deal.
+     */
+    this.playedCards = [];
     this.currentPlayerIndex = 0;
     this.trickLeader = 0;
     this.roundNumber = 0;
@@ -470,6 +476,7 @@ class Tarneeb41Game extends BaseGameEngine {
     this.trick = [];
     this.lastTrick = [];
     this.ledSuit = null;
+    this.playedCards = [];
     // Keep this.playerScores — cumulative across جولات until game_end / next startGame.
     // #region agent log
     try {
@@ -610,8 +617,25 @@ class Tarneeb41Game extends BaseGameEngine {
     return { personality: p.botPersonality, skill: p.botSkill, tuning: p.botTuning };
   }
 
-  _pickAutoPlayCard(hand, opts = null) {
-    return TarneebBot.pickAutoPlayCard(hand, this.ledSuit, rules, opts);
+  /**
+   * What a seat at this table can see: the trick in front of it, the cards
+   * already played this round, everyone's declared bid and trick count. Never
+   * another seat's hand.
+   */
+  _botPlayContext(seat) {
+    return {
+      seat,
+      trick: this.trick,
+      trump: this.trump,
+      declaredBids: this.declaredBids,
+      tricksTaken: this.tricksThisRound,
+      playedCards: Array.isArray(this.playedCards) ? this.playedCards : [],
+    };
+  }
+
+  _pickAutoPlayCard(hand, opts = null, seat = null) {
+    const ctx = seat == null ? null : this._botPlayContext(seat);
+    return TarneebBot.pickAutoPlayCard(hand, this.ledSuit, rules, opts, ctx);
   }
 
   _handleTurnTimeout() {
@@ -620,7 +644,7 @@ class Tarneeb41Game extends BaseGameEngine {
     if (this.state === "bidding_syrian") {
       this.applyMove(idx, "tarneeb41_declare", { value: 0, fromTimeout: true });
     } else if (this.state === "playing") {
-      const card = this._pickAutoPlayCard(this.hands[idx], this._botOpts(idx));
+      const card = this._pickAutoPlayCard(this.hands[idx], this._botOpts(idx), idx);
       if (!card) return;
       this.applyMove(idx, "play_card", {
         fromTimeout: true,
@@ -629,11 +653,18 @@ class Tarneeb41Game extends BaseGameEngine {
     }
   }
 
-  /** Estimate expected tricks for the current player based on hand strength. */
+  /**
+   * Declare for the current bot seat. The running declarations go with it: the
+   * last seat to bid can stretch to save the deal from a sum-below-11 redeal,
+   * which is what a player at the table does.
+   */
   _botBid() {
     const idx = this.currentPlayerIndex;
     const hand = this.hands[idx];
-    return TarneebBot.botBid(hand, this.trump, this._botOpts(idx));
+    return TarneebBot.botBid(hand, this.trump, this._botOpts(idx), {
+      seat: idx,
+      declaredBids: this.declaredBids,
+    });
   }
 
   checkBotTurn() {
@@ -662,7 +693,7 @@ class Tarneeb41Game extends BaseGameEngine {
       const v = this._botBid();
       this.applyMove(idx, "tarneeb41_declare", { value: v });
     } else if (this.state === "playing") {
-      const card = this._pickAutoPlayCard(this.hands[idx], this._botOpts(idx));
+      const card = this._pickAutoPlayCard(this.hands[idx], this._botOpts(idx), idx);
       if (!card) return;
       this.applyMove(idx, "play_card", {
         card: { suit: rules.toApiSuit(card.suit), rank: rules.toApiRank(card.rank) },
@@ -749,6 +780,8 @@ class Tarneeb41Game extends BaseGameEngine {
       if (hi < 0) return { success: false, reason: "card_not_in_hand" };
       this.hands[playerIndex].splice(hi, 1);
       this.trick.push({ card: c, playerIndex });
+      if (!Array.isArray(this.playedCards)) this.playedCards = [];
+      this.playedCards.push({ suit: c.suit, rank: c.rank });
       if (this.trick.length === 1) this.ledSuit = c.suit;
 
       if (this.trick.length < 4) {

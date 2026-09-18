@@ -97,14 +97,34 @@ async function findUserActiveTableAnywhere(userId, excludeTableId = null) {
  * @param {number} opts.buyIn
  * @param {import('mongoose').ClientSession} [opts.session]
  */
-async function findAvailableTable({ gameType, tier, buyIn, session }) {
+async function findAvailableTable({ gameType, tier, buyIn, gameMode, session }) {
   if (gameType === "poker") {
     return findAvailablePokerTable(tier, buyIn, session);
   }
-  return findAvailableFixedCapacityTable({ gameType, tier, buyIn, capacity: 4, session });
+  return findAvailableFixedCapacityTable({
+    gameType,
+    tier,
+    buyIn,
+    gameMode,
+    capacity: 4,
+    session,
+  });
 }
 
-async function findAvailableFixedCapacityTable({ gameType, tier, buyIn, capacity, session }) {
+/**
+ * @param {object} opts
+ * @param {"solo"|"partnership"} [opts.gameMode] trix runs both variants at the
+ *   same stake, so overflow must stay inside the variant the player asked for —
+ *   without this a تركس شركة player lands in a يهودية room at the same buy-in.
+ */
+async function findAvailableFixedCapacityTable({
+  gameType,
+  tier,
+  buyIn,
+  capacity,
+  gameMode,
+  session,
+}) {
   const q = {
     gameType,
     tier,
@@ -113,6 +133,14 @@ async function findAvailableFixedCapacityTable({ gameType, tier, buyIn, capacity
     status: "open",
     $expr: { $lt: [{ $size: "$seats" }, "$capacity"] },
   };
+  if (gameMode) {
+    // Rows seeded before gameMode existed carry no field; they are solo.
+    q.$and = [
+      gameMode === "solo"
+        ? { $or: [{ gameMode: "solo" }, { gameMode: { $exists: false } }, { gameMode: null }] }
+        : { gameMode },
+    ];
+  }
   let query = Table.findOne(q).sort({ tableNumber: 1 });
   if (session) query = query.session(session);
   let table = await query;
@@ -130,6 +158,7 @@ async function findAvailableFixedCapacityTable({ gameType, tier, buyIn, capacity
         tier,
         buyIn,
         capacity,
+        gameMode,
         tableNumber,
         session,
       });
@@ -155,7 +184,13 @@ async function executeFixedCapacityJoinTransaction({
   if (tableTx.gameType !== gameType) throw new Error("GAME_TYPE_MISMATCH");
 
   if (tableTx.status === "playing" || tableTx.seats.length >= tableTx.capacity) {
-    tableTx = await findAvailableTable({ gameType, tier: tableTx.tier, buyIn, session });
+    tableTx = await findAvailableTable({
+      gameType,
+      tier: tableTx.tier,
+      buyIn,
+      gameMode: tableTx.gameMode,
+      session,
+    });
   }
 
   if (tableTx.seats.length >= tableTx.capacity) throw new Error("TABLE_FULL");
@@ -185,6 +220,7 @@ async function joinFixedCapacityWithRetry({
   buyIn,
   initialTableId,
   tier,
+  gameMode,
 }) {
   let targetId = String(initialTableId);
   let lastError = null;
@@ -210,7 +246,7 @@ async function joinFixedCapacityWithRetry({
         err.message === "WriteConflict" ||
         (err.errorLabels && err.errorLabels.has("TransientTransactionError"));
       if (retryable && attempt < MAX_JOIN_ATTEMPTS - 1) {
-        const next = await findAvailableTable({ gameType, tier, buyIn });
+        const next = await findAvailableTable({ gameType, tier, buyIn, gameMode });
         targetId = String(next._id);
         continue;
       }
@@ -225,8 +261,15 @@ const findAvailableTarneeb41Table = (tier, buyIn, session) =>
   findAvailableFixedCapacityTable({ gameType: "tarneeb41", tier, buyIn, capacity: 4, session });
 
 /** @deprecated use findAvailableTable */
-const findAvailableTrixTable = (tier, buyIn, session) =>
-  findAvailableFixedCapacityTable({ gameType: "trix", tier, buyIn, capacity: 4, session });
+const findAvailableTrixTable = (tier, buyIn, session, gameMode) =>
+  findAvailableFixedCapacityTable({
+    gameType: "trix",
+    tier,
+    buyIn,
+    gameMode,
+    capacity: 4,
+    session,
+  });
 
 module.exports = {
   MAX_JOIN_ATTEMPTS,
