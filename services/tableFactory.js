@@ -53,6 +53,8 @@ async function createDynamicTable({
   tableNumber,
   smallBlind = 0,
   bigBlind = 0,
+  /** Carried from the table this one overflowed from — notably botsEnabled. */
+  settings,
   session,
 }) {
   const createOpts = session ? { session } : {};
@@ -72,6 +74,7 @@ async function createDynamicTable({
         isPrivate: false,
         status: gameType === "poker" ? "waiting" : "open",
         seats: [],
+        ...(settings ? { settings } : {}),
       },
     ],
     createOpts

@@ -58,6 +58,20 @@ const FIXED_TIER_TABLES = {
 
 const FIXED_TABLE_NUMBERS = [1, 2, 3, 4];
 
+/** Nine-handed tables — the original lineup, bots fill empty seats. */
+const POKER_NINE_MAX_CAPACITY = 9;
+/** Five-handed tables — humans only, one per stake alongside the nine-max. */
+const POKER_FIVE_MAX_CAPACITY = 5;
+/**
+ * Five-max tables number from 101 up rather than 5..8.
+ *
+ * `tableNumber > 4` already means "dynamic" to the legacy backfill, and the
+ * overflow allocator claims `maxTableNumber + 1`. Seeding into 5..8 would let an
+ * upsert land on top of a live dynamic table; a high base keeps the two ranges
+ * from ever meeting.
+ */
+const FIVE_MAX_TABLE_NUMBER_BASE = 100;
+
 // Prepare another public room without charging or seating the viewer. Reuse an
 // available room at the same stakes so overflow players can play together.
 exports.preparePokerOverflow = asyncHandler(async (req, res, next) => {
@@ -79,6 +93,10 @@ exports.preparePokerOverflow = asyncHandler(async (req, res, next) => {
         maxBuyIn: source.maxBuyIn,
         smallBlind: source.smallBlind,
         bigBlind: source.bigBlind,
+        // Overflow keeps the room's size and bot policy — a five-max spill must
+        // not land the player in the nine-max room at the same stake.
+        capacity: source.capacity,
+        botsEnabled: source.settings?.botsEnabled !== false,
       })
     );
   }
@@ -158,27 +176,49 @@ async function ensureFixedTierTables() {
 
     const ops = [];
 
+    // Every stake gets two tables: the nine-handed one (bots fill it) and a
+    // five-handed one that is humans only.
     for (const [tier, buyIns] of Object.entries(FIXED_TIER_TABLES)) {
       buyIns.forEach((buyIn, index) => {
-        const tableNumber = index + 1;
         const { smallBlind, bigBlind, minimumBet, buyIn: buyInVal } = deriveBlindsFromBuyIn(buyIn);
+        const common = {
+          gameType: "poker",
+          tableKind: "static",
+          smallBlind,
+          bigBlind,
+          buyIn: buyInVal,
+          minimumBet,
+          minBuyIn: buyIn,
+          maxBuyIn: buyIn,
+          isPrivate: false,
+          status: "waiting",
+        };
 
         ops.push({
           updateOne: {
-            filter: { gameType: "poker", tier, tableNumber },
+            filter: { gameType: "poker", tier, tableNumber: index + 1 },
+            update: {
+              $set: { ...common, capacity: POKER_NINE_MAX_CAPACITY },
+              $unset: { password: 1 },
+            },
+            upsert: true,
+          },
+        });
+
+        ops.push({
+          updateOne: {
+            filter: {
+              gameType: "poker",
+              tier,
+              tableNumber: FIVE_MAX_TABLE_NUMBER_BASE + index + 1,
+            },
             update: {
               $set: {
-                gameType: "poker",
-                tableKind: "static",
-                smallBlind,
-                bigBlind,
-                buyIn: buyInVal,
-                minimumBet,
-                minBuyIn: buyIn,
-                maxBuyIn: buyIn,
-                capacity: 9,
-                isPrivate: false,
-                status: "waiting",
+                ...common,
+                capacity: POKER_FIVE_MAX_CAPACITY,
+                // Humans only. The engine reads this on every table load and
+                // refuses to lobby-fill or solo-start with bots.
+                "settings.botsEnabled": false,
               },
               $unset: { password: 1 },
             },

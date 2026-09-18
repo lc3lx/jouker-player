@@ -67,10 +67,20 @@ async function enrichRow(t, viewerId) {
   return redactPokerRoster(row, viewerId);
 }
 
+/**
+ * Cheapest stake first, and within a stake the bigger table first.
+ *
+ * A stake now has a nine-max and a five-max room, and the five-max rows are
+ * numbered from 101 up so their upserts cannot collide with dynamic tables —
+ * sorting by tableNumber alone would file every five-max after every nine-max
+ * instead of pairing them under their own stake.
+ */
+const LOBBY_SORT = { minBuyIn: 1, capacity: -1, tableNumber: 1 };
+
 async function querySection(filter, { page, limit, skip }, viewerId) {
   const total = await Table.countDocuments(filter);
   const rows = await Table.find(filter)
-    .sort({ tableNumber: 1 })
+    .sort(LOBBY_SORT)
     .skip(skip)
     .limit(limit)
     .select(LOBBY_SELECT);
@@ -150,10 +160,10 @@ exports.getFullLobby = asyncHandler(async (req, res) => {
   };
 
   const [staticRows, dynamicRows, vipRows] = await Promise.all([
-    Table.find(makeFilter("static")).sort({ tableNumber: 1 }).select(LOBBY_SELECT),
-    Table.find(makeFilter("dynamic")).sort({ tableNumber: 1 }).select(LOBBY_SELECT),
+    Table.find(makeFilter("static")).sort(LOBBY_SORT).select(LOBBY_SELECT),
+    Table.find(makeFilter("dynamic")).sort(LOBBY_SORT).select(LOBBY_SELECT),
     Table.find(makeFilter("vip", { isPrivate: false, "settings.isLocked": false }))
-      .sort({ tableNumber: 1 })
+      .sort(LOBBY_SORT)
       .select(LOBBY_SELECT),
   ]);
 

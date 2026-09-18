@@ -47,13 +47,19 @@ function isHandActiveOnTable(tableId) {
 /**
  * Find first joinable poker table or create a new one.
  * Fills lowest tableNumber first for occupancy balance.
+ *
+ * [opts.capacity] pins the table size. A stake now has both a nine-handed and a
+ * five-handed table, so matching on stake alone would drop a player asking for
+ * five-max into the nine-max room — and spawn the overflow at the wrong size.
+ * [opts.botsEnabled] carries the source table's bot policy onto that overflow.
  */
 async function findAvailablePokerTable(tier, buyIn, session, opts = {}) {
-  const cap = POKER_CAPACITY;
+  const cap = normalizeCapacity(opts.capacity ?? POKER_CAPACITY);
   const excludeIds = (opts.excludeIds || []).map(String).filter(Boolean);
   const q = {
     gameType: "poker",
     tier,
+    capacity: cap,
     minBuyIn: opts.minBuyIn ?? buyIn,
     maxBuyIn: opts.maxBuyIn ?? buyIn,
     isPrivate: { $ne: true },
@@ -92,6 +98,8 @@ async function findAvailablePokerTable(tier, buyIn, session, opts = {}) {
         bigBlind: opts.bigBlind ?? bigBlind,
         minBuyIn: opts.minBuyIn ?? buyIn,
         maxBuyIn: opts.maxBuyIn ?? buyIn,
+        // A five-max overflow must be humans-only like the table it spilled from.
+        settings: opts.botsEnabled === false ? { botsEnabled: false } : undefined,
         session,
       });
       return created;
@@ -285,6 +293,13 @@ async function joinPokerWithRetry({
   let lastError = null;
   const excludeIds = [];
 
+  // A stake has both a nine-max and a five-max room. Overflow has to land on a
+  // table of the same size and bot policy as the one the player actually chose,
+  // so read both off it before the first attempt.
+  const origin = await Table.findById(targetId).select("capacity settings").lean();
+  const originCapacity = normalizeCapacity(origin?.capacity ?? POKER_CAPACITY);
+  const originBotsEnabled = origin?.settings?.botsEnabled !== false;
+
   for (let attempt = 0; attempt < maxAttempts; attempt += 1) {
     try {
       let result = { tableId: targetId };
@@ -320,7 +335,11 @@ async function joinPokerWithRetry({
       if (retryable && !strictTable && attempt < maxAttempts - 1) {
         if (err.message === "TABLE_FULL") excludeIds.push(targetId);
         const next = await withPokerAllocationLock(tier, buyIn, () =>
-          findAvailablePokerTable(tier, buyIn, null, { excludeIds })
+          findAvailablePokerTable(tier, buyIn, null, {
+            excludeIds,
+            capacity: originCapacity,
+            botsEnabled: originBotsEnabled,
+          })
         );
         targetId = String(next._id);
         continue;
