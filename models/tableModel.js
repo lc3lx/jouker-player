@@ -160,19 +160,43 @@ const tableSchema = new mongoose.Schema(
 
 tableSchema.index({ gameType: 1, tier: 1, tableNumber: 1 }, { unique: true });
 
+/**
+ * Normalise poker table fields on save.
+ *
+ * Every branch is gated on the field actually having been loaded. A document
+ * fetched with a partial `.select()` leaves the omitted paths `undefined`, and
+ * defaulting them here does not fill a gap — it *overwrites stored data* with a
+ * default the moment that document is saved.
+ *
+ * That is not hypothetical: `resetPokerTableWhenEmpty` selects a handful of
+ * fields and saves, and `capacity` is not among them. Every five-max table was
+ * silently rewritten to nine seats the first time it emptied, which merged it
+ * into the nine-max row and made it vanish from the lobby.
+ */
 tableSchema.pre("save", function capSeatsOnSave(next) {
-  if (this.gameType === "poker") {
+  if (this.gameType !== "poker") return next();
+
+  const loaded = (path) => this.isNew || this.isSelected(path);
+
+  if (loaded("capacity")) {
     this.capacity = Math.min(9, Math.max(2, Number(this.capacity) || 9));
     if (Array.isArray(this.seats) && this.seats.length > this.capacity) {
       return next(new Error("TABLE_CAPACITY_EXCEEDED"));
     }
+  }
+
+  if (loaded("buyIn") && loaded("minBuyIn")) {
     if (!Number.isFinite(this.buyIn) || this.buyIn <= 0) {
       this.buyIn = Number(this.minBuyIn) || 0;
     }
+  }
+
+  if (loaded("minimumBet") && loaded("buyIn") && loaded("minBuyIn")) {
     if (!Number.isFinite(this.minimumBet) || this.minimumBet <= 0) {
       this.minimumBet = Math.max(1, Math.floor(Number(this.buyIn || this.minBuyIn || 0) / 10));
     }
   }
+
   next();
 });
 

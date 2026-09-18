@@ -37,8 +37,11 @@ async function countQueue(tableId) {
  */
 async function resetPokerTableWhenEmpty(tableId) {
   const tid = String(tableId);
+  // `capacity` is loaded even though the reset never changes it: this document
+  // is saved below, and a poker table saved without its capacity used to have
+  // the value re-defaulted to nine.
   const table = await Table.findById(tid).select(
-    "gameType seats tableNumber tableKind tier minBuyIn status waitingQueue vacatingPlayers rejoinBlockedUsers"
+    "gameType seats tableNumber tableKind tier minBuyIn capacity status waitingQueue vacatingPlayers rejoinBlockedUsers"
   );
   if (!table || table.gameType !== "poker") return { reset: false, reason: "not_poker" };
   if (table.seats.length > 0) return { reset: false, reason: "not_empty" };
