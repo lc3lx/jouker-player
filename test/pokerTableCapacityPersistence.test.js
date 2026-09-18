@@ -154,3 +154,45 @@ guarded("a table still rejects more seats than it has", async () => {
   }
   await assert.rejects(() => doc.save(), /TABLE_CAPACITY_EXCEEDED/);
 });
+
+guarded("the tournament bot-lock tick leaves humans-only tables alone", async () => {
+  // lockTournamentBotsOnOpenTables carries a legacy repair that re-enables bots
+  // on any non-tournament table found with botsEnabled:false. It runs on every
+  // arena/clan scheduler tick, and it was switching the five-max rooms back on
+  // seconds after boot had seeded them off — bots reappeared no matter what the
+  // engine did.
+  const fiveMax = await makeFiveMaxTable();
+  const nineMax = await Table.create({
+    gameType: "poker",
+    tier: "beginner",
+    tableNumber: 960,
+    tableKind: "static",
+    smallBlind: 100,
+    bigBlind: 200,
+    buyIn: 10000,
+    minimumBet: 1000,
+    minBuyIn: 10000,
+    maxBuyIn: 10000,
+    capacity: 9,
+    status: "waiting",
+    // A full-size cash room that really was collateral damage.
+    settings: { botsEnabled: false },
+  });
+
+  const tableFactory = require("../services/tableFactory");
+  await tableFactory.lockTournamentBotsOnOpenTables();
+
+  const five = await Table.findById(fiveMax._id).lean();
+  assert.equal(
+    five.settings.botsEnabled,
+    false,
+    "a five-max table is deliberately humans-only — never repaired back on",
+  );
+
+  const nine = await Table.findById(nineMax._id).lean();
+  assert.equal(
+    nine.settings.botsEnabled,
+    true,
+    "the legacy repair still fixes full-size cash tables",
+  );
+});

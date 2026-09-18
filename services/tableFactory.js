@@ -4,6 +4,7 @@
  */
 const bcrypt = require("bcryptjs");
 const Table = require("../models/tableModel");
+const { POKER_CAPACITY } = require("../utils/pokerTableStatus");
 const { emitTablesUpdated } = require("../utils/lobbyRealtime");
 const { archiveTableDocument } = require("./tableLifecycleService");
 
@@ -300,11 +301,18 @@ async function lockTournamentBotsOnOpenTables() {
   });
 
   // Repair collateral damage from the bad `$ne: null` filter (cash tables).
+  //
+  // This runs on every scheduler tick, so it must never re-enable bots on a
+  // table that is *meant* to be humans-only — it was switching the five-max
+  // poker rooms back on seconds after boot seeded them off. Only a full-size
+  // poker room can have been collateral damage; the smaller rooms are
+  // deliberate.
   const repaired = await Table.updateMany(
     {
       status: { $nin: ["archived", "closed"] },
       "settings.botsEnabled": false,
       tableKind: { $nin: ["tournament"] },
+      $nor: [{ gameType: "poker", capacity: { $lt: POKER_CAPACITY } }],
       $and: [
         {
           $or: [
