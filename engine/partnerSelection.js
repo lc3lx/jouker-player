@@ -96,6 +96,9 @@ class PartnerSelection {
     this.pendingPartnerSeat = null;
     /** Seats that already turned this chooser down — never offered twice. */
     this.declinedSeats = new Set();
+    /** Who turned the chooser down last, and why — shown back to the chooser. */
+    this.lastDeclinedName = null;
+    this.lastDeclineReason = null;
     this.deadline = null;
     this._timer = null;
   }
@@ -137,6 +140,8 @@ class PartnerSelection {
 
     this.active = true;
     this.declinedSeats = new Set();
+    this.lastDeclinedName = null;
+    this.lastDeclineReason = null;
 
     const humanSeat = players.findIndex((p) => p && !p.isBot && p.userId);
     if (humanSeat < 0) {
@@ -192,6 +197,9 @@ class PartnerSelection {
 
     this.pendingPartnerSeat = seatIndex;
     this.phase = PHASE.AWAITING_ACCEPT;
+    // A fresh question: the previous refusal is no longer what is happening.
+    this.lastDeclinedName = null;
+    this.lastDeclineReason = null;
 
     const target = players[seatIndex];
     if (target && target.isBot) {
@@ -234,6 +242,11 @@ class PartnerSelection {
   _declineCurrent(reason) {
     if (this.pendingPartnerSeat != null) {
       this.declinedSeats.add(this.pendingPartnerSeat);
+      // Kept for the payload so the chooser is told *who* said no and why,
+      // rather than the panel silently resetting to the list again.
+      const players = this.getPlayers() || [];
+      this.lastDeclinedName =
+        players[this.pendingPartnerSeat]?.displayName || null;
     }
     this.lastDeclineReason = reason;
     this._enterChoosing();
@@ -257,18 +270,48 @@ class PartnerSelection {
     this.onSettled();
   }
 
-  /** Public view of the exchange for the table state / socket payloads. */
+  /**
+   * Public view of the exchange for the table state / socket payloads.
+   *
+   * This goes out as one broadcast to the whole room, so it cannot be masked
+   * per viewer. Each client has to work out from it whether *it* is the one
+   * choosing or the one being asked — and it cannot do that from a seat index
+   * alone, because seats are renumbered under the client (`reindexByChair`
+   * when bots fill an empty chair) with nothing telling it. So the payload
+   * carries **who**, not just where: the userIds decide, and the roster lets a
+   * client find its own current seat again.
+   */
   toPayload() {
     const players = this.getPlayers() || [];
     const nameOf = (i) => players[i]?.displayName || `لاعب ${i + 1}`;
+    const idOf = (i) => {
+      const p = players[i];
+      if (!p || p.isBot) return null;
+      return p.userId ? String(p.userId) : null;
+    };
     return {
       phase: this.phase,
       chooserSeat: this.chooserSeat,
       chooserName: this.chooserSeat == null ? null : nameOf(this.chooserSeat),
+      chooserUserId: this.chooserSeat == null ? null : idOf(this.chooserSeat),
       pendingPartnerSeat: this.pendingPartnerSeat,
       pendingPartnerName:
         this.pendingPartnerSeat == null ? null : nameOf(this.pendingPartnerSeat),
+      pendingPartnerUserId:
+        this.pendingPartnerSeat == null ? null : idOf(this.pendingPartnerSeat),
       candidateSeats: this.phase === PHASE.CHOOSING ? this.candidateSeats() : [],
+      // Seat-ordered, so a client can locate itself by userId after a renumber.
+      seats: players.map((p, i) => ({
+        seatIndex: i,
+        userId: idOf(i),
+        displayName: nameOf(i),
+        isBot: !!p?.isBot,
+      })),
+      // Surfaced only while the chooser is picking again after a refusal.
+      lastDeclinedName:
+        this.phase === PHASE.CHOOSING ? this.lastDeclinedName : null,
+      lastDeclineReason:
+        this.phase === PHASE.CHOOSING ? this.lastDeclineReason : null,
       remainingSeconds: this.remainingSeconds(),
       // After settling, facing seats are partners — teams are 0+2 and 1+3.
       teams: this.isSettled ? [[0, 2], [1, 3]] : null,

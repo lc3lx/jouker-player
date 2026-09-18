@@ -477,3 +477,109 @@ test("every Tarneeb snapshot says which seat it was masked for", async () => {
     game.destroy();
   }
 });
+
+// ── telling each client which half of the exchange is theirs ─────────────────
+//
+// The payload is one broadcast to the whole room, so it cannot be masked per
+// viewer — each client has to recognise itself in it. A seat index is not
+// enough: `reindexByChair` renumbers every seat when bots fill the empty
+// chairs, and nothing tells the clients. The player who moved was shown the
+// watcher face and never offered قبول/رفض, so the pairing timed out.
+
+test("the payload identifies the players, not just their chairs", () => {
+  const players = roster(FOUR_HUMANS);
+  const sel = new PartnerSelection({
+    roomId: "ids",
+    getPlayers: () => players,
+    onSeatsArranged: () => {},
+    onSettled: () => {},
+  });
+  try {
+    sel.begin();
+    sel.choose(2, "a");
+
+    const p = sel.toPayload();
+    assert.equal(p.chooserUserId, "a");
+    assert.equal(p.pendingPartnerUserId, "c", "the invited player by id");
+    assert.deepEqual(
+      p.seats.map((s) => s.userId),
+      ["a", "b", "c", "d"],
+      "and the roster, so a renumbered client can find itself again",
+    );
+  } finally {
+    sel.destroy();
+  }
+});
+
+test("a bot carries no userId that a human could match", () => {
+  const players = roster([{ id: "a" }, { id: "bot1", bot: true }, { id: "c" }, { id: "d" }]);
+  const sel = new PartnerSelection({
+    roomId: "ids_bot",
+    getPlayers: () => players,
+    onSeatsArranged: () => {},
+    onSettled: () => {},
+  });
+  try {
+    sel.begin();
+    const p = sel.toPayload();
+    assert.equal(p.seats[1].userId, null);
+    assert.equal(p.seats[1].isBot, true);
+    assert.equal(p.seats[0].userId, "a");
+  } finally {
+    sel.destroy();
+  }
+});
+
+test("a refusal is reported back to the chooser, then cleared", () => {
+  const players = roster(FOUR_HUMANS);
+  const sel = new PartnerSelection({
+    roomId: "declines",
+    getPlayers: () => players,
+    onSeatsArranged: () => {},
+    onSettled: () => {},
+  });
+  try {
+    sel.begin();
+    sel.choose(1, "a");
+    assert.equal(sel.toPayload().lastDeclinedName, null, "nothing refused yet");
+
+    sel.respond(false, "b");
+    const after = sel.toPayload();
+    assert.equal(after.phase, PHASE.CHOOSING, "the chooser picks again");
+    assert.equal(after.lastDeclinedName, "b", "and is told who said no");
+    assert.equal(after.lastDeclineReason, "declined");
+
+    // Asking someone new is a fresh question, not a report on the old one.
+    sel.choose(2, "a");
+    const next = sel.toPayload();
+    assert.equal(next.lastDeclinedName, null);
+    assert.equal(next.lastDeclineReason, null);
+  } finally {
+    sel.destroy();
+  }
+});
+
+test("a decline by silence is distinguishable from a real no", async () => {
+  const players = roster(FOUR_HUMANS);
+  const sel = new PartnerSelection({
+    roomId: "silence",
+    getPlayers: () => players,
+    onSeatsArranged: () => {},
+    onSettled: () => {},
+  });
+  try {
+    sel.begin();
+    sel.choose(1, "a");
+    sel._declineCurrent("accept_timeout");
+
+    const p = sel.toPayload();
+    assert.equal(p.lastDeclinedName, "b");
+    assert.equal(
+      p.lastDeclineReason,
+      "accept_timeout",
+      "the chooser is told they went unanswered, not turned down",
+    );
+  } finally {
+    sel.destroy();
+  }
+});
