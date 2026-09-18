@@ -14,6 +14,7 @@ const {
   WAIT_FOR_PLAYERS_MS,
   remainingWaitSeconds,
 } = require('../../utils/cardTableTimings');
+const { PartnerSelection } = require('../../engine/partnerSelection');
 const StateMachine = require('../../engine/StateMachine');
 const { STATE: TRIX_STATE, TRANSITIONS: TRIX_TRANSITIONS } = require('../../engine/states/trixStates');
 const {
@@ -83,6 +84,41 @@ function teamOfSeat(seatIndex) {
   return seatIndex % 2;
 }
 
+/** The chair a Mongo seat row occupies; array order for rows predating choice. */
+function chairOfSeat(seat, index) {
+  const n = Number(seat?.seatPosition);
+  return Number.isInteger(n) && n >= 0 ? n : index;
+}
+
+/** Chairs of a four-seat table that nobody in `players` has claimed. */
+function freeChairsAround(players) {
+  const taken = new Set(
+    (players || []).map((p, i) => (Number.isInteger(p?.chair) ? p.chair : i))
+  );
+  const out = [];
+  for (let i = 0; i < 4; i += 1) if (!taken.has(i)) out.push(i);
+  return out;
+}
+
+/**
+ * Order the roster by the chairs people picked and renumber seatIndex to match.
+ *
+ * The engine indexes hands, scores and turn order by `seatIndex`, so this is
+ * only ever safe before a deal -- the same rule partner selection follows.
+ */
+function reindexByChair(players) {
+  if (!Array.isArray(players)) return players;
+  players.sort((a, b) => {
+    const ac = Number.isInteger(a?.chair) ? a.chair : 0;
+    const bc = Number.isInteger(b?.chair) ? b.chair : 0;
+    return ac - bc;
+  });
+  players.forEach((p, i) => {
+    if (p) p.seatIndex = i;
+  });
+  return players;
+}
+
 class TrixGame extends BaseGameEngine {
   constructor(roomId, options = {}) {
     super(roomId, 'trix', options);
@@ -109,6 +145,13 @@ class TrixGame extends BaseGameEngine {
      * first player walked in, which is the thing the wait exists to prevent.
      */
     this.botFillReleased = false;
+    /**
+     * تركس شركة only: the pairs are chosen before the deal, and choosing them
+     * is what sets the seating (facing seats are partners everywhere in this
+     * engine). Null in the individual game, which has no partners.
+     * @type {import('../../engine/partnerSelection').PartnerSelection|null}
+     */
+    this.partnerSelection = null;
     this.gameState = null;
     this._fsm = new StateMachine(this.state, TRIX_TRANSITIONS, {
       onIllegal: (from, to) => {
@@ -228,6 +271,7 @@ class TrixGame extends BaseGameEngine {
     this.clearBotTimer();
     this.clearTurnTimer();
     this.clearWaitForPlayers();
+    this.partnerSelection?.destroy();
     timerManager.clearAll(this.roomId);
     // Free any persistent bot identities this game was holding.
     try {
@@ -514,12 +558,18 @@ class TrixGame extends BaseGameEngine {
       return;
     }
 
+    // Seated in the chair each player picked. `seatPosition` is what the join
+    // recorded; rows from before players could choose carry none, and for those
+    // the array order was the chair, so that is the fallback.
     this.players = [];
-    for (let i = 0; i < tableDoc.seats.length; i++) {
-      const seat = tableDoc.seats[i];
+    const bySeat = tableDoc.seats
+      .map((seat, i) => ({ seat, chair: chairOfSeat(seat, i) }))
+      .sort((a, b) => a.chair - b.chair);
+
+    for (const { seat, chair } of bySeat) {
       const uid = seat.user && seat.user._id ? seat.user._id : seat.user;
       const uidStr = String(uid);
-      let nm = `لاعب ${i + 1}`;
+      let nm = `لاعب ${chair + 1}`;
       let avatar = null;
       if (seat.user && typeof seat.user === 'object') {
         if (seat.user.name) nm = String(seat.user.name);
@@ -529,6 +579,7 @@ class TrixGame extends BaseGameEngine {
         userId: uid,
         socketId: resolveSocket(uidStr) || null,
         seatIndex: this.players.length,
+        chair,
         isBot: false,
         displayName: nm,
         avatar,
@@ -540,6 +591,7 @@ class TrixGame extends BaseGameEngine {
     // Humans only until the wait for real players has run out. Filling here is
     // what used to put three bots on the table the moment someone sat down.
     let bi = 0;
+    const freeChairs = freeChairsAround(this.players);
     while (this.botFillReleased && this.botsEnabled && this.players.length < 4) {
       const botId = `bot_${Date.now()}_${bi}_${Math.random().toString(36).substr(2, 9)}`;
       bi += 1;
@@ -547,6 +599,9 @@ class TrixGame extends BaseGameEngine {
         userId: botId,
         socketId: null,
         seatIndex: this.players.length,
+        // Bots take the chairs nobody picked, so once the table is full every
+        // human is sitting exactly where they chose.
+        chair: freeChairs.shift() ?? this.players.length,
         isBot: true,
         displayName: 'بوت',
         avatar: null,
@@ -557,6 +612,7 @@ class TrixGame extends BaseGameEngine {
       this._applyBotIdentity(bot);
       this.players.push(bot);
     }
+    reindexByChair(this.players);
     await this.applyCosmeticsToPlayers();
   }
 
@@ -624,8 +680,13 @@ class TrixGame extends BaseGameEngine {
     if (this.humanCount() >= 4) {
       this.clearWaitForPlayers();
       this.botFillReleased = true;
-      const started = await this.startGame();
-      return { started, waiting: false, remainingSeconds: 0 };
+      await this._dealOrChoosePartners();
+      return {
+        started: !!this.gameState,
+        waiting: false,
+        choosingPartners: this.isChoosingPartners(),
+        remainingSeconds: 0,
+      };
     }
 
     if (this.humanCount() <= 0) {
@@ -684,20 +745,84 @@ class TrixGame extends BaseGameEngine {
     this.botFillReleased = true;
     this._fillSeatsWithBots();
     await this.applyCosmeticsToPlayers();
-    // startGame fires _notifyAfterMove({ gameStarted: true }) itself, which is
-    // what marks the table playing and broadcasts — no second call here.
+    await this._dealOrChoosePartners();
+    this.notifyStateChanged();
+  }
+
+  /** True while the table is picking its pairs (تركس شركة, before the deal). */
+  isChoosingPartners() {
+    return !!this.partnerSelection && this.partnerSelection.active;
+  }
+
+  partnerSelectionPayload() {
+    return this.partnerSelection ? this.partnerSelection.toPayload() : null;
+  }
+
+  /**
+   * The last gate before cards are dealt.
+   *
+   * On a شركة table the four players first settle who is partnered with whom,
+   * because in this engine that decision *is* the seating order. Everywhere
+   * else this is just "deal".
+   */
+  async _dealOrChoosePartners() {
+    if (this.gameState) return;
+    if (!this.isPartnership) {
+      await this.startGame();
+      return;
+    }
+    if (this.partnerSelection && this.partnerSelection.isSettled) {
+      await this.startGame();
+      return;
+    }
+    if (this.isChoosingPartners()) return; // already in the exchange
+
+    this.partnerSelection = new PartnerSelection({
+      roomId: this.roomId,
+      getPlayers: () => this.players,
+      onSeatsArranged: (arranged) => {
+        // Safe only because no cards exist yet: after the deal, seat indices
+        // own the hands, the scores and the trick order.
+        this.players = arranged;
+      },
+      onSettled: () => {
+        void this._afterPartnersSettled();
+      },
+      onUpdate: (payload) => {
+        this._emit('partner_selection', { tableId: this.roomId, ...payload });
+      },
+    });
+    this.partnerSelection.begin();
+  }
+
+  async _afterPartnersSettled() {
+    await this.applyCosmeticsToPlayers();
     await this.startGame();
     this.notifyStateChanged();
   }
 
+  /** The chooser names a partner. */
+  choosePartner(seatIndex, byUserId) {
+    if (!this.partnerSelection) return { ok: false, reason: 'not_choosing' };
+    return this.partnerSelection.choose(seatIndex, byUserId);
+  }
+
+  /** The named player accepts or declines. */
+  respondToPartner(accepted, byUserId) {
+    if (!this.partnerSelection) return { ok: false, reason: 'not_awaiting' };
+    return this.partnerSelection.respond(accepted, byUserId);
+  }
+
   /** Seat a bot on every empty chair. Only ever called past the wait window. */
   _fillSeatsWithBots() {
+    const freeChairs = freeChairsAround(this.players);
     while (this.players.length < 4) {
       const botId = `bot_${Date.now()}_${Math.random().toString(36).substr(2, 5)}`;
       const bot = {
         userId: botId,
         socketId: null,
         seatIndex: this.players.length,
+        chair: freeChairs.shift() ?? this.players.length,
         isBot: true,
         displayName: 'بوت',
         chips: 0,
@@ -707,6 +832,7 @@ class TrixGame extends BaseGameEngine {
       this._applyBotIdentity(bot);
       this.players.push(bot);
     }
+    reindexByChair(this.players);
   }
 
   async startGame() {

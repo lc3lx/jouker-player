@@ -171,18 +171,43 @@ async function findAvailableFixedCapacityTable({
   throw new Error("TABLE_CREATE_FAILED");
 }
 
+/**
+ * The chair a seat occupies. Rows seeded before players could pick one carry no
+ * `seatPosition`, and for those the array order *was* the chair -- so that is
+ * the fallback, and it keeps every existing table seated exactly as before.
+ */
+function seatChairOf(seat, index) {
+  const n = Number(seat?.seatPosition);
+  return Number.isInteger(n) && n >= 0 ? n : index;
+}
+
+/** The chair a joiner gets: the one they asked for if it is free, else the lowest. */
+function resolveChair(seats, capacity, requested) {
+  const taken = new Set((seats || []).map(seatChairOf));
+  const wanted = Number(requested);
+  if (Number.isInteger(wanted) && wanted >= 0 && wanted < capacity && !taken.has(wanted)) {
+    return wanted;
+  }
+  for (let i = 0; i < capacity; i += 1) {
+    if (!taken.has(i)) return i;
+  }
+  return seats.length;
+}
+
 async function executeFixedCapacityJoinTransaction({
   gameType,
   userId,
   playerId,
   buyIn,
   tableId,
+  seatIndex,
   session,
 }) {
   let tableTx = await Table.findById(tableId).session(session);
   if (!tableTx) throw new Error("TABLE_NOT_FOUND");
   if (tableTx.gameType !== gameType) throw new Error("GAME_TYPE_MISMATCH");
 
+  let chairWanted = seatIndex;
   if (tableTx.status === "playing" || tableTx.seats.length >= tableTx.capacity) {
     tableTx = await findAvailableTable({
       gameType,
@@ -191,6 +216,8 @@ async function executeFixedCapacityJoinTransaction({
       gameMode: tableTx.gameMode,
       session,
     });
+    // A chair was picked on a different table; it means nothing here.
+    chairWanted = null;
   }
 
   if (tableTx.seats.length >= tableTx.capacity) throw new Error("TABLE_FULL");
@@ -205,7 +232,12 @@ async function executeFixedCapacityJoinTransaction({
     meta: { reason: "join_table", tableNumber: tableTx.tableNumber },
   });
 
-  tableTx.seats.push({ user: userId, player: playerId, chips: buyIn });
+  tableTx.seats.push({
+    user: userId,
+    player: playerId,
+    chips: buyIn,
+    seatPosition: resolveChair(tableTx.seats, tableTx.capacity, chairWanted),
+  });
   if (tableTx.seats.length >= tableTx.capacity) {
     tableTx.status = "playing";
   }
@@ -221,6 +253,8 @@ async function joinFixedCapacityWithRetry({
   initialTableId,
   tier,
   gameMode,
+  /** Chair the player picked, or null to take the lowest free one. */
+  seatIndex = null,
 }) {
   let targetId = String(initialTableId);
   let lastError = null;
@@ -235,6 +269,8 @@ async function joinFixedCapacityWithRetry({
           playerId,
           buyIn,
           tableId: targetId,
+          // Only meaningful on the table the chair was picked on.
+          seatIndex: attempt === 0 ? seatIndex : null,
           session,
         });
       });
@@ -273,6 +309,8 @@ const findAvailableTrixTable = (tier, buyIn, session, gameMode) =>
 
 module.exports = {
   MAX_JOIN_ATTEMPTS,
+  seatChairOf,
+  resolveChair,
   findUserSeatedTable,
   findUserActiveTableAnywhere,
   findAvailableTable,

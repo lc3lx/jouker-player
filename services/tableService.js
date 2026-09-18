@@ -1150,6 +1150,7 @@ exports.joinTable = asyncHandler(async (req, res, next) => {
           buyIn,
           initialTableId: id,
           tier: table.tier,
+          seatIndex: reqSeat,
         });
       }
     } else if (table.gameType === "trix") {
@@ -1194,6 +1195,7 @@ exports.joinTable = asyncHandler(async (req, res, next) => {
           tier: table.tier,
           // Overflow must land in the same variant (يهودية vs شركة).
           gameMode: table.gameMode,
+          seatIndex: reqSeat,
         });
       }
     } else if (table.gameType === "poker") {

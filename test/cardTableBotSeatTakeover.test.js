@@ -55,8 +55,17 @@ async function liveTrixGame() {
 async function liveTarneebGame() {
   const game = new Tarneeb41Game("t41_takeover_test", { mongoTableId: "t1" });
   seatHuman(game, 0, "u0");
-  const started = await game.fillWithBots();
-  assert.equal(started, true, "the table has to be live for a takeover to mean anything");
+  // fillWithBots seats the bots and hands over to partner picking; the human
+  // names a partner, and only then does the deal run.
+  await game.fillWithBots();
+  assert.equal(game.isChoosingPartners(), true);
+  assert.deepEqual(game.choosePartner(2, "u0"), { ok: true });
+  await new Promise((r) => setTimeout(r, 10));
+  assert.equal(
+    game.state,
+    "bidding_syrian",
+    "the table has to be live for a takeover to mean anything",
+  );
   game.clearBotTimer?.();
   game.clearTurnTimer?.();
   return game;

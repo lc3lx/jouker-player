@@ -101,7 +101,15 @@ function broadcastTrixTableState(nsp, mongoTableId) {
   // Before the deal there is no game state to send, but the players already
   // sitting there still need to see the seat count climb and the countdown run.
   if (!game.gameState) {
-    if (typeof game.isWaitingForPlayers === "function" && game.isWaitingForPlayers()) {
+    if (typeof game.isChoosingPartners === "function" && game.isChoosingPartners()) {
+      emitToTrixHumans(nsp, mongoTableId, "partner_selection", {
+        tableId: String(mongoTableId),
+        ...game.partnerSelectionPayload(),
+      });
+    } else if (
+      typeof game.isWaitingForPlayers === "function" &&
+      game.isWaitingForPlayers()
+    ) {
       emitToTrixHumans(nsp, mongoTableId, "waiting_for_players", {
         tableId: String(mongoTableId),
         remainingSeconds: game.remainingWaitSeconds(),
@@ -212,6 +220,9 @@ function wireTrixGame(nsp, tableId, game) {
       // The seats are being held open for real players. Everyone already at
       // the table sees the same countdown, not just whoever armed it.
       nsp.to(`trix:${tid}`).emit("waiting_for_players", payload);
+    } else if (event === "partner_selection" && payload) {
+      // One player names a partner and that player accepts; everyone watches.
+      nsp.to(`trix:${tid}`).emit("partner_selection", payload);
     }
   });
 }
@@ -250,6 +261,34 @@ async function abortCardTableRestartZombie({ gameType, table, game, socket }) {
   await sanitizeCardTableOnBoot(table);
   emitInvalidMove(socket, "table_reset_after_restart");
   return true;
+}
+
+/**
+ * `choose_partner` / `partner_response` for whichever card table the caller is
+ * sitting at. Both games run the identical exchange (engine/partnerSelection),
+ * so the only difference is which map to look the table up in.
+ */
+function resolvePartnerContext(userId) {
+  const trixId = roomManager.getTrixTableIdForUser(userId);
+  if (trixId) {
+    const game = roomManager.getTrixGameForTable(trixId);
+    if (game) return { type: "trix", tableId: String(trixId), game };
+  }
+  const t41Id = roomManager.getTarneeb41TableIdForUser(userId);
+  if (t41Id) {
+    const game = roomManager.getTarneeb41GameForTable(t41Id);
+    if (game) return { type: "tarneeb41", tableId: String(t41Id), game };
+  }
+  return null;
+}
+
+function broadcastPartnerSelection(nsp, ctx) {
+  const payload = ctx.game.partnerSelectionPayload?.();
+  if (!payload) return;
+  nsp.to(`${ctx.type}:${ctx.tableId}`).emit("partner_selection", {
+    tableId: ctx.tableId,
+    ...payload,
+  });
 }
 
 function getOrCreateTrixGameWired(nsp, tableId, gameMode) {
@@ -353,7 +392,9 @@ function wireTarneeb41Game(nsp, tableId, game) {
       event === "turn_timer_update" ||
       event === "turn_timer_expired" ||
       event === "game_start_countdown" ||
-      event === "game_start_countdown_cancelled"
+      event === "game_start_countdown_cancelled" ||
+      event === "waiting_for_players" ||
+      event === "partner_selection"
     ) {
       emitToTarneeb41Humans(nsp, tid, event, payload);
     } else if (event === "bot_chat" && payload) {
@@ -790,6 +831,11 @@ function registerGameHandlers(nsp, jwtVerify) {
               humanCount: game.humanCount(),
               requiredPlayers: game.getRequiredPlayers(),
             },
+            // Set on a شركة table that is already picking its pairs, so a
+            // player who joins mid-exchange sees it rather than a blank wait.
+            partnerSelection: game.isChoosingPartners()
+              ? game.partnerSelectionPayload()
+              : null,
           });
           broadcastTrixTableState(nsp, String(table._id));
           return;
@@ -1728,6 +1774,41 @@ function registerGameHandlers(nsp, jwtVerify) {
       if (ok && ctx.type !== "trix" && ctx.type !== "tarneeb41") {
         broadcastGameState(nsp, ctx.room.roomId);
       }
+    });
+
+    // choose_partner — the chooser names who they want to play with. The other
+    // two players are partners by what is left, so one choice settles the table.
+    socket.on("choose_partner", (payload) => {
+      const ctx = resolvePartnerContext(userId);
+      if (!ctx) {
+        emitInvalidMove(socket, "not_at_a_card_table");
+        return;
+      }
+      const raw = payload && payload.seatIndex;
+      const seatIndex = Number.isFinite(Number(raw)) ? Number(raw) : -1;
+      const result = ctx.game.choosePartner?.(seatIndex, userId);
+      if (!result || !result.ok) {
+        emitInvalidMove(socket, result?.reason || "choose_partner_failed");
+        return;
+      }
+      broadcastPartnerSelection(nsp, ctx);
+    });
+
+    // partner_response — the named player accepts or turns it down. A decline
+    // sends the chooser back to picking, minus whoever just said no.
+    socket.on("partner_response", (payload) => {
+      const ctx = resolvePartnerContext(userId);
+      if (!ctx) {
+        emitInvalidMove(socket, "not_at_a_card_table");
+        return;
+      }
+      const accepted = payload?.accept === true || payload?.accepted === true;
+      const result = ctx.game.respondToPartner?.(accepted, userId);
+      if (!result || !result.ok) {
+        emitInvalidMove(socket, result?.reason || "partner_response_failed");
+        return;
+      }
+      broadcastPartnerSelection(nsp, ctx);
     });
 
     // fill_with_bots — client requests AI fill after waiting (no humans available).

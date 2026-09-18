@@ -11,6 +11,7 @@ const {
   WAIT_FOR_PLAYERS_MS,
   remainingWaitSeconds,
 } = require("../../utils/cardTableTimings");
+const { PartnerSelection } = require("../../engine/partnerSelection");
 const TarneebBot = require("../../engine/bots/TarneebBot");
 const botPoolService = require("../../services/botPoolService");
 const botProfileService = require("../../services/botProfileService");
@@ -47,6 +48,42 @@ function parseTurnTimeoutSeconds() {
   const n = parseInt(process.env.TURN_TIMEOUT_SECONDS || "30", 10);
   if (!Number.isFinite(n) || n < 5) return 30;
   return Math.min(n, 120);
+}
+
+/** The chair a Mongo seat row occupies; array order for rows predating choice. */
+function chairOfSeat(seat, index) {
+  const n = Number(seat?.seatPosition);
+  return Number.isInteger(n) && n >= 0 ? n : index;
+}
+
+/** Chairs of a four-seat table that nobody in `players` has claimed. */
+function freeChairsAround(players) {
+  const taken = new Set(
+    (players || []).map((p, i) => (Number.isInteger(p?.chair) ? p.chair : i))
+  );
+  const out = [];
+  for (let i = 0; i < 4; i += 1) if (!taken.has(i)) out.push(i);
+  return out;
+}
+
+/**
+ * Order the roster by the chairs people picked and renumber seatIndex to match.
+ *
+ * The engine indexes hands, bids, trick counts and turn order by `seatIndex`,
+ * so this is only ever safe before a deal -- the same rule partner selection
+ * follows.
+ */
+function reindexByChair(players) {
+  if (!Array.isArray(players)) return players;
+  players.sort((a, b) => {
+    const ac = Number.isInteger(a?.chair) ? a.chair : 0;
+    const bc = Number.isInteger(b?.chair) ? b.chair : 0;
+    return ac - bc;
+  });
+  players.forEach((p, i) => {
+    if (p) p.seatIndex = i;
+  });
+  return players;
 }
 
 class Tarneeb41Game extends BaseGameEngine {
@@ -103,6 +140,12 @@ class Tarneeb41Game extends BaseGameEngine {
      * deliberately humans-only.
      */
     this.botsEnabled = true;
+    /**
+     * The pairs are chosen before the deal. Choosing them is what sets the
+     * seating, because teams here are `seatIndex % 2` everywhere.
+     * @type {import('../../engine/partnerSelection').PartnerSelection|null}
+     */
+    this.partnerSelection = null;
     this.countdownInterval = null;
     this._countdownStartGate = null;
     this.trickResolving = false;
@@ -299,12 +342,18 @@ class Tarneeb41Game extends BaseGameEngine {
       return;
     }
 
+    // Seated in the chair each player picked. `seatPosition` is what the join
+    // recorded; rows from before players could choose carry none, and for those
+    // the array order was the chair, so that is the fallback.
     this.players = [];
-    for (let i = 0; i < tableDoc.seats.length; i++) {
-      const seat = tableDoc.seats[i];
+    const bySeat = tableDoc.seats
+      .map((seat, i) => ({ seat, chair: chairOfSeat(seat, i) }))
+      .sort((a, b) => a.chair - b.chair);
+
+    for (const { seat, chair } of bySeat) {
       const uid = seat.user && seat.user._id ? seat.user._id : seat.user;
       const uidStr = String(uid);
-      let nm = `لاعب ${i + 1}`;
+      let nm = `لاعب ${chair + 1}`;
       let avatar = null;
       if (seat.user && typeof seat.user === "object") {
         if (seat.user.name) nm = String(seat.user.name);
@@ -314,6 +363,7 @@ class Tarneeb41Game extends BaseGameEngine {
         userId: uid,
         socketId: resolveSocket(uidStr) || null,
         seatIndex: this.players.length,
+        chair,
         isBot: false,
         displayName: nm,
         avatar,
@@ -382,8 +432,12 @@ class Tarneeb41Game extends BaseGameEngine {
 
     if (this.isReadyForCountdown()) {
       this.clearWaitForPlayers();
-      this.startGameCountdown();
-      return { waiting: false, remainingSeconds: 0 };
+      this.beginPartnerSelectionOrStart();
+      return {
+        waiting: false,
+        choosingPartners: this.isChoosingPartners(),
+        remainingSeconds: 0,
+      };
     }
 
     if (this.humanCount() <= 0) {
@@ -433,6 +487,77 @@ class Tarneeb41Game extends BaseGameEngine {
     // fillWithBots starts the game and fires _notifyAfterMove, which is what
     // the socket layer listens on to broadcast the new table state.
     await this.fillWithBots();
+  }
+
+  /** True while the table is picking its pairs, before the deal. */
+  isChoosingPartners() {
+    return !!this.partnerSelection && this.partnerSelection.active;
+  }
+
+  partnerSelectionPayload() {
+    return this.partnerSelection ? this.partnerSelection.toPayload() : null;
+  }
+
+  /**
+   * The last gate before the start countdown: the four players settle who is
+   * partnered with whom, which in this engine *is* the seating order. Once per
+   * table, not per round — the pairs hold for the whole game.
+   */
+  beginPartnerSelectionOrStart() {
+    if (this.state !== "waiting") return false;
+    if (this.partnerSelection && this.partnerSelection.isSettled) {
+      this.startGameCountdown();
+      return false;
+    }
+    if (this.isChoosingPartners()) return true;
+
+    this.partnerSelection = new PartnerSelection({
+      roomId: this.roomId,
+      getPlayers: () => this.players,
+      onSeatsArranged: (arranged) => {
+        // Safe only before the deal: afterwards seat indices own the hands,
+        // the bids, the trick counts and the Mongo seat rows.
+        this.players = arranged;
+      },
+      onSettled: () => {
+        void this._afterPartnersSettled();
+      },
+      onUpdate: (payload) => {
+        this._emit("partner_selection", { tableId: this.roomId, ...payload });
+      },
+    });
+    return this.partnerSelection.begin();
+  }
+
+  async _afterPartnersSettled() {
+    await this.applyCosmeticsToPlayers();
+    if (this.state !== "waiting") return;
+
+    // Four humans get the visible start countdown. A bot-filled table has
+    // nobody left to wait for, so it deals — `isReadyForCountdown` is
+    // humans-only by design and would leave such a table sitting forever.
+    if (this.isReadyForCountdown()) {
+      this.startGameCountdown();
+      this._notifyAfterMove({ success: true, partnersSettled: true });
+      return;
+    }
+
+    const started = await this.startGame();
+    if (started) {
+      this._notifyAfterMove({ success: true, gameStarted: true });
+    }
+  }
+
+  /** The chooser names a partner. */
+  choosePartner(seatIndex, byUserId) {
+    if (!this.partnerSelection) return { ok: false, reason: "not_choosing" };
+    return this.partnerSelection.choose(seatIndex, byUserId);
+  }
+
+  /** The named player accepts or declines. */
+  respondToPartner(accepted, byUserId) {
+    if (!this.partnerSelection) return { ok: false, reason: "not_awaiting" };
+    return this.partnerSelection.respond(accepted, byUserId);
   }
 
   startGameCountdown() {
@@ -551,14 +676,18 @@ class Tarneeb41Game extends BaseGameEngine {
         this.players[i] = bot;
       }
     }
-    // Also append bots for any seats not yet in this.players
+    // Also append bots for any seats not yet in this.players. They take the
+    // chairs nobody picked, so once the table is full every human is sitting
+    // exactly where they chose.
     const needed = this.maxPlayers - this.players.length;
+    const freeChairs = freeChairsAround(this.players);
     for (let i = 0; i < needed; i++) {
       const seatIndex = this.players.length;
       const bot = {
         userId: `bot_fill_${ts}_${seatIndex}`,
         socketId: null,
         seatIndex,
+        chair: freeChairs.shift() ?? seatIndex,
         isBot: true,
         displayName: "بوت",
         chips: 0,
@@ -566,6 +695,11 @@ class Tarneeb41Game extends BaseGameEngine {
       this._applyBotIdentity(bot);
       this.players.push(bot);
     }
+    reindexByChair(this.players);
+    // The pairs still get chosen — a table with one human and three bots lets
+    // that human pick which bot partners them.
+    if (this.beginPartnerSelectionOrStart()) return false;
+
     const started = await this.startGame();
     if (started) {
       this._notifyAfterMove({ success: true, gameStarted: true });
@@ -669,6 +803,7 @@ class Tarneeb41Game extends BaseGameEngine {
     this.clearTurnTimer();
     this.clearCountdown();
     this.clearWaitForPlayers();
+    this.partnerSelection?.destroy();
     this.clearTrickResolveTimer();
     timerManager.clearAll(this.roomId);
     // Free any persistent bot identities this game was holding.
@@ -1200,6 +1335,10 @@ class Tarneeb41Game extends BaseGameEngine {
       // Seconds before bots fill the empty chairs. Null once a deal is running.
       waitForPlayersSeconds: this.isWaitingForPlayers()
         ? this.remainingWaitSeconds()
+        : null,
+      // Who is partnered with whom, before the deal. Null once settled.
+      partnerSelection: this.isChoosingPartners()
+        ? this.partnerSelectionPayload()
         : null,
       turnTimer: this.turnTimerPhase
         ? {

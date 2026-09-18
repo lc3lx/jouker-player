@@ -153,7 +153,10 @@ test("RC-2: mixed human/bot game completes without human stall", async () => {
   }
 });
 
-test("RC-2b: fillWithBots starts game from 1-human waiting state", async () => {
+test("RC-2b: fillWithBots seats the bots, then the table picks its pairs", async () => {
+  // The deal is now gated behind partner selection: the human at the table
+  // says who they want to play with before any cards move. fillWithBots still
+  // does its half — three bots on the empty chairs — and hands over.
   const game = new Tarneeb41Game("fill_test");
   game.players.push({
     userId: "u0",
@@ -167,11 +170,28 @@ test("RC-2b: fillWithBots starts game from 1-human waiting state", async () => {
     game.clearBotTimer();
     assert.equal(game.players.length, 1);
     assert.equal(game.state, "waiting");
+
     const started = await game.fillWithBots();
-    assert.equal(started, true);
+    assert.equal(started, false, "no deal until the pairs are settled");
     assert.equal(game.players.length, 4);
     assert.equal(game.players.filter((p) => p.isBot).length, 3);
-    assert.equal(game.state, "bidding_syrian");
+    assert.equal(game.isChoosingPartners(), true);
+
+    // The human picks a bot; a bot never keeps anyone waiting.
+    const picked = game.players[2].userId;
+    assert.deepEqual(game.choosePartner(2, "u0"), { ok: true });
+
+    // Settling hands off to an async deal; let it land.
+    await new Promise((r) => setTimeout(r, 10));
+
+    assert.equal(game.isChoosingPartners(), false);
+    assert.equal(
+      String(game.players[2].userId),
+      String(picked),
+      "the chosen partner sits opposite the chooser",
+    );
+    // countdown, then the deal — the normal four-seat start path.
+    assert.ok(["countdown", "bidding_syrian"].includes(game.state), game.state);
   } finally {
     game.destroy();
   }

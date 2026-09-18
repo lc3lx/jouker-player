@@ -22,10 +22,23 @@ function envMs(name, fallback) {
 /** Shared with poker's POKER_WAIT_FOR_PLAYERS_MS default on purpose. */
 const WAIT_FOR_PLAYERS_MS = envMs("CARD_WAIT_FOR_PLAYERS_MS", 15000);
 
+/**
+ * Partner picking, before the deal (Tarneeb 41 and تركس شركة). One player names
+ * the partner they want and that player accepts; the other two are partners by
+ * what is left. Both steps are bounded so a silent table still gets a game.
+ */
+const PARTNER_CHOOSE_MS = envMs("CARD_PARTNER_CHOOSE_MS", 20000);
+const PARTNER_ACCEPT_MS = envMs("CARD_PARTNER_ACCEPT_MS", 15000);
+
 /** Seconds still to run on a window that ends at `until` (ms epoch). */
 function remainingWaitSeconds(until) {
   if (!until) return 0;
   return Math.max(0, Math.ceil((until - Date.now()) / 1000));
 }
 
-module.exports = { WAIT_FOR_PLAYERS_MS, remainingWaitSeconds };
+module.exports = {
+  WAIT_FOR_PLAYERS_MS,
+  PARTNER_CHOOSE_MS,
+  PARTNER_ACCEPT_MS,
+  remainingWaitSeconds,
+};

@@ -226,21 +226,23 @@ test("Tarneeb: one player waits instead of getting bots", () => {
   }
 });
 
-test("Tarneeb: four humans go straight to the start countdown", () => {
+test("Tarneeb: four humans stop waiting and go to picking partners", () => {
   const game = new Tarneeb41Game("t41_wait_2", { mongoTableId: "t1" });
   try {
     seatHumans(game, 4);
     const result = game.startOrWaitForPlayers();
 
     assert.equal(result.waiting, false);
-    assert.equal(game.state, "countdown");
+    assert.equal(result.choosingPartners, true);
     assert.equal(game.waitForPlayersUntil, null);
+    // The countdown comes after the pairs are settled, not before.
+    assert.equal(game.state, "waiting");
   } finally {
     game.destroy();
   }
 });
 
-test("Tarneeb: when the window runs out the table fills and deals", async () => {
+test("Tarneeb: when the window runs out the table fills, then picks pairs", async () => {
   const game = new Tarneeb41Game("t41_wait_3", { mongoTableId: "t1" });
   try {
     seatHumans(game, 1);
@@ -251,6 +253,10 @@ test("Tarneeb: when the window runs out the table fills and deals", async () => 
 
     assert.equal(game.players.length, 4);
     assert.equal(botCount(game), 3);
+    assert.equal(game.isChoosingPartners(), true, "the human still picks");
+
+    game.choosePartner(2, "u0");
+    await new Promise((r) => setTimeout(r, 10));
     assert.equal(game.state, "bidding_syrian", "the deal is live");
   } finally {
     game.destroy();
@@ -258,6 +264,7 @@ test("Tarneeb: when the window runs out the table fills and deals", async () => 
 });
 
 test("Tarneeb: a humans-only table never fills", async () => {
+  // (partner picking never starts here — there is no full table to pair up)
   const game = new Tarneeb41Game("t41_wait_4", { mongoTableId: "t1" });
   try {
     seatHumans(game, 2);
@@ -299,6 +306,10 @@ test("Tarneeb: a manual fill still short-circuits the wait", async () => {
 
     assert.equal(game.waitForPlayersUntil, null, "the window is stood down");
     assert.equal(botCount(game), 3);
+    assert.equal(game.isChoosingPartners(), true);
+
+    game.choosePartner(1, "u0");
+    await new Promise((r) => setTimeout(r, 10));
     assert.equal(game.state, "bidding_syrian");
   } finally {
     game.destroy();
