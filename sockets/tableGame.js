@@ -1065,7 +1065,9 @@ class PokerTable {
           await this.stateStore.delete(this.tableId);
         }
       } else if (mongoHumans === 0 && engineHumans > 0) {
-        this.resetStateFromTable(tableDoc || { seats: [] });
+        this.resetStateFromTable(
+          tableDoc || { seats: [], settings: { botsEnabled: this.botsEnabled } },
+        );
         if (this.stateStore?.delete) {
           await this.stateStore.delete(this.tableId);
         }
@@ -1725,7 +1727,15 @@ class PokerTable {
     this.buyIn = toSafeInt(table.buyIn ?? table.minBuyIn, this.buyIn || this.minBuyIn);
     this.minimumBet = deriveMinimumBet(this.buyIn, table.minimumBet ?? this.minimumBet);
     this.rakePolicy = resolveRakePolicy(table);
-    this.botsEnabled = table.settings?.botsEnabled !== false;
+    // Only a document that actually carries `settings` may change the bot
+    // policy. This method is also called with synthetic stand-ins (an empty
+    // table after a reset, a null tableDoc), and `undefined !== false` reads as
+    // "bots allowed" — which silently re-enabled them on a humans-only table.
+    if (table.settings && typeof table.settings === "object") {
+      this.botsEnabled = table.settings.botsEnabled !== false;
+    } else if (this.botsEnabled === undefined) {
+      this.botsEnabled = true;
+    }
     // Tournament tables: never lobby-fill empty seats with bots (vacate-replace still OK).
     if (
       table.tableKind === "tournament" ||
@@ -1882,6 +1892,7 @@ class PokerTable {
         minBuyIn: this.minBuyIn,
         maxBuyIn: this.maxBuyIn,
         capacity: this.capacity,
+        settings: { botsEnabled: this.botsEnabled },
       });
     this.resetStateFromTable(doc);
     this.stateRevision = toSafeInt(this.stateRevision, 0) + 1;
@@ -2376,10 +2387,18 @@ class PokerTable {
     });
     if (!result.ok) return;
 
-    const bot = this.createBotSeat();
-    bot.chips = pending.chips;
-    const insertAt = Math.min(pending.seatIndex, this.seats.length);
-    this.seats.splice(insertAt, 0, bot);
+    // The leaver has already been cashed out by finalizeVacateWithBot. On an
+    // ordinary table a bot inherits the engine-side stack so a hand in flight
+    // can still be played out; on a humans-only table nothing takes the chair —
+    // it simply opens up again.
+    if (this.botsEnabled) {
+      const bot = this.createBotSeat();
+      bot.chips = pending.chips;
+      const insertAt = Math.min(pending.seatIndex, this.seats.length);
+      this.seats.splice(insertAt, 0, bot);
+    } else {
+      this.reindexSeatsByPosition();
+    }
 
     await this.startIfReady({ refreshFromDb: false });
     await this.broadcastState();
