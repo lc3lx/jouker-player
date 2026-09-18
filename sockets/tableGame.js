@@ -472,6 +472,7 @@ class PokerTable {
     this.botFillDeadline = null;
     this.waitForPlayersTimer = null;
     this.waitForPlayersDeadline = null;
+    this.initialDealDeadline = null;
     this.nextHandTimer = null;
     this.resetStateFromTable(table);
     this.turnSeconds = POKER_TIMINGS.TURN_SECONDS;
@@ -728,6 +729,7 @@ class PokerTable {
       actionDeadline: this.actionDeadline,
       botFillDeadline: this.botFillDeadline,
       waitForPlayersDeadline: this.waitForPlayersDeadline,
+      initialDealDeadline: this.initialDealDeadline,
       turnSeconds: this.turnSeconds,
       smallBlind: this.smallBlind,
       bigBlind: this.bigBlind,
@@ -807,6 +809,7 @@ class PokerTable {
     this.actionDeadline = snapshot.actionDeadline || null;
     this.botFillDeadline = snapshot.botFillDeadline || null;
     this.waitForPlayersDeadline = snapshot.waitForPlayersDeadline || null;
+    this.initialDealDeadline = snapshot.initialDealDeadline || null;
     this.turnSeconds = toSafeInt(snapshot.turnSeconds, this.turnSeconds);
     this.smallBlind = toSafeInt(snapshot.smallBlind, this.smallBlind);
     this.bigBlind = toSafeInt(snapshot.bigBlind, this.bigBlind);
@@ -1509,6 +1512,7 @@ class PokerTable {
 
   async onWaitForPlayersWindowEnd() {
     this.waitForPlayersTimer = null;
+    if (this.seatedHumanCount() === 0) this.initialDealDeadline = null;
     await this.autoRebuyBustedHumans();
     if (this.seatedHumanCount() >= 1 && this.activeSeatCount() < this.botFillTarget) {
       this.addBotsForMissingSeats();
@@ -1835,6 +1839,7 @@ class PokerTable {
     this.uncollectedRake = 0;
     this.lastHand = null;
     this.handCounter = 0;
+    this.initialDealDeadline = null;
     this.showdownEndSeq = 0;
     this.deck = [];
 
@@ -3083,6 +3088,23 @@ class PokerTable {
     try {
       if (refreshFromDb) {
         await this.refreshSeatsFromDb();
+      }
+      // Keep the first table open for arrivals, even if a second human or bots
+      // are already ready. Repeated joins must not restart or bypass the clock.
+      if (this.seatedHumanCount() === 0) this.initialDealDeadline = null;
+      if (this.handCounter === 0 && this.seatedHumanCount() > 0 && !this.isTournamentTable()) {
+        this.initialDealDeadline ??= Date.now() + POKER_TIMINGS.INITIAL_DEAL_WAIT_MS;
+        const remaining = this.initialDealDeadline - Date.now();
+        if (remaining > 0) {
+          this.clearWaitForPlayersTimer();
+          this.waitForPlayersDeadline = this.initialDealDeadline;
+          this.waitForPlayersTimer = setTimeout(() => {
+            void this.onWaitForPlayersWindowEnd();
+          }, remaining);
+          await this.syncMongoTableStatus();
+          await this.broadcastState();
+          return;
+        }
       }
       await this.autoRebuyBustedHumans();
 

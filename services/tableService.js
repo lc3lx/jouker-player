@@ -477,6 +477,10 @@ exports.getTables = asyncHandler(async (req, res) => {
   // Private / VIP-hosted tables are reached through invitation or the
   // authenticated private listing — never advertise them in the public lobby.
   filter.isPrivate = { $ne: true };
+  if (gameType === 'poker') {
+    filter.owner = null;
+    filter.tableKind = { $in: ['static', 'dynamic'] };
+  }
   if (req.query.tier) {
     filter.tier = req.query.tier;
   }
@@ -522,7 +526,7 @@ exports.getTables = asyncHandler(async (req, res) => {
     .skip(skip)
     .limit(limit)
     .select(
-      "gameType tier tableNumber smallBlind bigBlind minBuyIn maxBuyIn capacity seats status waitingQueue vacatingPlayers pendingPermanentLeaves rejoinBlockedUsers"
+      "gameType tier tableNumber smallBlind bigBlind minBuyIn maxBuyIn capacity seats status waitingQueue vacatingPlayers pendingPermanentLeaves rejoinBlockedUsers isPrivate owner tableKind"
     );
 
   const summaryMatch = {
@@ -531,6 +535,10 @@ exports.getTables = asyncHandler(async (req, res) => {
   };
   if (req.query.tier) summaryMatch.tier = req.query.tier;
   summaryMatch.isPrivate = { $ne: true };
+  if (gameType === 'poker') {
+    summaryMatch.owner = null;
+    summaryMatch.tableKind = { $in: ['static', 'dynamic'] };
+  }
 
   const stakeRows = await Table.aggregate([
     { $match: summaryMatch },

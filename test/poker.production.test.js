@@ -43,6 +43,7 @@ function mkTable(seatCount, chips = 100000) {
 function mkGame(seatCount) {
   const g = new PokerTable(createNspStub(), mkTable(seatCount));
   g.broadcastState = async () => {};
+  g.initialDealDeadline = Date.now() - 1;
   g.syncMongoTableStatus = async () => {};
   // Engine tests use synthetic userIds ("u0"..) — stub the cosmetics/VIP
   // resolver (which casts userIds to ObjectId) so these unit tests stay isolated

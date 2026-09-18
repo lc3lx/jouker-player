@@ -44,6 +44,8 @@ function mkMongoTable(seatCount, overrides = {}) {
 
 function mkGame(seatCount, overrides = {}) {
   const g = new PokerTable(createNspStub(), mkMongoTable(seatCount, overrides));
+  // These allocation tests start after the initial arrival window.
+  g.initialDealDeadline = Date.now() - 1;
   g.broadcastState = async () => {};
   g.syncMongoTableStatus = async () => {};
   g.autoRebuyBustedHumans = async () => 0;

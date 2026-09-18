@@ -38,6 +38,8 @@ function mkTableDoc(overrides = {}) {
 
 function mkGame(overrides = {}) {
   const g = new PokerTable(createNspStub(), mkTableDoc(overrides));
+  // Recovery/next-hand fixtures have already waited for initial arrivals.
+  g.initialDealDeadline = Date.now() - 1;
   g.broadcastState = async () => {};
   g.syncMongoTableStatus = async () => {};
   g.autoRebuyBustedHumans = async () => 0;
