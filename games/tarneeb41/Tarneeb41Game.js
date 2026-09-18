@@ -7,6 +7,10 @@ const crypto = require("crypto");
 const { newDeck, shuffle } = require("../utils/cards");
 const rules = require("./tarneeb41.rules");
 const { GAME_START_COUNTDOWN_SECONDS, TRICK_DISPLAY_MS } = require("./tarneeb41.constants");
+const {
+  WAIT_FOR_PLAYERS_MS,
+  remainingWaitSeconds,
+} = require("../../utils/cardTableTimings");
 const TarneebBot = require("../../engine/bots/TarneebBot");
 const botPoolService = require("../../services/botPoolService");
 const botProfileService = require("../../services/botProfileService");
@@ -79,6 +83,26 @@ class Tarneeb41Game extends BaseGameEngine {
     this.onAfterMove = null;
     this.state = "waiting";
     this.countdownSeconds = null;
+    /**
+     * The open seats are held for real players until this moment; only then do
+     * bots sit down and the deal start.
+     *
+     * This used to be the client's job — the table screen ran a 30s timer and
+     * then emitted `fill_with_bots`. A client-side timer is not a rule: if the
+     * app was backgrounded or the socket dropped, nothing ever filled and the
+     * table sat forever. The server owns the window now; `fill_with_bots`
+     * still works as a manual "don't wait, deal now".
+     * @type {number|null} ms epoch
+     */
+    this.waitForPlayersUntil = null;
+    this.waitForPlayersTimer = null;
+    /**
+     * Bots may fill this table at all. Tournament tables set it false. Only
+     * ever changed from a table document that actually carries `settings` — a
+     * synthetic stand-in must not silently re-enable bots on a table that is
+     * deliberately humans-only.
+     */
+    this.botsEnabled = true;
     this.countdownInterval = null;
     this._countdownStartGate = null;
     this.trickResolving = false;
@@ -254,7 +278,16 @@ class Tarneeb41Game extends BaseGameEngine {
     return true;
   }
 
+  /** Adopt the table's bot policy. See the note on `botsEnabled`. */
+  applyTablePolicy(tableDoc) {
+    if (!tableDoc || typeof tableDoc.settings !== "object" || tableDoc.settings === null) {
+      return;
+    }
+    this.botsEnabled = tableDoc.settings.botsEnabled !== false;
+  }
+
   async syncLobbyFromTable(tableDoc, resolveSocket) {
+    this.applyTablePolicy(tableDoc);
     if (ACTIVE_STATES.has(this.state) && this.players.length > 0) {
       for (const p of this.players) {
         if (!p.isBot) {
@@ -313,6 +346,93 @@ class Tarneeb41Game extends BaseGameEngine {
       p.vipLevel = row?.vipLevel || null;
       p.cosmetics = row?.cosmetics ? { ...row.cosmetics } : emptyCosmetics();
     }
+  }
+
+  /** Seconds left before bots come down; 0 when no wait is running. */
+  remainingWaitSeconds() {
+    return remainingWaitSeconds(this.waitForPlayersUntil);
+  }
+
+  /** True while the table is holding its seats open for real players. */
+  isWaitingForPlayers() {
+    return this.state === "waiting" && this.waitForPlayersUntil != null;
+  }
+
+  clearWaitForPlayers() {
+    if (this.waitForPlayersTimer != null) {
+      if (!timerManager.clear(this.waitForPlayersTimer)) {
+        clearTimeout(this.waitForPlayersTimer);
+      }
+      this.waitForPlayersTimer = null;
+    }
+    this.waitForPlayersUntil = null;
+  }
+
+  /**
+   * Called when someone sits down. A full table of humans runs the normal
+   * start countdown; anything less holds the empty seats open, and only when
+   * that runs out do bots fill them.
+   *
+   * @returns {{ waiting: boolean, remainingSeconds: number }}
+   */
+  startOrWaitForPlayers() {
+    if (this.state !== "waiting") {
+      return { waiting: false, remainingSeconds: 0 };
+    }
+
+    if (this.isReadyForCountdown()) {
+      this.clearWaitForPlayers();
+      this.startGameCountdown();
+      return { waiting: false, remainingSeconds: 0 };
+    }
+
+    if (this.humanCount() <= 0) {
+      this.clearWaitForPlayers();
+      return { waiting: false, remainingSeconds: 0 };
+    }
+
+    this.armWaitForPlayers();
+    return { waiting: true, remainingSeconds: this.remainingWaitSeconds() };
+  }
+
+  /** Start the window, or leave a running one alone. */
+  armWaitForPlayers() {
+    if (this.state !== "waiting") return false;
+    if (this.waitForPlayersTimer != null) return false;
+
+    this.waitForPlayersUntil = Date.now() + WAIT_FOR_PLAYERS_MS;
+    this.waitForPlayersTimer = timerManager.schedule(
+      this.roomId,
+      "wait_for_players",
+      WAIT_FOR_PLAYERS_MS,
+      () => {
+        this.waitForPlayersTimer = null;
+        void this._onWaitForPlayersElapsed();
+      }
+    );
+    this._emit("waiting_for_players", {
+      tableId: this.roomId,
+      remainingSeconds: this.remainingWaitSeconds(),
+      humanCount: this.humanCount(),
+    });
+    return true;
+  }
+
+  async _onWaitForPlayersElapsed() {
+    this.clearWaitForPlayers();
+    if (this.state !== "waiting") return;
+    if (this.humanCount() <= 0) return;
+
+    if (this.botsEnabled === false) {
+      // Humans-only table: keep waiting rather than leaving a finished
+      // countdown with no timer behind it.
+      this.armWaitForPlayers();
+      return;
+    }
+
+    // fillWithBots starts the game and fires _notifyAfterMove, which is what
+    // the socket layer listens on to broadcast the new table state.
+    await this.fillWithBots();
   }
 
   startGameCountdown() {
@@ -413,6 +533,7 @@ class Tarneeb41Game extends BaseGameEngine {
   /** Fill remaining seats with AI bots then start the game immediately. */
   async fillWithBots() {
     if (this.state !== "waiting") return false;
+    this.clearWaitForPlayers();
     const ts = Date.now();
     // Replace empty-slot placeholders (userId=null, not a real bot) with actual bots
     for (let i = 0; i < this.players.length; i++) {
@@ -547,6 +668,7 @@ class Tarneeb41Game extends BaseGameEngine {
     this.clearBotTimer();
     this.clearTurnTimer();
     this.clearCountdown();
+    this.clearWaitForPlayers();
     this.clearTrickResolveTimer();
     timerManager.clearAll(this.roomId);
     // Free any persistent bot identities this game was holding.
@@ -1075,6 +1197,10 @@ class Tarneeb41Game extends BaseGameEngine {
       trickResolving: this.trickResolving,
       trickDisplayRemainingSeconds,
       countdownSeconds: this.state === "countdown" ? this.countdownSeconds : null,
+      // Seconds before bots fill the empty chairs. Null once a deal is running.
+      waitForPlayersSeconds: this.isWaitingForPlayers()
+        ? this.remainingWaitSeconds()
+        : null,
       turnTimer: this.turnTimerPhase
         ? {
             phase: this.turnTimerPhase,

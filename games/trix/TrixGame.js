@@ -10,6 +10,10 @@ const botPoolService = require('../../services/botPoolService');
 const botProfileService = require('../../services/botProfileService');
 const botChatService = require('../../services/botChatService');
 const timerManager = require('../../engine/TimerManager');
+const {
+  WAIT_FOR_PLAYERS_MS,
+  remainingWaitSeconds,
+} = require('../../utils/cardTableTimings');
 const StateMachine = require('../../engine/StateMachine');
 const { STATE: TRIX_STATE, TRANSITIONS: TRIX_TRANSITIONS } = require('../../engine/states/trixStates');
 const {
@@ -85,6 +89,26 @@ class TrixGame extends BaseGameEngine {
     this.maxPlayers = 4;
     /** @type {'solo'|'partnership'} */
     this.gameMode = normalizeTrixMode(options.gameMode);
+    /**
+     * Bots may fill this table at all. Tournament tables set it false; a normal
+     * cash table leaves it true. Only ever changed from a table document that
+     * actually carries `settings` — a synthetic stand-in must not silently
+     * re-enable bots on a table that is deliberately humans-only.
+     */
+    this.botsEnabled = true;
+    /**
+     * The open seat is held for real players until this moment, and only then
+     * do bots come down and the deal start. Null once the deal has begun.
+     * @type {number|null} ms epoch
+     */
+    this.waitForPlayersUntil = null;
+    this.waitForPlayersTimer = null;
+    /**
+     * False until the wait has run out. While false `syncLobbyFromTable` seats
+     * humans only — otherwise the roster would show three bots the instant the
+     * first player walked in, which is the thing the wait exists to prevent.
+     */
+    this.botFillReleased = false;
     this.gameState = null;
     this._fsm = new StateMachine(this.state, TRIX_TRANSITIONS, {
       onIllegal: (from, to) => {
@@ -203,6 +227,7 @@ class TrixGame extends BaseGameEngine {
   destroy() {
     this.clearBotTimer();
     this.clearTurnTimer();
+    this.clearWaitForPlayers();
     timerManager.clearAll(this.roomId);
     // Free any persistent bot identities this game was holding.
     try {
@@ -464,7 +489,20 @@ class TrixGame extends BaseGameEngine {
       }));
   }
 
+  /**
+   * Adopt the table's bot policy. Guarded the way poker's is: a document with
+   * no `settings` is a synthetic stand-in, and reading `undefined !== false` off
+   * one is how a deliberately humans-only table quietly gets bots again.
+   */
+  applyTablePolicy(tableDoc) {
+    if (!tableDoc || typeof tableDoc.settings !== 'object' || tableDoc.settings === null) {
+      return;
+    }
+    this.botsEnabled = tableDoc.settings.botsEnabled !== false;
+  }
+
   async syncLobbyFromTable(tableDoc, resolveSocket) {
+    this.applyTablePolicy(tableDoc);
     if (this.gameState && ACTIVE_STATES.has(this.state)) {
       for (const p of this.players) {
         if (!p.isBot) {
@@ -499,8 +537,10 @@ class TrixGame extends BaseGameEngine {
         cosmetics: emptyCosmetics(),
       });
     }
+    // Humans only until the wait for real players has run out. Filling here is
+    // what used to put three bots on the table the moment someone sat down.
     let bi = 0;
-    while (this.players.length < 4) {
+    while (this.botFillReleased && this.botsEnabled && this.players.length < 4) {
       const botId = `bot_${Date.now()}_${bi}_${Math.random().toString(36).substr(2, 9)}`;
       bi += 1;
       const bot = {
@@ -547,6 +587,128 @@ class TrixGame extends BaseGameEngine {
    * Idempotent + single-flight: concurrent join handlers share one start, and
    * callers that already have gameState get an immediate success.
    */
+  /** Seconds left before bots come down; 0 when no wait is running. */
+  remainingWaitSeconds() {
+    return remainingWaitSeconds(this.waitForPlayersUntil);
+  }
+
+  /** True while the table is holding its seats open for real players. */
+  isWaitingForPlayers() {
+    return !this.gameState && this.waitForPlayersUntil != null;
+  }
+
+  clearWaitForPlayers() {
+    if (this.waitForPlayersTimer != null) {
+      if (!timerManager.clear(this.waitForPlayersTimer)) {
+        clearTimeout(this.waitForPlayersTimer);
+      }
+      this.waitForPlayersTimer = null;
+    }
+    this.waitForPlayersUntil = null;
+  }
+
+  /**
+   * The entry the join path calls instead of `startGame()`.
+   *
+   * A full table of humans deals at once. Anything less holds the empty seats
+   * open for WAIT_FOR_PLAYERS_MS; only when that runs out do bots sit down and
+   * the deal begin.
+   *
+   * @returns {Promise<{ started: boolean, waiting: boolean, remainingSeconds: number }>}
+   */
+  async startOrWaitForPlayers() {
+    if (this.gameState) {
+      return { started: true, waiting: false, remainingSeconds: 0 };
+    }
+
+    if (this.humanCount() >= 4) {
+      this.clearWaitForPlayers();
+      this.botFillReleased = true;
+      const started = await this.startGame();
+      return { started, waiting: false, remainingSeconds: 0 };
+    }
+
+    if (this.humanCount() <= 0) {
+      // Nobody is here — nothing to hold a seat for.
+      this.clearWaitForPlayers();
+      return { started: false, waiting: false, remainingSeconds: 0 };
+    }
+
+    this.armWaitForPlayers();
+    return {
+      started: false,
+      waiting: true,
+      remainingSeconds: this.remainingWaitSeconds(),
+    };
+  }
+
+  /** Start the window, or leave a running one alone. */
+  armWaitForPlayers() {
+    if (this.gameState) return false;
+    if (this.waitForPlayersTimer != null) return false;
+
+    this.waitForPlayersUntil = Date.now() + WAIT_FOR_PLAYERS_MS;
+    this.waitForPlayersTimer = timerManager.schedule(
+      this.roomId,
+      'wait_for_players',
+      WAIT_FOR_PLAYERS_MS,
+      () => {
+        this.waitForPlayersTimer = null;
+        void this._onWaitForPlayersElapsed();
+      }
+    );
+    this._emit('waiting_for_players', {
+      tableId: this.roomId,
+      remainingSeconds: this.remainingWaitSeconds(),
+      humanCount: this.humanCount(),
+    });
+    return true;
+  }
+
+  async _onWaitForPlayersElapsed() {
+    this.clearWaitForPlayers();
+    if (this.gameState) return;
+
+    // Still nobody at all: let the table go back to sleep rather than dealing
+    // to an empty room.
+    if (this.humanCount() <= 0) return;
+
+    if (!this.botsEnabled) {
+      // A humans-only table keeps waiting instead of leaving a finished
+      // countdown with no timer behind it (the poker lesson).
+      this.armWaitForPlayers();
+      this.notifyStateChanged();
+      return;
+    }
+
+    this.botFillReleased = true;
+    this._fillSeatsWithBots();
+    await this.applyCosmeticsToPlayers();
+    // startGame fires _notifyAfterMove({ gameStarted: true }) itself, which is
+    // what marks the table playing and broadcasts — no second call here.
+    await this.startGame();
+    this.notifyStateChanged();
+  }
+
+  /** Seat a bot on every empty chair. Only ever called past the wait window. */
+  _fillSeatsWithBots() {
+    while (this.players.length < 4) {
+      const botId = `bot_${Date.now()}_${Math.random().toString(36).substr(2, 5)}`;
+      const bot = {
+        userId: botId,
+        socketId: null,
+        seatIndex: this.players.length,
+        isBot: true,
+        displayName: 'بوت',
+        chips: 0,
+        vipLevel: null,
+        cosmetics: emptyCosmetics(),
+      };
+      this._applyBotIdentity(bot);
+      this.players.push(bot);
+    }
+  }
+
   async startGame() {
     if (this.gameState) return true;
     if (this._startPromise) return this._startPromise;
@@ -566,21 +728,12 @@ class TrixGame extends BaseGameEngine {
     this._settlementCompleted = false;
     this.processedMoveIds = new Set();
 
-    while (this.players.length < 4) {
-      const botId = `bot_${Date.now()}_${Math.random().toString(36).substr(2, 5)}`;
-      const bot = {
-        userId: botId,
-        socketId: null,
-        seatIndex: this.players.length,
-        isBot: true,
-        displayName: 'بوت',
-        chips: 0,
-        vipLevel: null,
-        cosmetics: emptyCosmetics(),
-      };
-      this._applyBotIdentity(bot);
-      this.players.push(bot);
-    }
+    // Dealing needs four seats. Reaching this with fewer means the wait for
+    // real players has already been resolved one way or the other, so filling
+    // here is the last step of that decision rather than a shortcut past it.
+    this.clearWaitForPlayers();
+    this.botFillReleased = true;
+    this._fillSeatsWithBots();
 
     await this.applyCosmeticsToPlayers();
 

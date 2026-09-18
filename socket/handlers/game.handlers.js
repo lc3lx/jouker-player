@@ -97,7 +97,20 @@ function broadcastGameState(nsp, roomId) {
 
 function broadcastTrixTableState(nsp, mongoTableId) {
   const game = roomManager.getTrixGameForTable(mongoTableId);
-  if (!game?.gameState) return;
+  if (!game) return;
+  // Before the deal there is no game state to send, but the players already
+  // sitting there still need to see the seat count climb and the countdown run.
+  if (!game.gameState) {
+    if (typeof game.isWaitingForPlayers === "function" && game.isWaitingForPlayers()) {
+      emitToTrixHumans(nsp, mongoTableId, "waiting_for_players", {
+        tableId: String(mongoTableId),
+        remainingSeconds: game.remainingWaitSeconds(),
+        humanCount: game.humanCount(),
+        requiredPlayers: game.getRequiredPlayers(),
+      });
+    }
+    return;
+  }
   if (typeof game.bumpStateRevision === "function") game.bumpStateRevision();
   game.players.forEach((p) => {
     if (p.isBot || !p.socketId) return;
@@ -195,6 +208,10 @@ function wireTrixGame(nsp, tableId, game) {
       // humans use — no special client logic).
       nsp.to(`trix:${tid}`).emit("table_chat", payload);
       nsp.to(`spec:${tid}`).emit("table_chat", payload);
+    } else if (event === "waiting_for_players" && payload) {
+      // The seats are being held open for real players. Everyone already at
+      // the table sees the same countdown, not just whoever armed it.
+      nsp.to(`trix:${tid}`).emit("waiting_for_players", payload);
     }
   });
 }
@@ -746,7 +763,10 @@ function registerGameHandlers(nsp, jwtVerify) {
         await game.applyCosmeticsToPlayers();
         if (!game.gameState) {
           try {
-            await game.startGame();
+            // Holds the empty seats open for real players; only when that runs
+            // out do bots come down and the deal start. A full table of humans
+            // deals at once.
+            await game.startOrWaitForPlayers();
           } catch (startErr) {
             logger.error("trix_start_game_failed", {
               tableId: String(table._id),
@@ -758,7 +778,20 @@ function registerGameHandlers(nsp, jwtVerify) {
           }
         }
         if (!game.gameState) {
-          emitInvalidMove(socket, "join_trix_failed");
+          // Still waiting for players. The join succeeded — park the socket in
+          // the table room so the deal reaches it, and show the countdown.
+          socket.join(`trix:${tableId}`);
+          socket.emit("room_joined", {
+            waiting: true,
+            roomId: String(tableId),
+            seatIndex: game.getPlayerIndex(userId),
+            waitingForPlayers: {
+              remainingSeconds: game.remainingWaitSeconds(),
+              humanCount: game.humanCount(),
+              requiredPlayers: game.getRequiredPlayers(),
+            },
+          });
+          broadcastTrixTableState(nsp, String(table._id));
           return;
         }
         let seatIndex = game.getPlayerIndex(userId);
@@ -941,8 +974,11 @@ function registerGameHandlers(nsp, jwtVerify) {
           emitInvalidMove(socket, "join_tarneeb41_failed" );
           return;
         }
-        if (game.isReadyForCountdown() && !game.isCountdownActive()) {
-          game.startGameCountdown();
+        // Four humans start at once; anything less holds the empty seats open
+        // for WAIT_FOR_PLAYERS_MS before bots come down. The table screen used
+        // to own this timer, which meant a backgrounded app never filled.
+        if (!game.isCountdownActive()) {
+          game.startOrWaitForPlayers();
         }
         socket.join(`tarneeb41:${tableId}`);
         const state = game.getGameState(seatIndex);
