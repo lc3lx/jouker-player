@@ -194,6 +194,29 @@ function resolveChair(seats, capacity, requested) {
   return seats.length;
 }
 
+/**
+ * The waiting queue with [userId] removed.
+ *
+ * Sitting down supersedes waiting to sit down. A queue entry that survives the
+ * join leaves the player present twice on one table, which is what
+ * `monitor_duplicate_seat_or_reservation` flags as critical — and that check
+ * deliberately refuses to repair anything, because after the fact which entry
+ * is authoritative is a guess. At the moment of seating it is not a guess: the
+ * seat is being created right now, and a queue entry holds no locked funds
+ * (waitingQueueService locks nothing until the player actually joins), so
+ * dropping it strands no money.
+ *
+ * @param {Array<object>|undefined} queue
+ * @param {string|object} userId
+ * @returns {Array<object>} the same array when nothing changed
+ */
+function withoutQueuedUser(queue, userId) {
+  if (!Array.isArray(queue) || queue.length === 0) return queue || [];
+  const uid = String(userId);
+  if (!queue.some((entry) => String(entry?.user) === uid)) return queue;
+  return queue.filter((entry) => String(entry?.user) !== uid);
+}
+
 async function executeFixedCapacityJoinTransaction({
   gameType,
   userId,
@@ -231,6 +254,8 @@ async function executeFixedCapacityJoinTransaction({
     tableId: tableTx._id,
     meta: { reason: "join_table", tableNumber: tableTx.tableNumber },
   });
+
+  tableTx.waitingQueue = withoutQueuedUser(tableTx.waitingQueue, userId);
 
   tableTx.seats.push({
     user: userId,
@@ -311,6 +336,7 @@ module.exports = {
   MAX_JOIN_ATTEMPTS,
   seatChairOf,
   resolveChair,
+  withoutQueuedUser,
   findUserSeatedTable,
   findUserActiveTableAnywhere,
   findAvailableTable,
