@@ -387,3 +387,93 @@ test("the exchange runs once per table, not once per round", async () => {
     game.destroy();
   }
 });
+
+// ── telling the moved player where they now sit ──────────────────────────────
+//
+// Re-seating is invisible to a client that was told its seat once, at join
+// time. The player who moved then indexes everything — their hand, and the
+// rotation that draws them at the bottom of the felt with their partner
+// opposite — by a chair that now belongs to someone else. Every snapshot has
+// to say which seat it was masked for.
+
+test("every Trix snapshot says which seat it was masked for", async () => {
+  const game = new TrixGame("trix_view_seat", { gameMode: "partnership" });
+  try {
+    for (let i = 0; i < 4; i += 1) {
+      game.players.push({
+        userId: `u${i}`,
+        seatIndex: i,
+        isBot: false,
+        displayName: `P${i}`,
+        chips: 100,
+      });
+    }
+    await game._dealOrChoosePartners();
+    // u1 is the one who moves: seat 1 -> seat 2, opposite the chooser.
+    game.choosePartner(1, "u0");
+    game.respondToPartner(true, "u1");
+    await new Promise((r) => setTimeout(r, 10));
+
+    const movedTo = game.players.findIndex((p) => String(p.userId) === "u1");
+    assert.equal(movedTo, 2, "the partner sits opposite the chooser");
+
+    const state = game.getGameState(movedTo);
+    assert.equal(state.viewPlayerIndex, movedTo);
+    // The symptom of following the stale seat: a hand full of nulls.
+    assert.ok(
+      state.hands[movedTo].every((c) => c && c.rank),
+      "the seat the snapshot is for holds real cards",
+    );
+    assert.ok(
+      state.hands[1].every((c) => c === null),
+      "the seat they joined on is now masked from them",
+    );
+    assert.equal(
+      String(state.seatsPublic[movedTo].userId),
+      "u1",
+      "and the roster agrees with the stamp",
+    );
+
+    game.clearBotTimer();
+    game.clearTurnTimer();
+  } finally {
+    game.destroy();
+  }
+});
+
+test("every Tarneeb snapshot says which seat it was masked for", async () => {
+  const game = new Tarneeb41Game("t41_view_seat", { mongoTableId: "t1" });
+  try {
+    for (let i = 0; i < 4; i += 1) {
+      game.players.push({
+        userId: `u${i}`,
+        socketId: `s${i}`,
+        seatIndex: i,
+        isBot: false,
+        displayName: `P${i}`,
+        chips: 1000,
+      });
+    }
+    game.startOrWaitForPlayers();
+    game.choosePartner(3, "u0");
+    game.respondToPartner(true, "u3");
+    await new Promise((r) => setTimeout(r, 10));
+
+    const movedTo = game.players.findIndex((p) => String(p.userId) === "u3");
+    assert.equal(movedTo, 2, "the partner sits opposite the chooser");
+
+    for (let seat = 0; seat < 4; seat += 1) {
+      assert.equal(
+        game.getGameState(seat).viewPlayerIndex,
+        seat,
+        `seat ${seat}'s snapshot is stamped for seat ${seat}`,
+      );
+    }
+    assert.equal(
+      String(game.getGameState(movedTo).seatsPublic[movedTo].userId),
+      "u3",
+    );
+  } finally {
+    game.destroy();
+  }
+});

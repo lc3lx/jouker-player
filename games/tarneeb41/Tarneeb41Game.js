@@ -1290,6 +1290,11 @@ class Tarneeb41Game extends BaseGameEngine {
     return {
       state: this.state,
       gameType: this.gameType,
+      // Which seat this snapshot was masked for. The client renders the table
+      // from its own seat outwards, and a seat index can change under it —
+      // partner selection re-seats everyone once the pairs settle — so every
+      // snapshot has to say which chair the receiver is sitting in *now*.
+      viewPlayerIndex: forPlayerIndex,
       // Additive lifecycle envelope (clients drop stale packets by revision).
       stateRevision: this.stateRevision,
       roundId: this.roundNumber,

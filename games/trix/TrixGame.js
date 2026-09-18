@@ -1112,6 +1112,11 @@ class TrixGame extends BaseGameEngine {
     return {
       state: this.state,
       sessionId: this.sessionId,
+      // Which seat this snapshot was masked for. The client renders the table
+      // from its own seat outwards, and a seat index can change under it —
+      // تركس شركة re-seats everyone when the pairs settle — so every snapshot
+      // has to say which chair the receiver is sitting in *now*.
+      viewPlayerIndex: forPlayerIndex,
       // "solo" (يهودية) or "partnership" (شركة) — the client pairs facing
       // seats and shows one combined total per team when partnership.
       gameMode: this.gameMode,
