@@ -73,6 +73,17 @@ async function sendInvitation(fromId, {
     );
     const isOwner = String(table.owner || "") === String(fromId);
 
+    // You cannot invite someone to a table they are already playing at. A
+    // player is only ever at one table, so being seated here means they are in
+    // this very hand with you — the client hides the button, and this is what
+    // makes it true rather than merely hidden.
+    const targetSeated = (table.seats || []).some(
+      (seat) => String(seat.user) === String(toUserId)
+    );
+    if (targetSeated) {
+      throw new ApiError("That player is already at this table", 409);
+    }
+
     if (table.isPrivate) {
       if (!isOwner && !isSeated) {
         throw new ApiError("Only a participant can invite to this private table", 403);
