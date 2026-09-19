@@ -27,6 +27,8 @@ const {
   approveDeposit,
   getAgentWalletSummary,
   agentSalesLog,
+  agentDirectCredit,
+  agentLookupPlayer,
   // admin
   adminListAgents,
   adminCreateAgent,
@@ -85,6 +87,10 @@ router.get("/agent/me", getMyAgentProfile);
 router.get("/agent/tickets", requireDepositAgent, getAgentTickets);
 router.get("/agent/wallet", requireDepositAgent, getAgentWalletSummary);
 router.get("/agent/sales", requireDepositAgent, agentSalesLog);
+// Handing coins straight to a player, by id or email — no ticket conversation
+// needed, but still written down as one. See agentDirectCredit.
+router.get("/agent/lookup-player", requireDepositAgent, agentLookupPlayer);
+router.post("/agent/direct-credit", requireDepositAgent, agentDirectCredit);
 router.post(
   "/agent/tickets/:ticketId/accept",
   requireDepositAgent,

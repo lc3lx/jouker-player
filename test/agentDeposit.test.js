@@ -697,3 +697,161 @@ guarded("the log pages backwards without repeating a sale", async () => {
     "the cursor must not hand back the row it paged past"
   );
 });
+
+// ── handing coins over directly ─────────────────────────────────────────────
+//
+// The ticket flow exists because a deposit usually needs a conversation. A
+// player standing in front of the agent needs none of it — but the money still
+// has to move atomically and still has to be written down, or it is money that
+// moved with no record anywhere a person looks.
+
+guarded("a direct credit moves coins and is written down as a sale", async () => {
+  const before = {
+    agent: await balanceOf(users.agent.doc._id),
+    player: await balanceOf(users.stranger.doc._id),
+  };
+
+  const res = await api(
+    "POST",
+    "/api/v1/agent-deposits/agent/direct-credit",
+    users.agent.token,
+    { playerId: String(users.stranger.doc._id), amount: 2500, note: "كاش" }
+  );
+  assert.equal(res.status, 201, JSON.stringify(res.body));
+  assert.equal(res.body.data.amount, 2500);
+  assert.equal(res.body.data.player.name, "stranger");
+
+  assert.equal(await balanceOf(users.agent.doc._id), before.agent - 2500);
+  assert.equal(await balanceOf(users.stranger.doc._id), before.player + 2500);
+  assert.equal(
+    res.body.data.agentBalance,
+    before.agent - 2500,
+    "the response carries the agent's new balance so the UI need not refetch"
+  );
+
+  // It shows up as a sale, which is the whole reason it writes a ticket.
+  const sales = await api("GET", "/api/v1/agent-deposits/agent/sales", users.agent.token);
+  const line = sales.body.data.find((r) => r.ticketId === res.body.data.ticketId);
+  assert.ok(line, "a direct credit must appear in the sales book");
+  assert.equal(line.amount, 2500);
+  assert.equal(line.player.name, "stranger");
+});
+
+guarded("a direct credit can be addressed by email instead of id", async () => {
+  const before = await balanceOf(users.stranger.doc._id);
+  const res = await api(
+    "POST",
+    "/api/v1/agent-deposits/agent/direct-credit",
+    users.agent.token,
+    { email: "stranger@test.local", amount: 400 }
+  );
+  assert.equal(res.status, 201, JSON.stringify(res.body));
+  assert.equal(await balanceOf(users.stranger.doc._id), before + 400);
+});
+
+guarded("sending more than the agent holds moves nothing", async () => {
+  const before = {
+    agent: await balanceOf(users.agent.doc._id),
+    player: await balanceOf(users.stranger.doc._id),
+  };
+
+  const res = await api(
+    "POST",
+    "/api/v1/agent-deposits/agent/direct-credit",
+    users.agent.token,
+    { playerId: String(users.stranger.doc._id), amount: before.agent + 1 }
+  );
+  assert.equal(res.status, 402);
+
+  assert.equal(await balanceOf(users.agent.doc._id), before.agent, "no debit");
+  assert.equal(
+    await balanceOf(users.stranger.doc._id),
+    before.player,
+    "and no credit — the pair is atomic"
+  );
+});
+
+guarded("a direct credit needs a real player, and a real amount", async () => {
+  const cases = [
+    [{ amount: 100 }, 400, "no recipient at all"],
+    [{ playerId: "not-an-id", amount: 100 }, 400, "a malformed id"],
+    [{ email: "nobody@test.local", amount: 100 }, 404, "an unknown email"],
+    [
+      { playerId: String(users.customer.doc._id), amount: 0 },
+      400,
+      "a zero amount",
+    ],
+    [
+      { playerId: String(users.customer.doc._id), amount: -50 },
+      400,
+      "a negative amount",
+    ],
+    [
+      { playerId: String(users.customer.doc._id), amount: 1e13 },
+      400,
+      "an absurd amount",
+    ],
+  ];
+  for (const [body, status, why] of cases) {
+    const res = await api(
+      "POST",
+      "/api/v1/agent-deposits/agent/direct-credit",
+      users.agent.token,
+      body
+    );
+    assert.equal(res.status, status, `${why} should be refused`);
+  }
+});
+
+guarded("an agent cannot credit themselves", async () => {
+  const before = await balanceOf(users.agent.doc._id);
+  const res = await api(
+    "POST",
+    "/api/v1/agent-deposits/agent/direct-credit",
+    users.agent.token,
+    { playerId: String(users.agent.doc._id), amount: 1000 }
+  );
+  assert.equal(res.status, 400);
+  assert.equal(await balanceOf(users.agent.doc._id), before);
+});
+
+guarded("a player cannot use the agent's send endpoint", async () => {
+  const res = await api(
+    "POST",
+    "/api/v1/agent-deposits/agent/direct-credit",
+    users.customer.token,
+    { playerId: String(users.stranger.doc._id), amount: 100 }
+  );
+  assert.ok(
+    res.status === 403 || res.status === 401,
+    `expected a refusal, got ${res.status}`
+  );
+});
+
+guarded("looking a player up confirms who they are, without their address", async () => {
+  const res = await api(
+    "GET",
+    `/api/v1/agent-deposits/agent/lookup-player?email=${encodeURIComponent(
+      "stranger@test.local"
+    )}`,
+    users.agent.token
+  );
+  assert.equal(res.status, 200);
+  assert.equal(res.body.data.name, "stranger");
+  assert.equal(res.body.data.id, String(users.stranger.doc._id));
+  assert.ok(
+    res.body.data.email.includes("***"),
+    `the address should be masked, got ${res.body.data.email}`
+  );
+  assert.ok(
+    !res.body.data.email.includes("stranger@"),
+    "the full address must not come back"
+  );
+
+  const missing = await api(
+    "GET",
+    "/api/v1/agent-deposits/agent/lookup-player?email=nobody@test.local",
+    users.agent.token
+  );
+  assert.equal(missing.status, 404);
+});

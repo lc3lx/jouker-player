@@ -1261,6 +1261,194 @@ exports.agentSalesLog = asyncHandler(async (req, res) => {
   });
 });
 
+/** `omar@gmail.com` -> `om***@gmail.com`. Enough to confirm, not to harvest. */
+function maskEmail(email) {
+  const raw = String(email || "");
+  const at = raw.indexOf("@");
+  if (at <= 0) return "";
+  const head = raw.slice(0, at);
+  const domain = raw.slice(at);
+  const keep = head.slice(0, Math.min(2, head.length));
+  return `${keep}***${domain}`;
+}
+
+/**
+ * Credit a player straight from the agent's wallet, found by id or by email.
+ *
+ * The ticket flow exists because a deposit usually needs a conversation — the
+ * player says how much, the agent shares payment details, a receipt is checked.
+ * A player standing in front of the agent, or one who already paid by another
+ * route, needs none of that, and the agent had no way to just hand the coins
+ * over.
+ *
+ * **It still writes a completed ticket.** That is deliberate: the sales log,
+ * the admin dashboard, the agent's stats and the player's own deposit history
+ * all read tickets, so a credit that skipped one would be money that moved with
+ * no record anywhere a person looks. One shape, one ledger.
+ */
+exports.agentDirectCredit = asyncHandler(async (req, res) => {
+  const amount = Math.round(Number(req.body?.amount));
+  if (!Number.isFinite(amount) || amount < 1) {
+    throw new ApiError("المبلغ غير صالح", 400);
+  }
+  // The same ceiling `approveDeposit` applies — a typo must not be able to
+  // move a number that big even if the wallet somehow allowed it.
+  if (amount > 1e12) throw new ApiError("المبلغ غير صالح", 400);
+
+  const profile = await AgentProfile.findOne({ user: req.user._id }).populate(
+    "user",
+    "_id"
+  );
+  if (!profile || profile.status !== "approved" || !profile.deposit?.enabled) {
+    throw new ApiError("حسابك كوكيل غير مفعّل", 403);
+  }
+
+  // Find the player: an id, or an email. Exactly one is needed.
+  const rawId = String(req.body?.playerId || "").trim();
+  const rawEmail = String(req.body?.email || "").trim().toLowerCase();
+  if (!rawId && !rawEmail) {
+    throw new ApiError("أدخل معرّف اللاعب أو بريده", 400);
+  }
+
+  let target = null;
+  if (rawId) {
+    if (!mongoose.isValidObjectId(rawId)) {
+      throw new ApiError("معرّف اللاعب غير صالح", 400);
+    }
+    target = await User.findById(rawId).select("_id name email active");
+  } else {
+    target = await User.findOne({ email: rawEmail }).select(
+      "_id name email active"
+    );
+  }
+  if (!target) throw new ApiError("لم يتم العثور على اللاعب", 404);
+  if (target.active === false) throw new ApiError("حساب اللاعب موقوف", 400);
+  if (String(target._id) === String(req.user._id)) {
+    throw new ApiError("لا يمكنك الإرسال لنفسك", 400);
+  }
+
+  const country = (profile.deposit.countries || [])[0] || "";
+  const note = String(req.body?.note || "").trim().slice(0, 200);
+
+  let ticketId = null;
+  try {
+    await withMongoTransaction(async (session) => {
+      await ledgerWithdraw({
+        session,
+        userId: req.user._id,
+        amount,
+        ledgerType: "agent_deposit_out",
+        meta: { direct: true, toUser: String(target._id) },
+      });
+      await ledgerDeposit({
+        session,
+        userId: target._id,
+        amount,
+        ledgerType: "agent_deposit_in",
+        meta: { direct: true, fromAgent: String(req.user._id) },
+      });
+
+      const [created] = await DepositTicket.create(
+        [
+          {
+            user: target._id,
+            agentProfile: profile._id,
+            agentUser: req.user._id,
+            country,
+            ticketType: "deposit",
+            amountRequested: amount,
+            amountApproved: amount,
+            paymentMethod: note || "إرسال مباشر",
+            status: "completed",
+            approvedAt: new Date(),
+            approvedBy: req.user._id,
+          },
+        ],
+        { session }
+      );
+      ticketId = created?._id || null;
+
+      await AgentProfile.updateOne(
+        { _id: profile._id },
+        {
+          $inc: {
+            "deposit.stats.totalDeposits": 1,
+            "deposit.stats.totalVolume": amount,
+          },
+        },
+        { session }
+      );
+    });
+  } catch (err) {
+    if (err?.message === "INSUFFICIENT_BALANCE") {
+      throw new ApiError("رصيدك غير كافٍ", 402);
+    }
+    throw err;
+  }
+
+  logEvent({
+    event: "agent_direct_credit",
+    actor: req.user._id,
+    targetUser: target._id,
+    meta: { amount, ticketId: ticketId ? String(ticketId) : null, note },
+    ip: req.ip,
+    userAgent: req.headers["user-agent"],
+  });
+
+  await notifyAndPush(target._id, {
+    title: "تم شحن رصيدك",
+    subtitle: `أضاف الوكيل ${amount} إلى محفظتك`,
+    sourceType: "deposit_completed",
+    sourceId: ticketId ? String(ticketId) : "",
+  });
+
+  const wallet = await getOrCreateWallet(req.user._id, null);
+  res.status(201).json({
+    status: "success",
+    data: {
+      ticketId: ticketId ? String(ticketId) : null,
+      amount,
+      player: { id: String(target._id), name: target.name, email: target.email },
+      agentBalance: wallet.balance,
+    },
+  });
+});
+
+/**
+ * Look a player up before sending, so the agent confirms a name rather than
+ * trusting a pasted id. Read-only and deliberately narrow.
+ */
+exports.agentLookupPlayer = asyncHandler(async (req, res) => {
+  const rawId = String(req.query.playerId || "").trim();
+  const rawEmail = String(req.query.email || "").trim().toLowerCase();
+  if (!rawId && !rawEmail) throw new ApiError("أدخل معرّف اللاعب أو بريده", 400);
+
+  let target = null;
+  if (rawId) {
+    if (!mongoose.isValidObjectId(rawId)) {
+      throw new ApiError("معرّف اللاعب غير صالح", 400);
+    }
+    target = await User.findById(rawId).select("_id name email profileImg active");
+  } else {
+    target = await User.findOne({ email: rawEmail }).select(
+      "_id name email profileImg active"
+    );
+  }
+  if (!target) throw new ApiError("لم يتم العثور على اللاعب", 404);
+
+  res.status(200).json({
+    status: "success",
+    data: {
+      id: String(target._id),
+      name: target.name,
+      // Enough to recognise the person without handing out full addresses.
+      email: maskEmail(target.email),
+      avatar: target.profileImg || null,
+      active: target.active !== false,
+    },
+  });
+});
+
 exports.getAgentWalletSummary = asyncHandler(async (req, res) => {
   const wallet = await getOrCreateWallet(req.user._id, null);
 
