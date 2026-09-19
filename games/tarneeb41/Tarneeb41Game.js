@@ -751,6 +751,12 @@ class Tarneeb41Game extends BaseGameEngine {
     this._fsm.transition(T41_STATE.BIDDING_SYRIAN);
     this.currentPlayerIndex = (this.dealerIndex + 1) % 4;
     this.trickLeader = this.currentPlayerIndex;
+    // Every deal gets a serial, including a redeal. The client cannot tell a
+    // redeal from "nothing happened" any other way: `state` was already
+    // bidding_syrian and `roundNumber` is deliberately unchanged (a scrapped
+    // hand is the same جولة), so every diff keyed on those edges stayed silent
+    // and the cards never visibly re-dealt.
+    this.dealSerial = (this.dealSerial || 0) + 1;
     this.startTurnTimer();
   }
 
@@ -1290,6 +1296,8 @@ class Tarneeb41Game extends BaseGameEngine {
     return {
       state: this.state,
       gameType: this.gameType,
+      // Bumped by every deal, redeals included — see dealRound.
+      dealSerial: this.dealSerial || 0,
       // Which seat this snapshot was masked for. The client renders the table
       // from its own seat outwards, and a seat index can change under it —
       // partner selection re-seats everyone once the pairs settle — so every

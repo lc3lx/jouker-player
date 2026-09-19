@@ -290,3 +290,26 @@ test("the bidding turn timer restarts on the new deal", async () => {
     );
   });
 });
+
+test("every deal carries a serial, so a redeal is distinguishable", async () => {
+  await withGame(async (game) => {
+    await game.startGame();
+    const first = game.getGameState(0).dealSerial;
+    assert.ok(first > 0, "the opening deal is serialised");
+
+    game.currentPlayerIndex = 0;
+    allPass(game);
+
+    const second = game.getGameState(0).dealSerial;
+    assert.ok(
+      second > first,
+      "a redeal is a new deal — without this the client has nothing to react to",
+    );
+    assert.equal(
+      game.roundNumber,
+      0,
+      "and it is NOT a new جولة, which is why roundNumber cannot carry it",
+    );
+    assert.equal(game.state, "bidding_syrian", "nor does the state change");
+  });
+});

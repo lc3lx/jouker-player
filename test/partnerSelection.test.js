@@ -583,3 +583,114 @@ test("a decline by silence is distinguishable from a real no", async () => {
     sel.destroy();
   }
 });
+
+// ── the pairing has to survive the trip to the deal ──────────────────────────
+//
+// Two players sat in adjacent chairs, chose each other, both accepted — and
+// still ended up side by side, each partnered with a bot. `arrangeSeatsForPartners`
+// reassigned `seatIndex` but left `chair` alone, and `chair` is what survives:
+// both engines re-sort by it, and `startGame` does so on its way to the deal.
+// So the very next re-sort undid the pairing.
+
+test("the chair moves with the seat, or the next re-sort undoes the pairing", () => {
+  const players = roster(FOUR_HUMANS);
+  players.forEach((p, i) => {
+    p.chair = i;
+  });
+
+  const out = arrangeSeatsForPartners(players, 0, 1);
+
+  assert.deepEqual(
+    out.map((p) => p.userId),
+    ["a", "c", "b", "d"],
+  );
+  assert.deepEqual(
+    out.map((p) => p.chair),
+    [0, 1, 2, 3],
+    "chairs follow the new seating",
+  );
+  assert.deepEqual(
+    out.map((p) => p.seatIndex),
+    [0, 1, 2, 3],
+    "and still agree with it",
+  );
+
+  // Re-sorting by chair — what startGame does — must now be a no-op.
+  const resorted = [...out].sort((x, y) => x.chair - y.chair);
+  assert.deepEqual(
+    resorted.map((p) => p.userId),
+    ["a", "c", "b", "d"],
+    "the pairing holds through a chair re-sort",
+  );
+});
+
+test("adjacent chairs still end up facing each other after the deal", async () => {
+  const game = new TrixGame("trix_adjacent_pair", { gameMode: "partnership" });
+  try {
+    // Exactly the reported setup: the bottom chair and the one on its right.
+    game.players.push({
+      userId: "omarr", seatIndex: 0, chair: 0,
+      isBot: false, displayName: "omarr", chips: 100,
+    });
+    game.players.push({
+      userId: "gfdh", seatIndex: 1, chair: 1,
+      isBot: false, displayName: "gfdh", chips: 100,
+    });
+    game.botFillReleased = true;
+    game._fillSeatsWithBots();
+
+    await game._dealOrChoosePartners();
+    const gfdhSeat = game.players.findIndex((p) => p.userId === "gfdh");
+    assert.deepEqual(game.choosePartner(gfdhSeat, "omarr"), { ok: true });
+    assert.deepEqual(game.respondToPartner(true, "gfdh"), { ok: true });
+    await new Promise((r) => setTimeout(r, 30));
+
+    assert.ok(game.gameState, "the deal follows the pairing");
+
+    const o = game.players.findIndex((p) => p.userId === "omarr");
+    const f = game.players.findIndex((p) => p.userId === "gfdh");
+    assert.equal((o + 2) % 4, f, "they face each other");
+    assert.equal(o % 2, f % 2, "which is what puts them on one team");
+
+    // Neither of them is partnered with a bot.
+    assert.equal(game.players[(o + 2) % 4].isBot, false);
+    assert.equal(game.players[(f + 2) % 4].isBot, false);
+
+    game.clearBotTimer();
+    game.clearTurnTimer();
+  } finally {
+    game.destroy();
+  }
+});
+
+test("a Tarneeb pairing of adjacent chairs moves them too", async () => {
+  const game = new Tarneeb41Game("t41_adjacent_pair", { mongoTableId: "t1" });
+  try {
+    game.players.push({
+      userId: "u0", socketId: "s0", seatIndex: 0, chair: 0,
+      isBot: false, displayName: "P0", chips: 1000,
+    });
+    game.players.push({
+      userId: "u1", socketId: "s1", seatIndex: 1, chair: 1,
+      isBot: false, displayName: "P1", chips: 1000,
+    });
+    game.botFillReleased = true;
+    await game.fillWithBots();
+
+    const partnerSeat = game.players.findIndex((p) => p.userId === "u1");
+    game.choosePartner(partnerSeat, "u0");
+    game.respondToPartner(true, "u1");
+    await new Promise((r) => setTimeout(r, 30));
+
+    const a = game.players.findIndex((p) => p.userId === "u0");
+    const b = game.players.findIndex((p) => p.userId === "u1");
+    assert.equal((a + 2) % 4, b, "they face each other");
+    assert.deepEqual(
+      game.players.map((p) => p.chair),
+      [0, 1, 2, 3],
+      "chairs renumbered with the seats",
+    );
+  } finally {
+    game.destroy();
+  }
+});

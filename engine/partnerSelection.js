@@ -42,6 +42,15 @@ const PHASE = Object.freeze({
  * fill the remaining facing pair, so they are partners without having to
  * choose. Seat order becomes [chooser, other, partner, other].
  *
+ * **`chair` moves with `seatIndex`, and it has to.** The chair is what the
+ * player picked on the felt and what survives a roster rebuild: both engines
+ * re-sort by it (`reindexByChair`, `syncLobbyFromTable`), and `startGame` does
+ * so on its way to the deal. Reassigning only `seatIndex` meant the very next
+ * re-sort put everyone back where they had been sitting — two players who chose
+ * each other and accepted ended up **adjacent, each partnered with a bot**.
+ * Agreeing to a partner is agreeing to move opposite them, so the chair is part
+ * of what moves.
+ *
  * @param {Array<object>} players seat-ordered roster (length 4)
  * @param {number} chooserSeat
  * @param {number} partnerSeat
@@ -62,7 +71,9 @@ function arrangeSeatsForPartners(players, chooserSeat, partnerSeat) {
     players[others[1]],
   ];
   ordered.forEach((p, i) => {
-    if (p) p.seatIndex = i;
+    if (!p) return;
+    p.seatIndex = i;
+    p.chair = i;
   });
   return ordered;
 }
