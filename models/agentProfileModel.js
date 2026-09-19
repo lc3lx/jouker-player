@@ -52,7 +52,14 @@ const agentProfileSchema = new mongoose.Schema(
       countries: [{ type: String, uppercase: true, trim: true }],
       paymentMethods: [{ type: String, trim: true, maxlength: 60 }],
       workingHours: { type: String, default: "", trim: true, maxlength: 120 },
+      /**
+       * Mean of this agent's AgentRating documents, recomputed on every new
+       * rating. Starts at 5 so an agent with no history is not shown as bad;
+       * `ratingCount` is what tells the listing whether the number means
+       * anything yet (see services/agentRanking.js).
+       */
       rating: { type: Number, default: 5, min: 0, max: 5 },
+      ratingCount: { type: Number, default: 0, min: 0 },
       // Optional contact handles surfaced on the player profile popup.
       whatsapp: { type: String, default: "", trim: true, maxlength: 60 },
       telegram: { type: String, default: "", trim: true, maxlength: 60 },

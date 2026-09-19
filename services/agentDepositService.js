@@ -17,8 +17,10 @@ const ApiError = require("../utils/apiError");
 const DepositTicket = require("../models/depositTicketModel");
 const DepositMessage = require("../models/depositMessageModel");
 const AgentProfile = require("../models/agentProfileModel");
+const AgentRating = require("../models/agentRatingModel");
 const User = require("../models/userModel");
 const WalletTransaction = require("../models/walletTransactionModel");
+const Wallet = require("../models/walletModel");
 const { COUNTRIES, findCountry } = require("../data/countries");
 const { sanitizeBody, checkRate } = require("../sockets/tableChat");
 const { uploadSingleImage } = require("../middlewares/uploadImageMiddleware");
@@ -32,6 +34,8 @@ const { createNotification } = require("./notificationService");
 const { sendPushToUser } = require("./pushService");
 const { logEvent } = require("./auditService");
 const { normalizeVipLevel } = require("../config/vipConfig");
+const { rankAgents, foldResponseTime } = require("./agentRanking");
+const logger = require("../utils/logger");
 const { priceUsdForLevel } = require("./vipPricingService");
 
 const { ACTIVE_STATUSES } = DepositTicket;
@@ -415,11 +419,13 @@ exports.listAgents = asyncHandler(async (req, res) => {
     paymentMethods: p.deposit?.paymentMethods || [],
     workingHours: p.deposit?.workingHours || "",
     rating: p.deposit?.rating ?? 5,
+    ratingCount: p.deposit?.ratingCount || 0,
+    avgResponseMinutes: p.deposit?.avgResponseMinutes || 0,
     totalDeposits: p.deposit?.stats?.totalDeposits || 0,
   }));
-  // online agents first
-  data.sort((a, b) => Number(b.online) - Number(a.online));
-  res.status(200).json({ status: "success", results: data.length, data });
+  res
+    .status(200)
+    .json({ status: "success", results: data.length, data: rankAgents(data) });
 });
 
 exports.createTicket = asyncHandler(async (req, res) => {
@@ -618,6 +624,116 @@ exports.markRead = asyncHandler(async (req, res) => {
   res.status(200).json({ status: "success" });
 });
 
+/**
+ * Recompute an agent's shown rating from the ratings actually left.
+ *
+ * Stored on the profile rather than aggregated per request because the agent
+ * list is read constantly and rated rarely.
+ */
+async function refreshAgentRating(agentProfileId) {
+  const [row] = await AgentRating.aggregate([
+    { $match: { agentProfile: new mongoose.Types.ObjectId(String(agentProfileId)) } },
+    { $group: { _id: null, avg: { $avg: "$stars" }, count: { $sum: 1 } } },
+  ]);
+  const count = row?.count || 0;
+  // No ratings left at all: back to the neutral default rather than zero,
+  // which would read as "terrible agent" instead of "nobody has said yet".
+  const rating = count > 0 ? Math.round((row.avg + Number.EPSILON) * 100) / 100 : 5;
+  await AgentProfile.updateOne(
+    { _id: agentProfileId },
+    { $set: { "deposit.rating": rating, "deposit.ratingCount": count } }
+  );
+  return { rating, ratingCount: count };
+}
+
+/**
+ * The player rates the agent for one completed deposit.
+ *
+ * Only the ticket's own user, only once, and only once the deal actually
+ * completed — a rating is a verdict on a transaction, so there has to be one.
+ */
+exports.rateAgent = asyncHandler(async (req, res) => {
+  const stars = Math.round(Number(req.body?.stars));
+  if (!Number.isFinite(stars) || stars < 1 || stars > 5) {
+    throw new ApiError("التقييم يجب أن يكون بين 1 و 5", 400);
+  }
+  const comment = String(req.body?.comment || "").trim().slice(0, 300);
+
+  const ticket = await DepositTicket.findOne({
+    _id: req.params.ticketId,
+    user: req.user._id,
+  }).lean();
+  if (!ticket) throw new ApiError("الطلب غير موجود", 404);
+  if (ticket.status !== "completed") {
+    throw new ApiError("يمكن التقييم بعد اكتمال العملية فقط", 400);
+  }
+
+  try {
+    await AgentRating.create({
+      ticket: ticket._id,
+      user: req.user._id,
+      agentProfile: ticket.agentProfile,
+      stars,
+      comment,
+    });
+  } catch (err) {
+    // The unique index on `ticket` is what enforces one rating per deal.
+    if (err?.code === 11000) {
+      throw new ApiError("سبق تقييم هذه العملية", 409);
+    }
+    throw err;
+  }
+
+  const summary = await refreshAgentRating(ticket.agentProfile);
+  res.status(201).json({ status: "success", data: { stars, comment, ...summary } });
+});
+
+/** The rating this player left for this ticket, or null. Drives the UI card. */
+exports.getMyTicketRating = asyncHandler(async (req, res) => {
+  const rating = await AgentRating.findOne({
+    ticket: req.params.ticketId,
+    user: req.user._id,
+  }).lean();
+  res.status(200).json({
+    status: "success",
+    data: rating
+      ? { stars: rating.stars, comment: rating.comment, createdAt: rating.createdAt }
+      : null,
+  });
+});
+
+/** Public reviews for one agent, newest first. */
+exports.listAgentRatings = asyncHandler(async (req, res) => {
+  const limit = Math.min(Math.max(Number(req.query.limit) || 20, 1), 50);
+  const profile = await AgentProfile.findById(req.params.agentProfileId)
+    .select("deposit.rating deposit.ratingCount")
+    .lean();
+  if (!profile) throw new ApiError("الوكيل غير موجود", 404);
+
+  const rows = await AgentRating.find({ agentProfile: req.params.agentProfileId })
+    .populate("user", "name profileImg")
+    .sort({ createdAt: -1 })
+    .limit(limit)
+    .lean();
+
+  res.status(200).json({
+    status: "success",
+    results: rows.length,
+    data: {
+      rating: profile.deposit?.rating ?? 5,
+      ratingCount: profile.deposit?.ratingCount || 0,
+      reviews: rows.map((r) => ({
+        id: String(r._id),
+        stars: r.stars,
+        comment: r.comment || "",
+        by: r.user?.name || "لاعب",
+        avatar: r.user?.profileImg || null,
+        createdAt: r.createdAt,
+      })),
+    },
+  });
+});
+
 exports.cancelTicket = asyncHandler(async (req, res) => {
   const updated = await DepositTicket.findOneAndUpdate(
     {
@@ -791,6 +907,30 @@ exports.acceptTicket = asyncHandler(async (req, res) => {
     { new: true }
   ).populate(TICKET_POPULATE);
   if (!updated) throw new ApiError("لا يمكن قبول هذا الطلب", 400);
+
+  // How long the player waited to be picked up. This is the number the agent
+  // list ranks on, and it had never been measured — `avgResponseMinutes` was a
+  // field nothing ever wrote. Failing to record it must not fail the accept.
+  try {
+    const waitedMs = Date.now() - new Date(updated.createdAt).getTime();
+    if (Number.isFinite(waitedMs) && waitedMs >= 0) {
+      const profile = await AgentProfile.findById(updated.agentProfile).select(
+        "deposit.avgResponseMinutes"
+      );
+      if (profile) {
+        profile.deposit.avgResponseMinutes = foldResponseTime(
+          profile.deposit?.avgResponseMinutes,
+          waitedMs / 60000
+        );
+        await profile.save();
+      }
+    }
+  } catch (err) {
+    logger.warn?.("agent_response_time_not_recorded", {
+      ticketId: String(updated._id),
+      reason: err?.message,
+    });
+  }
 
   await sendDepositMessage({
     ticketId: updated._id,
@@ -1070,6 +1210,57 @@ exports.approveDeposit = asyncHandler(async (req, res) => {
   res.status(200).json({ status: "success", data: serializeTicket(updated, "agent") });
 });
 
+/**
+ * The agent's own itemised sales — who, how much, when.
+ *
+ * The room already showed day/month/lifetime totals, but an agent settling up
+ * with a player or with the house needs the individual lines behind those
+ * numbers. The admin has had this (`adminDashboardSales`); the person who
+ * actually made the sales had not.
+ */
+exports.agentSalesLog = asyncHandler(async (req, res) => {
+  const limit = Math.min(Math.max(Number(req.query.limit) || 30, 1), 100);
+  const profile = await AgentProfile.findOne({ user: req.user._id })
+    .select("_id")
+    .lean();
+  if (!profile) throw new ApiError("لست وكيلاً", 403);
+
+  const match = { agentProfile: profile._id, status: "completed" };
+  // Cursor by the moment of sale, so paging cannot skip or repeat a line when
+  // new sales land while the agent is scrolling.
+  if (req.query.before) {
+    const before = new Date(req.query.before);
+    if (!Number.isNaN(before.getTime())) match.approvedAt = { $lt: before };
+  }
+
+  const rows = await DepositTicket.find(match)
+    .populate("user", "name profileImg")
+    .sort({ approvedAt: -1, createdAt: -1 })
+    .limit(limit)
+    .lean();
+
+  res.status(200).json({
+    status: "success",
+    results: rows.length,
+    data: rows.map((t) => ({
+      ticketId: String(t._id),
+      ticketType: t.ticketType || "deposit",
+      vipLevel: t.vipLevel || null,
+      // What the agent actually handed over. VIP tickets are priced in USD and
+      // move no coins, so they must not be reported as a coin amount.
+      amount: t.ticketType === "vip" ? 0 : t.amountApproved || 0,
+      priceUsd: t.ticketType === "vip" ? t.priceUsd || 0 : null,
+      country: t.country || "",
+      paymentMethod: t.paymentMethod || "",
+      player: {
+        name: t.user?.name || "لاعب",
+        avatar: t.user?.profileImg || null,
+      },
+      completedAt: t.approvedAt || t.updatedAt,
+    })),
+  });
+});
+
 exports.getAgentWalletSummary = asyncHandler(async (req, res) => {
   const wallet = await getOrCreateWallet(req.user._id, null);
 
@@ -1131,22 +1322,39 @@ exports.adminListAgents = asyncHandler(async (req, res) => {
     .sort({ updatedAt: -1 })
     .limit(200)
     .lean();
+
+  // Balances come with the list. An agent credits players out of their own
+  // wallet, so "how much does this agent have left" is the number an operator
+  // is on this page to see — it used to be one page deeper, behind a plain text
+  // link, which is why the recharge control could not be found at all.
+  const wallets = await Wallet.find({
+    user: { $in: rows.map((p) => p.user?._id).filter(Boolean) },
+  })
+    .select("user balance lockedBalance")
+    .lean();
+  const walletByUser = new Map(wallets.map((w) => [String(w.user), w]));
+
   res.status(200).json({
     status: "success",
     results: rows.length,
-    data: rows.map((p) => ({
-      agentProfileId: String(p._id),
-      user: briefUser(p.user),
-      email: p.user?.email || null,
-      status: p.status,
-      displayName: p.deposit?.displayName || "",
-      countries: p.deposit?.countries || [],
-      paymentMethods: p.deposit?.paymentMethods || [],
-      workingHours: p.deposit?.workingHours || "",
-      depositEnabled: !!p.deposit?.enabled,
-      online: isAgentOnline(p.user?._id),
-      stats: p.deposit?.stats || {},
-    })),
+    data: rows.map((p) => {
+      const wallet = walletByUser.get(String(p.user?._id || ""));
+      return {
+        agentProfileId: String(p._id),
+        user: briefUser(p.user),
+        email: p.user?.email || null,
+        status: p.status,
+        displayName: p.deposit?.displayName || "",
+        countries: p.deposit?.countries || [],
+        paymentMethods: p.deposit?.paymentMethods || [],
+        workingHours: p.deposit?.workingHours || "",
+        depositEnabled: !!p.deposit?.enabled,
+        online: isAgentOnline(p.user?._id),
+        stats: p.deposit?.stats || {},
+        balance: wallet?.balance ?? 0,
+        lockedBalance: wallet?.lockedBalance ?? 0,
+      };
+    }),
   });
 });
 

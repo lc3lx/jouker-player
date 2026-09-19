@@ -462,3 +462,238 @@ guarded("admin dashboard sales APIs expose coin + VIP settlement fields", async 
   );
   assert.equal(forbidden.status, 403);
 });
+
+// ── ratings ─────────────────────────────────────────────────────────────────
+//
+// A rating is a verdict on a transaction, so it hangs off a completed ticket
+// rather than off the agent. That is what makes "rate an agent you never dealt
+// with" and "rate the same deal twice to move their average" impossible by
+// construction rather than by a check someone has to remember to write.
+
+/** Drive one deposit all the way to `completed` and return its id. */
+async function completedTicket(amount = 3000) {
+  const agents = await api(
+    "GET",
+    "/api/v1/agent-deposits/countries/SY/agents",
+    users.customer.token
+  );
+  const agentProfileId = agents.body.data[0].agentProfileId;
+
+  const created = await api("POST", "/api/v1/agent-deposits/tickets", users.customer.token, {
+    agentProfileId,
+    amount,
+    paymentMethod: "حوالة",
+  });
+  assert.equal(created.status, 201, JSON.stringify(created.body));
+  const id = created.body.data.id;
+
+  await api("POST", `/api/v1/agent-deposits/agent/tickets/${id}/accept`, users.agent.token);
+  const approved = await api(
+    "POST",
+    `/api/v1/agent-deposits/agent/tickets/${id}/approve`,
+    users.agent.token,
+    { amount }
+  );
+  assert.equal(approved.status, 200, JSON.stringify(approved.body));
+  return { id, agentProfileId };
+}
+
+guarded("a completed deal can be rated once, and the average follows", async () => {
+  const { id, agentProfileId } = await completedTicket();
+
+  const before = await api(
+    "GET",
+    `/api/v1/agent-deposits/tickets/${id}/rating`,
+    users.customer.token
+  );
+  assert.equal(before.status, 200);
+  assert.equal(before.body.data, null, "nothing rated yet");
+
+  const rated = await api(
+    "POST",
+    `/api/v1/agent-deposits/tickets/${id}/rate`,
+    users.customer.token,
+    { stars: 4, comment: "سريع ومحترم" }
+  );
+  assert.equal(rated.status, 201, JSON.stringify(rated.body));
+  assert.equal(rated.body.data.rating, 4, "one 4-star rating averages to 4");
+  assert.equal(rated.body.data.ratingCount, 1);
+
+  const mine = await api(
+    "GET",
+    `/api/v1/agent-deposits/tickets/${id}/rating`,
+    users.customer.token
+  );
+  assert.equal(mine.body.data.stars, 4);
+  assert.equal(mine.body.data.comment, "سريع ومحترم");
+
+  // The same deal cannot be rated again — this is the unique index, not a check.
+  const twice = await api(
+    "POST",
+    `/api/v1/agent-deposits/tickets/${id}/rate`,
+    users.customer.token,
+    { stars: 1 }
+  );
+  assert.equal(twice.status, 409, "one verdict per deal");
+
+  const list = await api(
+    "GET",
+    `/api/v1/agent-deposits/agents/${agentProfileId}/ratings`,
+    users.customer.token
+  );
+  assert.equal(list.status, 200);
+  assert.equal(list.body.data.ratingCount, 1);
+  assert.equal(list.body.data.reviews[0].stars, 4);
+  assert.equal(list.body.data.reviews[0].comment, "سريع ومحترم");
+});
+
+guarded("a second deal moves the average, and it is a real mean", async () => {
+  const { id, agentProfileId } = await completedTicket(1500);
+
+  const rated = await api(
+    "POST",
+    `/api/v1/agent-deposits/tickets/${id}/rate`,
+    users.customer.token,
+    { stars: 2 }
+  );
+  assert.equal(rated.status, 201);
+  assert.equal(rated.body.data.ratingCount, 2);
+  assert.equal(rated.body.data.rating, 3, "(4 + 2) / 2");
+
+  const list = await api(
+    "GET",
+    `/api/v1/agent-deposits/agents/${agentProfileId}/ratings`,
+    users.customer.token
+  );
+  assert.equal(list.body.data.reviews.length, 2, "newest first");
+  assert.equal(list.body.data.reviews[0].stars, 2);
+});
+
+guarded("an unfinished deal cannot be rated", async () => {
+  const agents = await api(
+    "GET",
+    "/api/v1/agent-deposits/countries/SY/agents",
+    users.customer.token
+  );
+  const created = await api("POST", "/api/v1/agent-deposits/tickets", users.customer.token, {
+    agentProfileId: agents.body.data[0].agentProfileId,
+    amount: 700,
+  });
+  assert.equal(created.status, 201);
+
+  const res = await api(
+    "POST",
+    `/api/v1/agent-deposits/tickets/${created.body.data.id}/rate`,
+    users.customer.token,
+    { stars: 5 }
+  );
+  assert.equal(res.status, 400, "no money moved, so there is nothing to judge");
+
+  await api(
+    "POST",
+    `/api/v1/agent-deposits/tickets/${created.body.data.id}/cancel`,
+    users.customer.token
+  );
+});
+
+guarded("only the player who made the deal may rate it", async () => {
+  const { id } = await completedTicket(900);
+
+  const stranger = await api(
+    "POST",
+    `/api/v1/agent-deposits/tickets/${id}/rate`,
+    users.stranger.token,
+    { stars: 1 }
+  );
+  assert.equal(stranger.status, 404, "the ticket is not theirs to judge");
+
+  const agentSelf = await api(
+    "POST",
+    `/api/v1/agent-deposits/tickets/${id}/rate`,
+    users.agent.token,
+    { stars: 5 }
+  );
+  assert.equal(agentSelf.status, 404, "an agent cannot rate themselves");
+});
+
+guarded("stars outside 1–5 are refused", async () => {
+  const { id } = await completedTicket(800);
+  for (const stars of [0, 6, -3, "abc", null]) {
+    const res = await api(
+      "POST",
+      `/api/v1/agent-deposits/tickets/${id}/rate`,
+      users.customer.token,
+      { stars }
+    );
+    assert.equal(res.status, 400, `stars=${stars} should be refused`);
+  }
+});
+
+guarded("the agent card carries the real rating, not a hardcoded 5", async () => {
+  const res = await api(
+    "GET",
+    "/api/v1/agent-deposits/countries/SY/agents",
+    users.customer.token
+  );
+  const card = res.body.data[0];
+  assert.ok(card.ratingCount >= 2, "ratings were left above");
+  assert.notEqual(card.rating, 5, "the seeded default must have been replaced");
+  assert.equal(typeof card.avgResponseMinutes, "number");
+});
+
+// ── the agent's own sales log ───────────────────────────────────────────────
+//
+// The room already showed day/month/lifetime totals. An agent settling up needs
+// the lines behind those numbers — the admin had them, the person who made the
+// sales did not.
+
+guarded("an agent can read their own itemised sales", async () => {
+  const res = await api("GET", "/api/v1/agent-deposits/agent/sales", users.agent.token);
+  assert.equal(res.status, 200, JSON.stringify(res.body));
+  assert.ok(res.body.data.length > 0, "deals were completed earlier in this file");
+
+  const line = res.body.data[0];
+  assert.equal(typeof line.ticketId, "string");
+  assert.ok(line.amount > 0, "a coin sale reports what was handed over");
+  assert.equal(line.player.name, "customer");
+  assert.ok(line.completedAt, "and when");
+
+  // Newest first, so the log opens on what just happened.
+  const times = res.body.data.map((r) => new Date(r.completedAt).getTime());
+  const sorted = [...times].sort((a, b) => b - a);
+  assert.deepEqual(times, sorted);
+});
+
+guarded("the sales log is the agent's own, and only theirs", async () => {
+  const notAgent = await api(
+    "GET",
+    "/api/v1/agent-deposits/agent/sales",
+    users.customer.token
+  );
+  assert.ok(
+    notAgent.status === 403 || notAgent.status === 401,
+    `a player must not read an agent's book, got ${notAgent.status}`
+  );
+});
+
+guarded("the log pages backwards without repeating a sale", async () => {
+  const first = await api(
+    "GET",
+    "/api/v1/agent-deposits/agent/sales?limit=1",
+    users.agent.token
+  );
+  assert.equal(first.body.data.length, 1);
+
+  const next = await api(
+    "GET",
+    `/api/v1/agent-deposits/agent/sales?limit=5&before=${encodeURIComponent(
+      first.body.data[0].completedAt
+    )}`,
+    users.agent.token
+  );
+  const ids = next.body.data.map((r) => r.ticketId);
+  assert.ok(
+    !ids.includes(first.body.data[0].ticketId),
+    "the cursor must not hand back the row it paged past"
+  );
+});

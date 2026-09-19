@@ -12,6 +12,9 @@ const {
   postMessage,
   markRead,
   cancelTicket,
+  rateAgent,
+  getMyTicketRating,
+  listAgentRatings,
   uploadReceiptImage,
   processReceiptImage,
   uploadReceipt,
@@ -23,6 +26,7 @@ const {
   rejectTicket,
   approveDeposit,
   getAgentWalletSummary,
+  agentSalesLog,
   // admin
   adminListAgents,
   adminCreateAgent,
@@ -64,6 +68,10 @@ router.get("/tickets/:ticketId/messages", ticketIdValidator, getMessages);
 router.post("/tickets/:ticketId/messages", ticketIdValidator, postMessage);
 router.post("/tickets/:ticketId/read", ticketIdValidator, markRead);
 router.post("/tickets/:ticketId/cancel", ticketIdValidator, cancelTicket);
+// Rating a deal, not an agent: the ticket is the proof the two of them dealt.
+router.post("/tickets/:ticketId/rate", ticketIdValidator, rateAgent);
+router.get("/tickets/:ticketId/rating", ticketIdValidator, getMyTicketRating);
+router.get("/agents/:agentProfileId/ratings", listAgentRatings);
 router.post(
   "/tickets/:ticketId/receipt",
   ticketIdValidator,
@@ -76,6 +84,7 @@ router.post(
 router.get("/agent/me", getMyAgentProfile);
 router.get("/agent/tickets", requireDepositAgent, getAgentTickets);
 router.get("/agent/wallet", requireDepositAgent, getAgentWalletSummary);
+router.get("/agent/sales", requireDepositAgent, agentSalesLog);
 router.post(
   "/agent/tickets/:ticketId/accept",
   requireDepositAgent,
