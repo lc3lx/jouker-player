@@ -46,6 +46,11 @@ const MAX_ACTIVE_TICKETS_PER_USER = 3;
 const RECEIPTS_DIR = path.join(__dirname, "..", "uploads", "receipts");
 fs.mkdirSync(RECEIPTS_DIR, { recursive: true });
 
+// Chat images are kept apart from receipts on purpose: a receipt is evidence
+// attached to a ticket's status, a chat image is just something someone sent.
+const CHAT_IMAGES_DIR = path.join(__dirname, "..", "uploads", "deposit-chat");
+fs.mkdirSync(CHAT_IMAGES_DIR, { recursive: true });
+
 // --- realtime plumbing (namespace + agent presence) -------------------------
 
 let depositIo = null;
@@ -830,6 +835,44 @@ exports.uploadReceipt = asyncHandler(async (req, res) => {
     status: "success",
     data: { message, ticket: serializeTicket(updated, "user") },
   });
+});
+
+/**
+ * A picture in the conversation, from **either** side.
+ *
+ * Receipts already had an upload path, but only the player could use it and it
+ * moved the ticket to `receipt_uploaded`. An agent sharing a payment QR, or a
+ * player sending a screenshot that is not a receipt, had nowhere to put it.
+ * This is the plain case: same storage pipeline, no status change, no receipt
+ * record.
+ */
+exports.uploadChatImage = uploadSingleImage("image");
+
+exports.processChatImage = asyncHandler(async (req, res, next) => {
+  if (!req.file) throw new ApiError("الصورة مطلوبة", 400);
+  const filename = `chat-${uuidv4()}-${Date.now()}.jpeg`;
+  await sharp(req.file.buffer)
+    .rotate()
+    .resize(1280, 1280, { fit: "inside", withoutEnlargement: true })
+    .toFormat("jpeg")
+    .jpeg({ quality: 85 })
+    .toFile(path.join(CHAT_IMAGES_DIR, filename));
+  req.chatImageUrl = `uploads/deposit-chat/${filename}`;
+  next();
+});
+
+exports.postChatImage = asyncHandler(async (req, res) => {
+  // Authorisation is the ticket's: whoever may read this chat may add to it.
+  // That covers both the player and their agent without a role branch.
+  const message = await sendDepositMessage({
+    ticketId: req.params.ticketId,
+    senderId: req.user._id,
+    role: req.user.role,
+    type: "image",
+    imageUrl: req.chatImageUrl,
+    body: String(req.body?.caption || "").trim().slice(0, 200),
+  });
+  res.status(201).json({ status: "success", data: message });
 });
 
 // ==============================================================================

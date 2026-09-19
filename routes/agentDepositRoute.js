@@ -18,6 +18,9 @@ const {
   uploadReceiptImage,
   processReceiptImage,
   uploadReceipt,
+  uploadChatImage,
+  processChatImage,
+  postChatImage,
   // agent
   requireDepositAgent,
   getMyAgentProfile,
@@ -68,6 +71,15 @@ router.get("/tickets", getMyTickets);
 router.get("/tickets/:ticketId", ticketIdValidator, getTicket);
 router.get("/tickets/:ticketId/messages", ticketIdValidator, getMessages);
 router.post("/tickets/:ticketId/messages", ticketIdValidator, postMessage);
+// A picture in the chat, from either side — the ticket's own access rules
+// decide who may post, so this needs no role gate of its own.
+router.post(
+  "/tickets/:ticketId/image",
+  ticketIdValidator,
+  uploadChatImage,
+  processChatImage,
+  postChatImage
+);
 router.post("/tickets/:ticketId/read", ticketIdValidator, markRead);
 router.post("/tickets/:ticketId/cancel", ticketIdValidator, cancelTicket);
 // Rating a deal, not an agent: the ticket is the proof the two of them dealt.

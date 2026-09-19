@@ -855,3 +855,149 @@ guarded("looking a player up confirms who they are, without their address", asyn
   );
   assert.equal(missing.status, 404);
 });
+
+// ── pictures in the chat ────────────────────────────────────────────────────
+//
+// Receipts already had an upload path, but only the player could use it and it
+// moved the ticket to `receipt_uploaded`. An agent sharing a payment QR had
+// nowhere to put it — the attach button on their side picked an image and then
+// told them to type instead.
+
+/** A tiny real JPEG, so sharp has something it can actually decode. */
+async function jpegBytes() {
+  const sharp = require("sharp");
+  return sharp({
+    create: {
+      width: 8,
+      height: 8,
+      channels: 3,
+      background: { r: 200, g: 40, b: 40 },
+    },
+  })
+    .jpeg()
+    .toBuffer();
+}
+
+async function postImage(path, token, bytes, caption) {
+  const form = new FormData();
+  form.append("image", new Blob([bytes], { type: "image/jpeg" }), "shot.jpg");
+  if (caption) form.append("caption", caption);
+  const res = await fetch(`${base}${path}`, {
+    method: "POST",
+    headers: { authorization: `Bearer ${token}` },
+    body: form,
+  });
+  let json = null;
+  try {
+    json = await res.json();
+  } catch (_) {
+    json = null;
+  }
+  return { status: res.status, body: json };
+}
+
+guarded("both sides can put a picture in the chat", async () => {
+  const agents = await api(
+    "GET",
+    "/api/v1/agent-deposits/countries/SY/agents",
+    users.customer.token
+  );
+  const created = await api("POST", "/api/v1/agent-deposits/tickets", users.customer.token, {
+    agentProfileId: agents.body.data[0].agentProfileId,
+    amount: 1200,
+  });
+  const id = created.body.data.id;
+  await api("POST", `/api/v1/agent-deposits/agent/tickets/${id}/accept`, users.agent.token);
+
+  const bytes = await jpegBytes();
+
+  // The agent — the side that previously had no way to send one at all.
+  const fromAgent = await postImage(
+    `/api/v1/agent-deposits/tickets/${id}/image`,
+    users.agent.token,
+    bytes,
+    "تفاصيل الدفع"
+  );
+  assert.equal(fromAgent.status, 201, JSON.stringify(fromAgent.body));
+  assert.equal(fromAgent.body.data.type, "image");
+  assert.equal(fromAgent.body.data.senderRole, "agent");
+  assert.ok(
+    String(fromAgent.body.data.imageUrl).startsWith("uploads/deposit-chat/"),
+    `chat images are kept apart from receipts, got ${fromAgent.body.data.imageUrl}`
+  );
+  assert.equal(fromAgent.body.data.body, "تفاصيل الدفع");
+
+  const fromPlayer = await postImage(
+    `/api/v1/agent-deposits/tickets/${id}/image`,
+    users.customer.token,
+    bytes
+  );
+  assert.equal(fromPlayer.status, 201);
+  assert.equal(fromPlayer.body.data.senderRole, "user");
+
+  // Both land in the same conversation, in order.
+  const messages = await api(
+    "GET",
+    `/api/v1/agent-deposits/tickets/${id}/messages`,
+    users.customer.token
+  );
+  const images = messages.body.data.filter((m) => m.type === "image");
+  assert.equal(images.length, 2, "the chat holds both pictures");
+
+  await api(`POST`, `/api/v1/agent-deposits/tickets/${id}/cancel`, users.customer.token);
+});
+
+guarded("a chat image does not masquerade as a receipt", async () => {
+  const agents = await api(
+    "GET",
+    "/api/v1/agent-deposits/countries/SY/agents",
+    users.customer.token
+  );
+  const created = await api("POST", "/api/v1/agent-deposits/tickets", users.customer.token, {
+    agentProfileId: agents.body.data[0].agentProfileId,
+    amount: 600,
+  });
+  const id = created.body.data.id;
+  await api("POST", `/api/v1/agent-deposits/agent/tickets/${id}/accept`, users.agent.token);
+
+  await postImage(
+    `/api/v1/agent-deposits/tickets/${id}/image`,
+    users.agent.token,
+    await jpegBytes()
+  );
+
+  const ticket = await api(
+    "GET",
+    `/api/v1/agent-deposits/tickets/${id}`,
+    users.customer.token
+  );
+  assert.notEqual(
+    ticket.body.data.status,
+    "receipt_uploaded",
+    "only a real receipt moves the ticket on"
+  );
+
+  await api("POST", `/api/v1/agent-deposits/tickets/${id}/cancel`, users.customer.token);
+});
+
+guarded("a stranger cannot post into someone else's chat", async () => {
+  const agents = await api(
+    "GET",
+    "/api/v1/agent-deposits/countries/SY/agents",
+    users.customer.token
+  );
+  const created = await api("POST", "/api/v1/agent-deposits/tickets", users.customer.token, {
+    agentProfileId: agents.body.data[0].agentProfileId,
+    amount: 300,
+  });
+  const id = created.body.data.id;
+
+  const res = await postImage(
+    `/api/v1/agent-deposits/tickets/${id}/image`,
+    users.stranger.token,
+    await jpegBytes()
+  );
+  assert.equal(res.status, 403, "the ticket's own access rules decide");
+
+  await api("POST", `/api/v1/agent-deposits/tickets/${id}/cancel`, users.customer.token);
+});
