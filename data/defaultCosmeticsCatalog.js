@@ -57,7 +57,7 @@ module.exports = [
     rarity: "rare",
     isActive: true,
     featured: true,
-    featuredOrder: 2,
+    featuredOrder: 6,
   },
   {
     type: "table_theme",
@@ -90,7 +90,7 @@ module.exports = [
     rarity: "legendary",
     isActive: true,
     featured: true,
-    featuredOrder: 1,
+    featuredOrder: 5,
     games: ["poker", "trix", "tarneeb41"],
   },
   {
@@ -132,7 +132,7 @@ module.exports = [
     rarity: "legendary",
     isActive: true,
     featured: true,
-    featuredOrder: 3,
+    featuredOrder: 7,
     games: ["poker", "trix", "tarneeb41"],
   },
   {
@@ -170,6 +170,39 @@ module.exports = [
     rarity: "legendary",
     isActive: true,
     games: ["poker", "trix", "tarneeb41"],
+  },
+  // Picture felts. Unlike every felt above, the art is a file — shipped under
+  // backend/assets/tables/, already cropped to the oval with no rail — and the
+  // client maps the assetKey to it in `PokerTableTheme._storeFeltImages`.
+  //
+  // `games: ["poker"]` is deliberate and not a stub: the poker felt is an oval
+  // and these pictures are cropped to it, while the Trix and Tarneeb felts are
+  // rectangles. Listing them for those games would sell art that arrives
+  // stretched across the wrong shape. Each still has a gradient in
+  // `feltGradient` for the failed-download case.
+  {
+    type: "table_theme",
+    name: "طاولة التنين الجليدي",
+    assetKey: "dragon_ice",
+    previewImage: "/assets/tables/dragon_ice.png",
+    price: 12000,
+    rarity: "legendary",
+    isActive: true,
+    featured: true,
+    featuredOrder: 1,
+    games: ["poker"],
+  },
+  {
+    type: "table_theme",
+    name: "طاولة ذئب الليل",
+    assetKey: "wolf_night",
+    previewImage: "/assets/tables/wolf_night.png",
+    price: 10000,
+    rarity: "legendary",
+    isActive: true,
+    featured: true,
+    featuredOrder: 2,
+    games: ["poker"],
   },
   // Legacy frames kept inactive so country skins become the primary store skins.
   {
