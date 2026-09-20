@@ -182,6 +182,35 @@ async function vacatePokerSeat({
 /**
  * Return within vacate window — restore mongo seat + engine seat (not a fresh buy-in).
  */
+/**
+ * Is there enough to identify this seat to the collusion guard?
+ *
+ * This was written inline as `String(clientIp).trim().isNotEmpty` — Dart, in a
+ * JavaScript file. JS strings have no `isNotEmpty`, so it evaluated to
+ * `undefined`: falsy, and it never threw. The condition quietly collapsed to
+ * `deviceId` alone, so a restore carrying an IP but no device id skipped
+ * presence registration entirely, and the guard lost sight of that seat.
+ */
+function shouldRegisterSeatPresence(clientIp, deviceId) {
+  const ip = clientIp == null ? "" : String(clientIp).trim();
+  const device = deviceId == null ? "" : String(deviceId).trim();
+  return ip !== "" || device !== "";
+}
+
+/**
+ * What a socket asking to join a poker table should be allowed to do.
+ *
+ * Kept here, pure and tested, because the socket handler used to accept
+ * `isVacating` at one gate and reject it at the next — the restore its own
+ * comment described was never written, so reconnecting inside the grace window
+ * returned "your table session has ended" and dropped a paid-for seat.
+ */
+function joinGateDecision({ isSeated, isVacating }) {
+  if (isSeated) return "join";
+  if (isVacating) return "restore";
+  return "reject";
+}
+
 async function tryRestoreVacatedSeat({
   tableId,
   userId,
@@ -232,7 +261,7 @@ async function tryRestoreVacatedSeat({
 
   if (!restored) return null;
 
-  if ((clientIp && String(clientIp).trim().isNotEmpty) || deviceId) {
+  if (shouldRegisterSeatPresence(clientIp, deviceId)) {
     try {
       await registerSeatPresence({
         tableId: tid,
@@ -530,5 +559,7 @@ module.exports = {
   findUserVacatingTable,
   findActiveVacatingEntry,
   isVacateActive,
+  shouldRegisterSeatPresence,
+  joinGateDecision,
   VACATE_WINDOW_MS: POKER_TIMINGS.VACATE_WINDOW_MS,
 };

@@ -6446,7 +6446,11 @@ function initTableGame(io, options = {}) {
           vacating: Array.isArray(table.vacatingPlayers) ? table.vacatingPlayers.length : -1,
         });
         // #endregion
-        if (!isSeated && !isVacating) {
+        const gate = require("../services/pokerVacateService").joinGateDecision({
+          isSeated,
+          isVacating,
+        });
+        if (gate === "reject") {
           // #region agent log
           try {
             require("../utils/agentDebugLog").sessionDebugLog(
@@ -6484,9 +6488,39 @@ function initTableGame(io, options = {}) {
         // from the vacate grace window here too, mirroring the REST join
         // "reconnect anchor" (tableService.joinTable) so a client that only
         // reconnects its socket still gets its seat/chips back.
-        if (!isSeated && isVacating) {
-          socket.emit("table_event", { type: "not_seated", tableId: String(tableId) });
-          return;
+        //
+        // This used to emit `not_seated` and return, which is the opposite of
+        // what the comment above describes and made the `isVacating` arm of the
+        // gate above dead: the only way through was to be seated already. A
+        // player reconnecting inside their own grace window was told "your
+        // table session has ended" and lost the seat they had paid to hold.
+        if (gate === "restore") {
+          let restored = null;
+          let restoreError = null;
+          try {
+            restored = await require("../services/pokerVacateService").tryRestoreVacatedSeat({
+              tableId,
+              userId: socket.userId,
+              clientIp: socket.userIp || null,
+              deviceId: socketDeviceId,
+            });
+          } catch (e) {
+            restoreError = e?.message || "unknown";
+          }
+          if (!restored) {
+            logger.warn("poker_socket_reconnect_restore_failed", {
+              tableId: String(tableId),
+              userId: String(socket.userId),
+              reason: restoreError || "no_active_vacate_entry",
+            });
+            // TABLE_FULL is not "your session ended" — the seat was real, the
+            // room just filled up while the player was away.
+            socket.emit("table_event", {
+              type: restoreError === "TABLE_FULL" ? "join_failed" : "not_seated",
+              tableId: String(tableId),
+            });
+            return;
+          }
         }
 
         // Clear this only after a confirmed seat/restore. Otherwise a failed
