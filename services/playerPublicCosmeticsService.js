@@ -12,8 +12,8 @@
  */
 const cosmeticsService = require("./cosmeticsService");
 const vipService = require("./vipService");
-const { vipLevelRank } = require("../config/vipConfig");
 const { vipCosmeticsForLevel } = require("../config/vipCosmeticsConfig");
+const { resolveTableFelt } = require("./vipEntitlementService");
 
 function emptySeatCosmetics() {
   return {
@@ -32,11 +32,18 @@ function emptyCosmetics() {
 function resolveSeatCardCosmetics({ equipped, vipLevel }) {
   const eq = equipped && typeof equipped === "object" ? equipped : {};
   const vip = vipCosmeticsForLevel(vipLevel);
+  // The player's own choice comes first. This used to read
+  // `vip?.cardSkin || eq.cardSkin`, so a subscriber wore their tier's back no
+  // matter what they equipped and had no way to turn it off or swap it. VIP
+  // still supplies the default when they have chosen nothing.
+  const cardSkin = eq.cardSkin || vip?.cardSkin || null;
   return {
     skin: eq.skin || eq.avatarFrame || null,
     avatarFrame: eq.skin || eq.avatarFrame || null,
-    cardSkin: vip?.cardSkin || eq.cardSkin || null,
-    cardAssets: vip?.cardAssets || null,
+    cardSkin,
+    // The raster pair belongs to the VIP back specifically. Sending it beside a
+    // store back would paint VIP cards over the skin the player picked.
+    cardAssets: cardSkin && cardSkin === vip?.cardSkin ? vip.cardAssets || null : null,
   };
 }
 
@@ -67,48 +74,11 @@ function resolveProfileOnlyCosmetics({ equipped }) {
  *                 seatIndex?: number }>} seatedHumans
  */
 function resolveActiveTableCosmetics(seatedHumans) {
-  let bestLevel = null;
-  let bestRank = 0;
-  let equippedTheme = null;
-  let equippedSeat = Infinity;
-
-  for (const row of seatedHumans || []) {
-    const lvl = row?.vipLevel || null;
-    if (lvl) {
-      const rank = vipLevelRank(lvl);
-      if (rank > bestRank) {
-        bestRank = rank;
-        bestLevel = lvl;
-      }
-    }
-
-    const theme = row?.equippedTableTheme || null;
-    if (theme) {
-      const seat = Number.isFinite(row?.seatIndex) ? row.seatIndex : Infinity;
-      if (seat < equippedSeat) {
-        equippedSeat = seat;
-        equippedTheme = theme;
-      }
-    }
-  }
-
-  if (bestLevel) {
-    const vip = vipCosmeticsForLevel(bestLevel);
-    if (vip?.tableTheme) {
-      return {
-        activeTableTheme: vip.tableTheme,
-        activeTableAsset: vip.tableAsset || null,
-      };
-    }
-  }
-
-  // A bought theme is a gradient key, not a sprite, so there is no asset path
-  // to go with it — the client renders it from the key alone.
-  if (equippedTheme) {
-    return { activeTableTheme: equippedTheme, activeTableAsset: null };
-  }
-
-  return { activeTableTheme: null, activeTableAsset: null };
+  // The rule itself is pure and tested in vipEntitlementService: the highest
+  // seated VIP decides, using their equipped theme when they have one so they
+  // can change the felt mid-game, else their tier felt; with no VIP seated it
+  // falls to the lowest-seated equipped theme, which is stable across calls.
+  return resolveTableFelt(seatedHumans, vipCosmeticsForLevel);
 }
 
 function humanIdsFromSeats(seats) {

@@ -389,13 +389,43 @@ async function resolveEquippedPayloadForUsers(userIds) {
   return out;
 }
 
+/**
+ * Items the player holds because their subscription is active.
+ *
+ * These are never in `ownedItems` — nothing is written on subscribe, so nothing
+ * has to be revoked on expiry. They simply stop being listed. Each is marked
+ * `vipGranted` so the client can show it as included rather than as a purchase.
+ */
+async function vipHeldItems(userId) {
+  const vipEntitlement = require("./vipEntitlementService");
+  const level = await require("./vipService").getVipLevel(userId);
+  if (!vipEntitlement.vipRank(level)) return [];
+
+  const rows = await Cosmetic.find({
+    isActive: true,
+    vipLevelRequired: { $ne: null },
+  }).lean();
+
+  return rows
+    .filter((doc) => vipEntitlement.entitles(level, doc.vipLevelRequired))
+    .map((doc) => {
+      const view = publicCosmeticDisplay(doc);
+      return view ? { ...view, vipGranted: true, price: 0, finalPrice: 0 } : null;
+    })
+    .filter(Boolean);
+}
+
 async function getMe(userId) {
   const row = await UserCosmetics.findOne({ user: userId }).lean();
+  // The VIP list is independent of the inventory row — a subscriber who has
+  // never bought anything still holds their tier's items.
+  const held = await vipHeldItems(userId);
+
   if (!row) {
     return {
-      owned: [],
+      owned: held,
       equipped: { tableTheme: null, cardSkin: null, avatarFrame: null, skin: null, bySlot: {} },
-      ownedIds: [],
+      ownedIds: held.map((x) => x.id),
     };
   }
   const ownedIds = row?.ownedItems?.length ? row.ownedItems.map(String) : [];
@@ -403,7 +433,10 @@ async function getMe(userId) {
     ownedIds.length > 0
       ? await Cosmetic.find({ _id: { $in: ownedIds.map(toObjectId).filter(Boolean) } }).lean()
       : [];
-  const owned = ownedDocs.map(publicCosmeticDisplay).filter(Boolean);
+  const bought = ownedDocs.map(publicCosmeticDisplay).filter(Boolean);
+
+  const seen = new Set(bought.map((x) => String(x.id)));
+  const owned = bought.concat(held.filter((x) => !seen.has(String(x.id))));
 
   let equipped = { tableTheme: null, cardSkin: null, avatarFrame: null };
   if (row?.equipped) {
@@ -414,8 +447,9 @@ async function getMe(userId) {
   return {
     owned,
     equipped,
-    // Full Mongo ids from user row (includes inactive / delisted cosmetics).
-    ownedIds,
+    // Full Mongo ids from user row (includes inactive / delisted cosmetics),
+    // plus anything VIP is lending them right now.
+    ownedIds: ownedIds.concat(held.map((x) => x.id).filter((id) => !seen.has(String(id)))),
   };
 }
 
@@ -465,6 +499,13 @@ async function buyCosmetic(userId, cosmeticIdRaw) {
     const item = await Cosmetic.findOne({ _id: cosmeticId, isActive: true }).session(session);
     if (!item) throw new ApiError("Item not found", 404);
     assertSanitizedAssetKey(item.assetKey);
+
+    // VIP items come with the subscription and are not for sale. `STORE_VISIBLE`
+    // already hides them from the catalog, but the buy endpoint takes an id, so
+    // it has to say no itself rather than trusting the listing.
+    if (require("./vipEntitlementService").isVipGated(item)) {
+      throw new ApiError("This item comes with VIP, it is not for sale", 400);
+    }
 
     const row = await getOrCreateUserRow(userId, session);
     const owned = new Set((row.ownedItems || []).map((x) => String(x)));
@@ -546,7 +587,17 @@ async function equipCosmetic(userId, cosmeticIdRaw) {
   const row = await getOrCreateUserRow(userId, null);
   const owned = new Set((row.ownedItems || []).map((x) => String(x)));
   if (!owned.has(String(cosmeticId))) {
-    throw new ApiError("Not owned", 403);
+    // A VIP-gated item is never bought, so it is never in `ownedItems`. It is
+    // held for as long as the subscription is — check that instead of
+    // rejecting the subscriber for not owning what they pay a fee for.
+    const vipEntitlement = require("./vipEntitlementService");
+    if (!vipEntitlement.isVipGated(item)) {
+      throw new ApiError("Not owned", 403);
+    }
+    const level = await require("./vipService").getVipLevel(userId);
+    if (!vipEntitlement.entitles(level, item.vipLevelRequired)) {
+      throw new ApiError("Requires an active VIP subscription", 403);
+    }
   }
 
   row.equipped = row.equipped || {};

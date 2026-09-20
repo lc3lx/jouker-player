@@ -121,16 +121,28 @@ function vipCosmeticsForLevel(level) {
   return _byLevel.get(String(level || "").toLowerCase().trim()) || null;
 }
 
-/** VIP always overrides store table/card themes while active; skin stays store-equipped. */
+/**
+ * What a seat wears: the player's own choice first, their VIP tier as the
+ * default when they have chosen nothing.
+ *
+ * This used to be `vip?.tableTheme || eq.tableTheme` — VIP overrode the player
+ * unconditionally. A subscriber could not turn their tier art off, swap it, or
+ * wear anything they had bought, which is the whole of "لازم اقدر بدل الطاولة
+ * وانا عم العب او الورق".
+ */
 function resolveEffectiveSeatCosmetics({ equipped, vipLevel }) {
   const eq = equipped && typeof equipped === "object" ? equipped : {};
   const vip = vipCosmeticsForLevel(vipLevel);
+  const tableTheme = eq.tableTheme || vip?.tableTheme || null;
+  const cardSkin = eq.cardSkin || vip?.cardSkin || null;
   return {
     skin: eq.skin || eq.avatarFrame || null,
-    tableTheme: vip?.tableTheme || eq.tableTheme || null,
-    cardSkin: vip?.cardSkin || eq.cardSkin || null,
-    tableAsset: vip?.tableAsset || null,
-    cardAssets: vip?.cardAssets || null,
+    tableTheme,
+    cardSkin,
+    // Sprite paths belong to the VIP art. Pairing them with a store key would
+    // paint VIP pictures over the theme the player actually picked.
+    tableAsset: tableTheme && tableTheme === vip?.tableTheme ? vip.tableAsset || null : null,
+    cardAssets: cardSkin && cardSkin === vip?.cardSkin ? vip.cardAssets || null : null,
   };
 }
 
