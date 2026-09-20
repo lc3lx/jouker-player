@@ -15,9 +15,12 @@
  *   node scripts/backfillPlayerIds.js --limit 50
  */
 
-require("dotenv").config({ path: "config.env" });
+// Resolved from this file, not the working directory, so the script runs the
+// same whether it is invoked from the backend root or anywhere else.
+require("dotenv").config({ path: require("path").join(__dirname, "../.env") });
 
 const mongoose = require("mongoose");
+const dbConnection = require("../config/database");
 const User = require("../models/userModel");
 const playerIdService = require("../services/playerIdService");
 const { ensurePlayerIdIndexes } = require("../services/playerIdSchemaService");
@@ -107,13 +110,10 @@ async function main() {
   const limitIdx = args.indexOf("--limit");
   const limit = limitIdx >= 0 ? parseInt(args[limitIdx + 1], 10) || 0 : 0;
 
-  const uri =
-    process.env.MONGODB_URI || process.env.MONGO_URI || process.env.DB_URI;
-  if (!uri) {
-    console.error("no MONGODB_URI / MONGO_URI / DB_URI in the environment");
-    process.exit(1);
-  }
-  await mongoose.connect(uri);
+  // The app's own connector, so this script cannot disagree with the server
+  // about which database it is talking to — it reads DB_URI, then MONGO_URI,
+  // then MONGODB_URI, in that order.
+  await dbConnection();
   try {
     await backfillPlayerIds({ dry, limit });
   } finally {
