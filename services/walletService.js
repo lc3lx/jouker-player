@@ -30,6 +30,8 @@ const TX_LABELS = {
   pending_withdraw: "سحب قيد المعالجة",
   failed_deposit: "فشل إيداع",
   cosmetic_purchase: "شراء من المتجر",
+  special_id_purchase: "شراء رقم مميز",
+  name_change_fee: "تغيير الاسم",
   credit: "إضافة رصيد",
   debit: "خصم",
   refund: "استرداد",

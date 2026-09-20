@@ -43,6 +43,8 @@ exports.adminUserOverview = asyncHandler(async (req, res) => {
     status: "success",
     data: {
       id: String(user._id),
+      playerId: typeof user.playerId === "number" ? user.playerId : null,
+      nameChangeCount: user.nameChangeCount || 0,
       name: user.name,
       email: user.email,
       country: user.country || null,
@@ -159,16 +161,21 @@ const {
 /** GET /admin/users/search?q= */
 exports.adminSearchUsers = asyncHandler(async (req, res) => {
   const q = String(req.query.q || "").trim();
-  if (q.length < 2) {
+  // A bare player number is a complete search term, so the two-character floor
+  // only applies to text.
+  const asNumber = /^\d{1,9}$/.test(q) ? Number(q) : null;
+  if (asNumber === null && q.length < 2) {
     throw new ApiError("اكتب حرفين على الأقل للبحث", 400);
   }
   const limit = Math.min(parseInt(req.query.limit || "20", 10), 50);
   const rx = new RegExp(q.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"), "i");
+  const or = [{ email: rx }, { name: rx }];
+  if (asNumber !== null) or.unshift({ playerId: asNumber });
   const users = await User.find({
-    $or: [{ email: rx }, { name: rx }],
+    $or: or,
     role: { $nin: ["superadmin"] },
   })
-    .select("name email profileImg role active country createdAt")
+    .select("name email profileImg role active country createdAt playerId")
     .limit(limit)
     .lean();
 
@@ -185,6 +192,7 @@ exports.adminSearchUsers = asyncHandler(async (req, res) => {
       const w = byUser.get(String(u._id));
       return {
         id: String(u._id),
+        playerId: typeof u.playerId === "number" ? u.playerId : null,
         name: u.name,
         email: u.email,
         role: u.role,

@@ -26,6 +26,8 @@ const vipLevelRegistry = require("./vipLevelRegistry");
 const cosmeticsService = require("./cosmeticsService");
 const friendService = require("./friendService");
 const gameStatsService = require("./gameStatsService");
+const playerIdService = require("./playerIdService");
+const logger = require("../utils/logger");
 
 const WIN_TYPES = ["win", "game_win", "island_jackpot_win"];
 const LOSS_TYPES = ["game_loss", "bet"];
@@ -36,9 +38,6 @@ const GAME_LABELS = { poker: "بوكر تكساس", trix: "تركس", tarneeb41:
 const SNAPSHOT_TTL_MS = Math.max(5_000, parseInt(process.env.PROFILE_SNAPSHOT_TTL_MS || "30000", 10));
 const _snap = new Map(); // targetId -> { at, data }
 
-function shortId(id) {
-  return String(id).slice(-6).toUpperCase();
-}
 
 function toObjectId(id) {
   try { return new mongoose.Types.ObjectId(String(id)); } catch { return null; }
@@ -96,7 +95,7 @@ async function _buildSnapshot(targetId) {
     User.findById(targetId)
       .select(
         "name country profileImg createdAt role active muted preferences.hideProfile " +
-          "pokerHandsPlayed pokerHandsWon pokerWinStreak vip"
+          "pokerHandsPlayed pokerHandsWon pokerWinStreak vip playerId"
       )
       .lean(),
     Player.findOne({ user: targetId })
@@ -112,6 +111,20 @@ async function _buildSnapshot(targetId) {
     clanBadgeService.getClanForUser(targetId),
   ]);
   if (!user) return null;
+
+  // Accounts created before player numbers existed heal on their first profile
+  // read rather than needing the backfill to have reached them. Cheap: only
+  // runs on a cache miss, and only while the number is still absent.
+  if (typeof user.playerId !== "number") {
+    try {
+      user.playerId = await playerIdService.ensurePlayerId(targetId);
+    } catch (e) {
+      logger.warn?.("player_id_lazy_allocate_failed", {
+        userId: String(targetId),
+        reason: e?.message || "unknown",
+      });
+    }
+  }
 
   const now = Date.now();
   const s = player?.stats || {};
@@ -165,7 +178,14 @@ async function _buildSnapshot(targetId) {
   return {
     identity: {
       id: String(user._id),
-      shortId: shortId(user._id),
+      /**
+       * The stored public player number. Until this release it was sliced out
+       * of the ObjectId here (last 6 chars) and in profileService (last 5), so
+       * one player had two different ids depending on the screen.
+       */
+      playerId: typeof user.playerId === "number" ? user.playerId : null,
+      /** Deprecated alias, kept one release so older clients keep rendering. */
+      shortId: typeof user.playerId === "number" ? String(user.playerId) : null,
       name: user.name,
       country: user.country || null,
       profileImg: user.profileImg || null,

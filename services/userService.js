@@ -159,12 +159,29 @@ exports.updateLoggedUserPassword = asyncHandler(async (req, res, next) => {
 // @route   PUT /api/v1/users/updateMe
 // @access  Private/Protect
 exports.updateLoggedUserData = asyncHandler(async (req, res, next) => {
+  // `name` is deliberately absent: renaming is paid and limited, and goes
+  // through PUT /users/updateMyName (playerNameService). This endpoint used to
+  // let anyone rename for free, without limit.
   const updates = {};
-  ["name", "email", "phone", "profileImg"].forEach((field) => {
+  ["email", "phone", "profileImg"].forEach((field) => {
     if (req.body[field] !== undefined) {
       updates[field] = req.body[field];
     }
   });
+
+  // The avatar upload posts multipart to this same endpoint and resends the
+  // unchanged name with it, so only an actual change is an error.
+  if (req.body.name !== undefined) {
+    const requested = String(req.body.name).trim();
+    if (requested && requested !== req.user.name) {
+      return next(
+        new ApiError(
+          "تغيير الاسم أصبح مدفوعاً — استخدم صفحة الملف الشخصي",
+          400
+        )
+      );
+    }
+  }
 
   const updatedUser = await User.findByIdAndUpdate(
     req.user._id,

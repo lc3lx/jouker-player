@@ -137,12 +137,9 @@ exports.deleteUserValidator = [
 ];
 
 exports.updateLoggedUserValidator = [
-  body('name')
-    .optional()
-    .custom((val, { req }) => {
-      req.body.slug = slugify(val);
-      return true;
-    }),
+  // No `name` rule here any more. Renaming moved to /users/updateMyName, and a
+  // write-shaped side effect (`req.body.slug = ...`) sitting next to a field
+  // this endpoint now refuses is an invitation to wire it back up by accident.
   check('email')
     .optional()
     .isEmail()

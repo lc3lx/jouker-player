@@ -44,6 +44,8 @@ const adminReferralRoute = require("./adminReferralRoute");
 const adminEconomyRoute = require("./adminEconomyRoute");
 const adminCosmeticsRoute = require("./adminCosmeticsRoute");
 const adminUserRoute = require("./adminUserRoute");
+const adminPlayerIdRoute = require("./adminPlayerIdRoute");
+const playerIdRoute = require("./playerIdRoute");
 const adminBotRoute = require("./adminBotRoute");
 const adminClanRoute = require("./adminClanRoute");
 const adminStaffRoute = require("./adminStaffRoute");
@@ -90,6 +92,7 @@ const mountRoutes = (app) => {
   app.use("/api/v1/admin/economy", adminEconomyRoute);
   app.use("/api/v1/admin/cosmetics", adminCosmeticsRoute);
   app.use("/api/v1/admin/users", adminUserRoute);
+  app.use("/api/v1/admin/player-ids", adminPlayerIdRoute);
   app.use("/api/v1/admin/clans", adminClanRoute);
   app.use("/api/v1/admin/bots", adminBotRoute);
   // Staff / permissions /me — before generic /admin catch-all.
@@ -113,6 +116,7 @@ const mountRoutes = (app) => {
   app.use("/api/v1/lucky-wheel", luckyWheelRoute);
   app.use("/api/v1/sicbo", sicboRoute);
   app.use("/api/v1/admin/sicbo", adminSicboRoute);
+  app.use("/api/v1/player-ids", playerIdRoute);
   app.use("/api/v1/social", socialRoute);
   app.use("/api/v1/clans", clanRoute);
   app.use("/api/v1/gifts", giftRoute);

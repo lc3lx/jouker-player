@@ -6,6 +6,7 @@ const WalletTransaction = require("../models/walletTransactionModel");
 const Achievement = require("../models/achievementModel");
 const Table = require("../models/tableModel");
 const vipService = require("./vipService");
+const playerIdService = require("./playerIdService");
 
 const XP_PER_LEVEL = 2500;
 
@@ -85,7 +86,7 @@ exports.getProfileSummary = asyncHandler(async (req, res) => {
 
   const [user, player, wallet, txs, bestWinRow, dbAchievements, vipLevel] = await Promise.all([
     User.findById(userId).select(
-      "name email country profileImg pokerHandsPlayed pokerHandsWon pokerWinStreak dailyBonusStreak createdAt"
+      "name email country profileImg pokerHandsPlayed pokerHandsWon pokerWinStreak dailyBonusStreak createdAt playerId"
     ),
     Player.getOrCreateByUser(userId),
     Wallet.findOne({ user: userId }).lean(),
@@ -159,14 +160,23 @@ exports.getProfileSummary = asyncHandler(async (req, res) => {
     { icon: "rate", value: `${Math.round(winRate * 100)}%`, label: "معدل الفوز", color: "#7BE495" },
   ];
 
-  const shortId = String(user._id).slice(-5).toUpperCase();
+  // The stored player number, not a slice of the ObjectId. This used to take
+  // the last 5 characters while playerProfileService took the last 6, so a
+  // player's "ID" changed depending on whether they opened their own profile or
+  // somebody opened the popup on them.
+  let playerId = typeof user.playerId === "number" ? user.playerId : null;
+  if (playerId === null) {
+    playerId = await playerIdService.ensurePlayerId(user._id).catch(() => null);
+  }
 
   res.status(200).json({
     status: "success",
     data: {
       user: {
         id: user._id,
-        shortId,
+        playerId,
+        /** Deprecated alias, kept one release for older clients. */
+        shortId: playerId === null ? null : String(playerId),
         name: user.name,
         email: user.email,
         country: user.country || "",

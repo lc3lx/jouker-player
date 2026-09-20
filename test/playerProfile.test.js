@@ -100,7 +100,16 @@ test("public profile: identity + lifetime stats + coin aggregation + per-game", 
   const p = await profileSvc.getPublicProfile(viewer._id, target._id);
   assert.equal(p.identity.name, "Target");
   assert.equal(p.identity.country, "SA");
-  assert.equal(p.identity.shortId.length, 6);
+  // The identity used to be the last 6 hex characters of the ObjectId. It is
+  // now the stored player number, allocated lazily here because this target
+  // predates the field.
+  assert.equal(typeof p.identity.playerId, "number");
+  assert.ok(p.identity.playerId >= 1001, "ordinary players start at 1001");
+  assert.equal(
+    p.identity.shortId,
+    String(p.identity.playerId),
+    "the deprecated alias mirrors the number"
+  );
   assert.ok(p.identity.memberSince);
 
   const g = p.stats.general;

@@ -36,6 +36,16 @@ router.get("/users/search", asyncHandler(async (req, res) => {
   res.json({ results: data.length, data });
 }));
 
+/** Add a friend by their player number, without searching first. */
+router.post("/friends/request-by-player-id", asyncHandler(async (req, res) => {
+  const reqDoc = await friendService.sendFriendRequestByPlayerId(
+    req.user._id,
+    req.body.playerId,
+    req.body.message
+  );
+  res.status(201).json({ data: reqDoc });
+}));
+
 router.post("/friends/request", asyncHandler(async (req, res) => {
   const reqDoc = await friendService.sendFriendRequest(
     req.user._id,

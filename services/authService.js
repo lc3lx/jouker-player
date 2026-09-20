@@ -12,6 +12,7 @@ const User = require("../models/userModel");
 const Wallet = require("../models/walletModel");
 const AgentProfile = require("../models/agentProfileModel");
 const referralInviteService = require("../modules/referral/services/referralInviteService");
+const playerIdService = require("./playerIdService");
 const { publish } = require("../domain/events/domainEventBus");
 const Events = require("../domain/events/eventTypes");
 
@@ -54,10 +55,14 @@ exports.signup = asyncHandler(async (req, res, next) => {
   let user;
   for (let attempt = 0; attempt < 5; attempt++) {
     try {
+      // Drawn fresh on every attempt: a retry means the previous create failed,
+      // so its number was never persisted and must not be reused here either.
+      const playerId = await playerIdService.allocateNextOrdinaryId();
       user = await User.create({
         name: req.body.name,
         email: req.body.email,
         password: req.body.password,
+        playerId,
         referredBy,
         inviteCode: attempt === 0 ? inviteCode : referralInviteService.generateInviteCode(),
         referralMeta: referredBy
@@ -71,7 +76,8 @@ exports.signup = asyncHandler(async (req, res, next) => {
       });
       break;
     } catch (err) {
-      if (err?.code === 11000 && String(err.message).includes("inviteCode") && attempt < 4) {
+      const dupField = err?.code === 11000 ? String(err.message) : "";
+      if ((dupField.includes("inviteCode") || dupField.includes("playerId")) && attempt < 4) {
         continue;
       }
       throw err;

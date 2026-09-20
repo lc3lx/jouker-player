@@ -36,6 +36,7 @@ const {
 } = require('../services/pushService');
 const asyncHandler = require('express-async-handler');
 const playerProfileService = require('../services/playerProfileService');
+const playerNameService = require('../services/playerNameService');
 
 const router = express.Router();
 
@@ -61,6 +62,29 @@ router.get('/settings', authService.allowedTo('user'), getUserSettings);
 router.patch('/settings', authService.allowedTo('user'), updateUserSettings);
 router.post('/logout-all', authService.allowedTo('user'), logoutAllDevices);
 router.put('/changeMyPassword', authService.allowedTo('user'), changeMyPassword);
+
+// Renaming is paid and capped at three. It lives here rather than on /updateMe
+// because it moves money and consumes a lifetime quota — see playerNameService.
+router.get(
+  '/name-change-quote',
+  authService.allowedTo('user'),
+  asyncHandler(async (req, res) => {
+    const data = await playerNameService.getQuote(req.user._id);
+    res.status(200).json({ status: 'success', data });
+  })
+);
+router.put(
+  '/updateMyName',
+  authService.allowedTo('user'),
+  asyncHandler(async (req, res) => {
+    const data = await playerNameService.changeName({
+      userId: req.user._id,
+      name: req.body?.name,
+      requestKey: req.body?.requestKey,
+    });
+    res.status(200).json({ status: 'success', data });
+  })
+);
 router.put(
   '/updateMe',
   uploadUserImage,

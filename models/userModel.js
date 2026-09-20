@@ -103,6 +103,29 @@ const userSchema = new mongoose.Schema(
       uppercase: true,
       index: true,
     },
+    /**
+     * The public player number, shown everywhere a player is identified and
+     * searchable by other players. Replaces two derived hex "short ids" that
+     * disagreed with each other — `playerProfileService` sliced the last 6
+     * characters of the ObjectId, `profileService` the last 5, so one player
+     * had two different ids depending on which screen you opened.
+     *
+     * 1-100 staff and agents · 101-1000 purchasable vanity numbers ·
+     * 1001+ ordinary players in join order. Allocated by playerIdService;
+     * once vacated a number is never reissued.
+     *
+     * No `default`: the field must be ABSENT until allocated, so the partial
+     * index below can ignore it. See the index comment.
+     */
+    playerId: { type: Number, min: 1 },
+    /**
+     * Paid display-name changes consumed, 0..3. There is no `max` here on
+     * purpose — mongoose does not run validators on `$inc`, so a `max` would
+     * read as a guard while enforcing nothing. The claim filter in
+     * playerNameService (`nameChangeCount: { $lt: MAX }`) is the real guard.
+     */
+    nameChangeCount: { type: Number, default: 0, min: 0 },
+    nameChangedAt: { type: Date, default: null },
     referralMeta: {
       linkedAt: Date,
       source: String,
@@ -191,6 +214,22 @@ userSchema.set("toObject", { transform: stripPrivateFields });
 userSchema.index({ referredBy: 1, createdAt: -1 });
 userSchema.index({ "referralMeta.deviceFingerprint": 1 }, { sparse: true });
 userSchema.index({ "referralMeta.registrationIp": 1 }, { sparse: true });
+
+/**
+ * Partial, not sparse. A sparse unique index skips documents where the field is
+ * MISSING, not where it is `null` — so with `default: null` every user awaiting
+ * backfill would carry `playerId: null`, and the second one inserted would
+ * collide. Filtering on `$type: "number"` says exactly what is meant and cannot
+ * be defeated by a stray null.
+ */
+userSchema.index(
+  { playerId: 1 },
+  {
+    unique: true,
+    partialFilterExpression: { playerId: { $type: "number" } },
+    name: "playerId_unique",
+  }
+);
 
 const User = mongoose.model("User", userSchema);
 

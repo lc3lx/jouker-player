@@ -233,37 +233,60 @@ async function listFriends(userId) {
     .map((r) => r.users.map(String).find((id) => id !== String(userId)))
     .filter(Boolean);
   const users = await User.find({ _id: { $in: friendIds } })
-    .select("name profileImg country")
+    .select("name profileImg country playerId")
     .lean();
   return users.map((u) => ({
     userId: String(u._id),
     name: u.name,
     avatar: u.profileImg || null,
     country: u.country || null,
+    playerId: typeof u.playerId === "number" ? u.playerId : null,
   }));
 }
 
 async function listPendingRequests(userId) {
   const incoming = await FriendRequest.find({ to: userId, status: "pending" })
     .sort({ createdAt: -1 })
-    .populate("from", "name profileImg")
+    .populate("from", "name profileImg playerId")
     .lean();
   const outgoing = await FriendRequest.find({ from: userId, status: "pending" })
     .sort({ createdAt: -1 })
-    .populate("to", "name profileImg")
+    .populate("to", "name profileImg playerId")
     .lean();
   return { incoming, outgoing };
 }
 
-/** Search players to add as friends — name, email, or Mongo user id. */
+/**
+ * Search players to add as friends — by player number, name, email or user id.
+ *
+ * The response deliberately does NOT include the target's email. Player numbers
+ * are sequential, so returning email here would turn this endpoint into an
+ * enumeration oracle: walk 1001 upward and harvest a name and an email address
+ * for the entire player base. The ObjectId branch was effectively unguessable,
+ * so this exposure is created by the numeric ids and has to be closed with them.
+ */
 async function searchUsers(viewerId, query) {
   const q = String(query || "").trim();
-  if (q.length < 2) return [];
+  if (!q) return [];
 
   const base = {
     _id: { $ne: viewerId },
     active: { $ne: false },
   };
+
+  // An exact player number is looked up on its own and put first: searching
+  // "1001" should lead with player 1001, not with whoever happens to have 1001
+  // inside their name.
+  const exactRows = [];
+  if (/^\d{1,9}$/.test(q)) {
+    const byNumber = await User.findOne({ ...base, playerId: Number(q) })
+      .select("name profileImg playerId")
+      .lean();
+    if (byNumber) exactRows.push(byNumber);
+  } else if (q.length < 2) {
+    // Short non-numeric queries stay blocked; a bare number is now meaningful.
+    return [];
+  }
 
   const or = [];
   const escaped = q.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
@@ -278,16 +301,30 @@ async function searchUsers(viewerId, query) {
   }
 
   const rows = await User.find({ ...base, $or: or })
-    .select("name profileImg email")
+    .select("name profileImg playerId")
     .limit(12)
     .lean();
 
-  return rows.map((u) => ({
+  const seen = new Set(exactRows.map((u) => String(u._id)));
+  const merged = [...exactRows, ...rows.filter((u) => !seen.has(String(u._id)))];
+
+  return merged.slice(0, 12).map((u) => ({
     id: String(u._id),
     name: u.name,
     avatar: u.profileImg || null,
-    email: u.email || null,
+    playerId: typeof u.playerId === "number" ? u.playerId : null,
   }));
+}
+
+/** Send a friend request to whoever holds this player number. */
+async function sendFriendRequestByPlayerId(fromId, playerId, message) {
+  const n = Number(playerId);
+  if (!Number.isInteger(n) || n < 1) {
+    throw new ApiError("رقم لاعب غير صالح", 400);
+  }
+  const target = await User.findOne({ playerId: n }).select("_id").lean();
+  if (!target) throw new ApiError("لا يوجد لاعب بهذا الرقم", 404);
+  return sendFriendRequest(fromId, target._id, message);
 }
 
 module.exports = {
@@ -301,6 +338,7 @@ module.exports = {
   listFriends,
   listPendingRequests,
   searchUsers,
+  sendFriendRequestByPlayerId,
   isBlocked,
   getRelationship,
 };

@@ -392,6 +392,10 @@ async function startServer() {
   } = require("./services/friendSchemaService");
   await ensureFriendshipIndexes();
   const {
+    ensurePlayerIdIndexes,
+  } = require("./services/playerIdSchemaService");
+  await ensurePlayerIdIndexes();
+  const {
     resumePendingPermanentLeaves,
   } = require("./services/pokerVacateService");
   await resumePendingPermanentLeaves();

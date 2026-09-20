@@ -30,6 +30,8 @@ const walletTransactionSchema = new mongoose.Schema(
         "cosmetic_purchase",
         "interaction_purchase",
         "interaction_use",
+        "special_id_purchase",
+        "name_change_fee",
         "game_buyin",
         "game_win",
         "game_loss",

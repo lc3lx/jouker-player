@@ -236,8 +236,15 @@ describe("Island Jackpot — integration (MongoDB replica set)", () => {
       await h.onHandSettled(params);
 
       assert.equal(await IslandWinner.countDocuments({ handId }), 1);
+
+      // And the pool paid that share once, not twice. Derived from the tier
+      // rather than hardcoded: this read 164_000 while four-of-a-kind paid
+      // 20%, and kept reading it after the tier became 10%, so the assertion
+      // failed on a rule change instead of on a duplicate payout.
       const pool = await h.getPool();
-      assert.equal(pool.poolBalance, 164_000);
+      const staked = 200_000 + 5_000; // the entry fee joins the pool in full
+      const share = Math.floor(staked * pool.payoutPercentages.fourOfAKind);
+      assert.equal(pool.poolBalance, staked - share);
     });
   });
 
