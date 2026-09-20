@@ -18,7 +18,10 @@ function refreshCosmeticsForUserOnTables(userId) {
 
 exports.getCatalog = async (req, res, next) => {
   try {
-    const data = await listCatalog();
+    // Passing the user in is what makes their VIP items visible; without it the
+    // catalog is the store only, and a subscriber sees nothing of what they pay
+    // for.
+    const data = await listCatalog(req.user?._id);
     res.status(200).json({ status: "success", results: data.length, data });
   } catch (e) {
     next(e);

@@ -223,13 +223,28 @@ async function ensureDefaultCatalog() {
 // `{ vipLevelRequired: null }` also matches docs where the field is absent (legacy).
 const STORE_VISIBLE = { isActive: true, vipLevelRequired: null };
 
-async function listCatalog() {
+/**
+ * @param {string} [userId] when given, the VIP items this player currently
+ *   holds are listed alongside the store. They are filtered out of the query
+ *   above by design — they are not for sale — but leaving them out entirely
+ *   meant a subscriber had nowhere to find, equip or unequip them: "ما عم لاقي
+ *   الطاولة تبع الـVIP والورق". They arrive marked `vipGranted` at price 0, so
+ *   the existing tabs show them as already owned and the ordinary
+ *   equip/unequip buttons do the rest.
+ */
+async function listCatalog(userId) {
   await ensureDefaultCatalog();
   const rows = await Cosmetic.find(STORE_VISIBLE)
     .sort({ type: 1, rarity: 1, name: 1 })
     .lean();
   const pub = rows.map(publicCosmeticDisplay).filter(Boolean);
-  return addBundleDerivedFields(pub, rows);
+  const store = await addBundleDerivedFields(pub, rows);
+  if (!userId) return store;
+
+  const held = await vipHeldItems(userId);
+  if (held.length === 0) return store;
+  const seen = new Set(store.map((x) => String(x.id)));
+  return store.concat(held.filter((x) => !seen.has(String(x.id))));
 }
 
 /** Dynamic store categories (enabled) — the store renders sections from these. */
