@@ -23,7 +23,7 @@ const ClanMember = require("../models/clanMemberModel");
 const WalletTransaction = require("../models/walletTransactionModel");
 const auditService = require("./auditService");
 const playerProfileService = require("./playerProfileService");
-const { withMongoTransaction, ledgerWithdraw } = require("./walletLedgerService");
+const ledger = require("./walletLedgerService");
 
 /**
  * Deliberately constants, not env vars. These are product numbers; an
@@ -49,8 +49,7 @@ const INVISIBLE_RE = /[​-‏‪-‮⁦-⁩﻿]/;
  * Listing the tashkeel block explicitly keeps them in without opening the door
  * to general combining marks from every other script.
  */
-const ALLOWED_RE =
-  /^[\p{Script=Arabic}ً-ٰٟ\p{Script=Latin}0-9 _.\-]+$/u;
+const ALLOWED_RE = /^[\p{Script=Arabic}ً-ٰٟ\p{Script=Latin}0-9 _.\-]+$/u;
 
 const RESERVED = [
   "admin",
@@ -90,10 +89,16 @@ function validateDisplayName(raw) {
   // otherwise count as two characters.
   const length = [...name].length;
   if (length < MIN_NAME_LENGTH) {
-    throw new ApiError(`الاسم قصير جداً (الحد الأدنى ${MIN_NAME_LENGTH} أحرف)`, 400);
+    throw new ApiError(
+      `الاسم قصير جداً (الحد الأدنى ${MIN_NAME_LENGTH} أحرف)`,
+      400
+    );
   }
   if (length > MAX_NAME_LENGTH) {
-    throw new ApiError(`الاسم طويل جداً (الحد الأقصى ${MAX_NAME_LENGTH} حرفاً)`, 400);
+    throw new ApiError(
+      `الاسم طويل جداً (الحد الأقصى ${MAX_NAME_LENGTH} حرفاً)`,
+      400
+    );
   }
 
   if (!ALLOWED_RE.test(name)) {
@@ -114,9 +119,30 @@ function validateDisplayName(raw) {
   return name;
 }
 
+/**
+ * Run the undo steps, newest first, and never let one of them mask the original
+ * failure — the player needs to see why their rename failed, not why the
+ * cleanup did. A compensation that itself fails is logged loudly because it is
+ * the one case that leaves real money in the wrong place.
+ */
+async function _compensate(undo, label) {
+  for (const step of undo.reverse()) {
+    try {
+      await step();
+    } catch (e) {
+      logger.error("compensation_failed", {
+        flow: label,
+        reason: e?.message || "unknown",
+      });
+    }
+  }
+}
+
 /** What the next rename costs, and how many are left. */
 async function getQuote(userId) {
-  const user = await User.findById(userId).select("name nameChangeCount").lean();
+  const user = await User.findById(userId)
+    .select("name nameChangeCount")
+    .lean();
   if (!user) throw new ApiError("اللاعب غير موجود", 404);
   const used = Math.min(user.nameChangeCount || 0, MAX_NAME_CHANGES);
   return {
@@ -134,116 +160,143 @@ async function getQuote(userId) {
 async function changeName({ userId, name: rawName, requestKey }) {
   const name = validateDisplayName(rawName);
 
-  const current = await User.findById(userId).select("name nameChangeCount active").lean();
+  const current = await User.findById(userId)
+    .select("name nameChangeCount active")
+    .lean();
   if (!current) throw new ApiError("اللاعب غير موجود", 404);
   if (current.active === false) throw new ApiError("الحساب موقوف", 403);
 
   // Renaming to the same name is a no-op, not a purchase. This alone absorbs
   // the most common accidental double-submit.
   if (current.name === name) {
-    return { name, charged: 0, used: current.nameChangeCount || 0, duplicate: true };
+    return {
+      name,
+      charged: 0,
+      used: current.nameChangeCount || 0,
+      duplicate: true,
+    };
   }
 
   let outcome;
   try {
-    outcome = await withMongoTransaction(async (session) => {
-      if (!session) throw new Error("MONGO_TRANSACTIONS_REQUIRED");
-
-      if (requestKey) {
-        const seen = await WalletTransaction.findOne({
-          userId,
-          type: "name_change_fee",
-          "meta.requestKey": requestKey,
-        })
-          .select("_id meta")
-          .session(session);
-        if (seen) {
-          return { name: seen.meta?.to ?? name, charged: 0, duplicate: true };
-        }
-      }
-
-      // Claim any remaining slot atomically. `new: false` is the point: the
-      // pre-image says which slot we just took, so the price cannot be derived
-      // from a read that another request has already invalidated.
+    outcome = await ledger.withMongoTransaction(async (session) => {
+      // Undo steps for a sessionless run, newest last.
       //
-      // The `$exists: false` arm is not belt-and-braces — `$lt` does NOT match
-      // a document that lacks the field, and every account created before this
-      // feature shipped lacks it (a mongoose default only applies to documents
-      // mongoose itself creates). Without this arm the claim matches nobody and
-      // the entire existing player base is told it has used up all three
-      // changes.
-      const pre = await User.findOneAndUpdate(
-        {
-          _id: userId,
-          $or: [
-            { nameChangeCount: { $lt: MAX_NAME_CHANGES } },
-            { nameChangeCount: { $exists: false } },
-          ],
-        },
-        { $inc: { nameChangeCount: 1 } },
-        { new: false, session }
-      );
-      if (!pre) throw new ApiError("لقد استنفدت جميع مرات تغيير الاسم", 409);
+      // This platform's Mongo is a standalone server, so `withMongoTransaction`
+      // hands back a null session and every money path in the app — cosmetics,
+      // gifts, settlements — already runs without a transaction. Refusing to
+      // run was worse than useless: it blocked the feature while leaving every
+      // other purchase exactly as exposed. So the work still happens, and each
+      // step that moved something registers how to put it back.
+      //
+      // This is weaker than a transaction: a process that dies mid-flight
+      // leaves the compensation unrun. It is strictly better than the
+      // alternative the rest of the app uses, which is nothing at all.
+      const undo = [];
 
-      const slot = pre.nameChangeCount || 0;
-      const price = RENAME_PRICES[slot];
+      try {
+        if (requestKey) {
+          const seen = await WalletTransaction.findOne({
+            userId,
+            type: "name_change_fee",
+            "meta.requestKey": requestKey,
+          })
+            .select("_id meta")
+            .session(session);
+          if (seen) {
+            return { name: seen.meta?.to ?? name, charged: 0, duplicate: true };
+          }
+        }
 
-      await ledgerWithdraw({
-        session,
-        userId,
-        amount: price,
-        ledgerType: "name_change_fee",
-        meta: {
+        // Claim any remaining slot atomically. `new: false` is the point: the
+        // pre-image says which slot we just took, so the price cannot be derived
+        // from a read that another request has already invalidated.
+        //
+        // The `$exists: false` arm is not belt-and-braces — `$lt` does NOT match
+        // a document that lacks the field, and every account created before this
+        // feature shipped lacks it (a mongoose default only applies to documents
+        // mongoose itself creates). Without this arm the claim matches nobody and
+        // the entire existing player base is told it has used up all three
+        // changes.
+        const pre = await User.findOneAndUpdate(
+          {
+            _id: userId,
+            $or: [
+              { nameChangeCount: { $lt: MAX_NAME_CHANGES } },
+              { nameChangeCount: { $exists: false } },
+            ],
+          },
+          { $inc: { nameChangeCount: 1 } },
+          { new: false, session }
+        );
+        if (!pre) throw new ApiError("لقد استنفدت جميع مرات تغيير الاسم", 409);
+        undo.push(() =>
+          User.updateOne({ _id: userId }, { $inc: { nameChangeCount: -1 } })
+        );
+
+        const slot = pre.nameChangeCount || 0;
+        const price = RENAME_PRICES[slot];
+
+        await ledger.ledgerWithdraw({
+          session,
+          userId,
+          amount: price,
+          ledgerType: "name_change_fee",
+          meta: {
+            slot: slot + 1,
+            from: pre.name,
+            to: name,
+            requestKey: requestKey || undefined,
+          },
+        });
+
+        undo.push(() =>
+          ledger.ledgerDeposit({
+            userId,
+            amount: price,
+            ledgerType: "refund",
+            meta: { reason: "name_change_failed", slot: slot + 1 },
+          })
+        );
+
+        await User.updateOne(
+          { _id: userId },
+          { $set: { name, nameChangedAt: new Date() } },
+          { session }
+        );
+
+        // The two denormalized copies of the name. Anything else reads User.name
+        // live, so this is the whole list.
+        await Player.updateOne(
+          { user: userId },
+          { $set: { displayName: name } },
+          { session }
+        );
+        await ClanMember.updateOne(
+          { user: userId },
+          { $set: { displayName: name } },
+          { session }
+        );
+
+        return {
+          name,
+          charged: price,
           slot: slot + 1,
-          from: pre.name,
-          to: name,
-          requestKey: requestKey || undefined,
-        },
-      });
-
-      await User.updateOne(
-        { _id: userId },
-        { $set: { name, nameChangedAt: new Date() } },
-        { session }
-      );
-
-      // The two denormalized copies of the name. Anything else reads User.name
-      // live, so this is the whole list.
-      await Player.updateOne(
-        { user: userId },
-        { $set: { displayName: name } },
-        { session }
-      );
-      await ClanMember.updateOne(
-        { user: userId },
-        { $set: { displayName: name } },
-        { session }
-      );
-
-      return {
-        name,
-        charged: price,
-        slot: slot + 1,
-        used: slot + 1,
-        remaining: MAX_NAME_CHANGES - (slot + 1),
-        previousName: pre.name,
-        duplicate: false,
-      };
+          used: slot + 1,
+          remaining: MAX_NAME_CHANGES - (slot + 1),
+          previousName: pre.name,
+          duplicate: false,
+        };
+      } catch (err) {
+        // A real transaction rolls itself back; only a sessionless run has
+        // anything to put back by hand.
+        if (!session) await _compensate(undo, "name_change");
+        throw err;
+      }
     });
   } catch (err) {
     if (err?.message === "INSUFFICIENT_BALANCE") {
       throw new ApiError("رصيدك لا يكفي لتغيير الاسم", 402);
-    }
-    if (err?.message === "MONGO_TRANSACTIONS_REQUIRED") {
-      // A bare Error carries no status, so this reached the client as an
-      // opaque 500 with nothing to act on. It means the database is not a
-      // replica set, which is an operator problem, not a player one — say so
-      // in the log and give the player something that isn't a blank failure.
-      logger.error("name_change_requires_transactions", {
-        userId: String(userId),
-        hint: "mongod must run as a replica set for money operations",
-      });
-      throw new ApiError("الخدمة غير متاحة حالياً، حاول لاحقاً", 503);
     }
     throw err;
   }
@@ -264,7 +317,9 @@ async function changeName({ userId, name: rawName, requestKey }) {
         },
       })
       .catch((e) =>
-        logger.warn("name_change_audit_failed", { reason: e?.message || "unknown" })
+        logger.warn("name_change_audit_failed", {
+          reason: e?.message || "unknown",
+        })
       );
   }
 

@@ -38,6 +38,24 @@ const ledger = require("./walletLedgerService");
 
 const { SPECIAL_ID_MIN, SPECIAL_ID_MAX } = playerIdService;
 
+/**
+ * Run the undo steps, newest first. A compensation that itself fails is logged
+ * loudly — that is the one case that leaves money in the wrong place — but it
+ * never masks the original failure, which is what the player needs to see.
+ */
+async function _compensate(undo, label) {
+  for (const step of undo.reverse()) {
+    try {
+      await step();
+    } catch (e) {
+      logger.error("compensation_failed", {
+        flow: label,
+        reason: e?.message || "unknown",
+      });
+    }
+  }
+}
+
 function assertSpecialRange(number) {
   const n = playerIdService.normalizeNumber(number);
   if (n === null || n < SPECIAL_ID_MIN || n > SPECIAL_ID_MAX) {
@@ -75,7 +93,13 @@ function adminView(doc) {
 
 /* ------------------------------------------------------------------ store -- */
 
-async function listStore({ page = 1, limit = 30, minPrice, maxPrice, tier } = {}) {
+async function listStore({
+  page = 1,
+  limit = 30,
+  minPrice,
+  maxPrice,
+  tier,
+} = {}) {
   const lim = Math.min(100, Math.max(1, parseInt(limit, 10) || 30));
   const pg = Math.max(1, parseInt(page, 10) || 1);
 
@@ -101,7 +125,10 @@ async function listStore({ page = 1, limit = 30, minPrice, maxPrice, tier } = {}
 
 async function getListed(number) {
   const n = assertSpecialRange(number);
-  const doc = await SpecialPlayerId.findOne({ number: n, status: "listed" }).lean();
+  const doc = await SpecialPlayerId.findOne({
+    number: n,
+    status: "listed",
+  }).lean();
   if (!doc) throw new ApiError("هذا الرقم غير معروض للبيع", 404);
   return publicView(doc);
 }
@@ -120,7 +147,9 @@ async function purchaseSpecialId({ userId, number, requestKey }) {
 
   // Cheap rejects, outside the transaction. None of these is a guarantee —
   // the claim below is.
-  const user = await User.findById(userId).select("playerId active isBot role").lean();
+  const user = await User.findById(userId)
+    .select("playerId active isBot role")
+    .lean();
   if (!user) throw new ApiError("اللاعب غير موجود", 404);
   if (user.active === false) throw new ApiError("الحساب موقوف", 403);
   if (user.isBot) throw new ApiError("غير متاح لهذا الحساب", 403);
@@ -130,95 +159,131 @@ async function purchaseSpecialId({ userId, number, requestKey }) {
 
   const listing = await SpecialPlayerId.findOne({ number: n }).lean();
   if (!listing) throw new ApiError("هذا الرقم غير معروض للبيع", 404);
-  if (listing.status !== "listed") throw new ApiError("هذا الرقم لم يعد متاحًا", 409);
+  if (listing.status !== "listed")
+    throw new ApiError("هذا الرقم لم يعد متاحًا", 409);
 
   let outcome;
   try {
     outcome = await ledger.withMongoTransaction(async (session) => {
-      // Money plus a one-of-a-kind resource: the standalone-Mongo fallback
-      // could charge a player and fail to deliver, so refuse to run without a
-      // real transaction rather than risk it.
-      if (!session) throw new Error("MONGO_TRANSACTIONS_REQUIRED");
+      // Undo steps for a sessionless run, newest last. This platform's Mongo
+      // is standalone, so there is no transaction to roll back for us — each
+      // step that moves something registers how to put it back instead. See
+      // playerNameService for the full reasoning; the short version is that
+      // refusing to run blocked the feature without making anything safer.
+      const undo = [];
 
-      if (requestKey) {
-        const seen = await WalletTransaction.findOne({
-          userId,
-          type: "special_id_purchase",
-          "meta.requestKey": requestKey,
-        })
-          .select("_id meta")
-          .session(session);
-        if (seen) {
-          return {
-            duplicate: true,
-            playerId: seen.meta?.number ?? n,
-            previousPlayerId: seen.meta?.previousPlayerId ?? null,
-            price: 0,
-          };
+      try {
+        if (requestKey) {
+          const seen = await WalletTransaction.findOne({
+            userId,
+            type: "special_id_purchase",
+            "meta.requestKey": requestKey,
+          })
+            .select("_id meta")
+            .session(session);
+          if (seen) {
+            return {
+              duplicate: true,
+              playerId: seen.meta?.number ?? n,
+              previousPlayerId: seen.meta?.previousPlayerId ?? null,
+              price: 0,
+            };
+          }
         }
-      }
 
-      // Claim first. A second buyer hits a WriteConflict here, withTransaction
-      // replays them, and on the replay `status: "listed"` no longer matches,
-      // so they are rejected before touching their wallet at all.
-      const claimed = await SpecialPlayerId.findOneAndUpdate(
-        { number: n, status: "listed" },
-        {
-          $set: {
-            status: "sold",
-            owner: userId,
-            acquiredVia: "purchase",
-            soldAt: new Date(),
+        // Claim first. A second buyer hits a WriteConflict here, withTransaction
+        // replays them, and on the replay `status: "listed"` no longer matches,
+        // so they are rejected before touching their wallet at all.
+        const claimed = await SpecialPlayerId.findOneAndUpdate(
+          { number: n, status: "listed" },
+          {
+            $set: {
+              status: "sold",
+              owner: userId,
+              acquiredVia: "purchase",
+              soldAt: new Date(),
+            },
           },
-        },
-        { new: true, session }
-      );
-      if (!claimed) throw new ApiError("هذا الرقم لم يعد متاحًا", 409);
+          { new: true, session }
+        );
+        if (!claimed) throw new ApiError("هذا الرقم لم يعد متاحًا", 409);
+        // Put the number back on sale if anything below fails. Without this a
+        // failed purchase would take the number off the market for good.
+        undo.push(() =>
+          SpecialPlayerId.updateOne(
+            { _id: claimed._id },
+            {
+              $set: { status: "listed", owner: null, acquiredVia: null },
+              $unset: { soldAt: "", soldPrice: "" },
+            }
+          )
+        );
 
-      // The price comes from the claimed document, never from the client.
-      const price = claimed.price;
-      const previousPlayerId =
-        typeof user.playerId === "number" ? user.playerId : null;
+        // The price comes from the claimed document, never from the client.
+        const price = claimed.price;
+        const previousPlayerId =
+          typeof user.playerId === "number" ? user.playerId : null;
 
-      if (price > 0) {
-        await ledger.ledgerWithdraw({
-          session,
-          userId,
-          amount: price,
-          ledgerType: "special_id_purchase",
-          meta: { number: n, previousPlayerId, requestKey: requestKey || undefined },
-        });
-      }
+        if (price > 0) {
+          await ledger.ledgerWithdraw({
+            session,
+            userId,
+            amount: price,
+            ledgerType: "special_id_purchase",
+            meta: {
+              number: n,
+              previousPlayerId,
+              requestKey: requestKey || undefined,
+            },
+          });
+        }
 
-      await SpecialPlayerId.updateOne(
-        { _id: claimed._id },
-        { $set: { soldPrice: price } },
-        { session }
-      );
+        if (price > 0) {
+          undo.push(() =>
+            ledger.ledgerDeposit({
+              userId,
+              amount: price,
+              ledgerType: "refund",
+              meta: { reason: "special_id_purchase_failed", number: n },
+            })
+          );
+        }
 
-      const assigned = await playerIdService.assignPlayerId({
-        session,
-        userId,
-        number: n,
-        reason: "special_purchase",
-        meta: { boughtNumber: n },
-      });
-
-      // Upgrading off one vanity number destroys it: it is retired above, and
-      // this takes it out of the store for good so it can never be relisted.
-      if (
-        previousPlayerId !== null &&
-        previousPlayerId >= SPECIAL_ID_MIN &&
-        previousPlayerId <= SPECIAL_ID_MAX
-      ) {
         await SpecialPlayerId.updateOne(
-          { number: previousPlayerId },
-          { $set: { status: "retired", owner: null } },
+          { _id: claimed._id },
+          { $set: { soldPrice: price } },
           { session }
         );
-      }
 
-      return { duplicate: false, price, ...assigned };
+        const assigned = await playerIdService.assignPlayerId({
+          session,
+          userId,
+          number: n,
+          reason: "special_purchase",
+          meta: { boughtNumber: n },
+        });
+
+        // Upgrading off one vanity number destroys it: it is retired above, and
+        // this takes it out of the store for good so it can never be relisted.
+        if (
+          previousPlayerId !== null &&
+          previousPlayerId >= SPECIAL_ID_MIN &&
+          previousPlayerId <= SPECIAL_ID_MAX
+        ) {
+          await SpecialPlayerId.updateOne(
+            { number: previousPlayerId },
+            { $set: { status: "retired", owner: null } },
+            { session }
+          );
+        }
+
+        return { duplicate: false, price, ...assigned };
+      } catch (err) {
+        // A real transaction rolls itself back; only a sessionless run has
+        // anything to put back by hand.
+        if (!session) await _compensate(undo, "special_id_purchase");
+        throw err;
+      }
     });
   } catch (err) {
     if (err?.message === "INSUFFICIENT_BALANCE") {
@@ -226,15 +291,6 @@ async function purchaseSpecialId({ userId, number, requestKey }) {
     }
     if (playerIdService.isDuplicateKey(err)) {
       throw new ApiError("هذا الرقم لم يعد متاحًا", 409);
-    }
-    if (err?.message === "MONGO_TRANSACTIONS_REQUIRED") {
-      // Same as the rename path: an operator problem surfacing as an opaque
-      // 500. The database is not a replica set.
-      logger.error("special_id_purchase_requires_transactions", {
-        userId: String(userId),
-        hint: "mongod must run as a replica set for money operations",
-      });
-      throw new ApiError("الخدمة غير متاحة حالياً، حاول لاحقاً", 503);
     }
     throw err;
   }
@@ -258,7 +314,9 @@ async function purchaseSpecialId({ userId, number, requestKey }) {
         },
       })
       .catch((e) =>
-        logger.warn("special_id_audit_failed", { reason: e?.message || "unknown" })
+        logger.warn("special_id_audit_failed", {
+          reason: e?.message || "unknown",
+        })
       );
   }
 
@@ -297,7 +355,10 @@ async function adminListOne({ number, price, label, tier, actorId }) {
   }
 
   const existing = await SpecialPlayerId.findOne({ number: n });
-  if (existing && (existing.status === "sold" || existing.status === "retired")) {
+  if (
+    existing &&
+    (existing.status === "sold" || existing.status === "retired")
+  ) {
     throw new ApiError("هذا الرقم لم يعد قابلاً للعرض", 409);
   }
 
@@ -334,7 +395,9 @@ async function adminListRange({ from, to, price, tier, actorId }) {
   for (let n = start; n <= end; n += 1) numbers.push(n);
 
   const [taken, retired, blocked] = await Promise.all([
-    User.find({ playerId: { $in: numbers } }).select("playerId").lean(),
+    User.find({ playerId: { $in: numbers } })
+      .select("playerId")
+      .lean(),
     require("../models/retiredPlayerIdModel")
       .find({ number: { $in: numbers } })
       .select("number")
