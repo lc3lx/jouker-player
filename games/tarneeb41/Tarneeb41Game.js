@@ -90,6 +90,22 @@ class Tarneeb41Game extends BaseGameEngine {
   constructor(roomId, options = {}) {
     super(roomId, "tarneeb41", options);
     this.maxPlayers = 4;
+    /**
+     * Identity of this *table session* — the stretch of time one group of
+     * people occupies the table.
+     *
+     * Minted here, in the constructor, and **not** per deal: the instance is
+     * created when someone sits at an empty table and destroyed when the last
+     * human leaves (`clearTrixGame` / `clearTarneeb41Game`), so this changes
+     * exactly when the table turns over. `sessionId` is per دق and is a
+     * different thing — settlement identity.
+     *
+     * The table chat is never stored anywhere; it lives in each client's list
+     * and was never cleared, so a player who stayed kept every message from
+     * everyone who had since left. Clients drop their chat when this changes.
+     */
+    this.tableSessionId = crypto.randomUUID();
+
     this.hands = [[], [], [], []];
     this.dealerIndex = -1;
     this.revealedCard = null;
@@ -1296,6 +1312,9 @@ class Tarneeb41Game extends BaseGameEngine {
     return {
       state: this.state,
       gameType: this.gameType,
+      // The table session this state belongs to — clients drop their chat
+      // when it changes. See the constructor.
+      tableSessionId: this.tableSessionId,
       // Bumped by every deal, redeals included — see dealRound.
       dealSerial: this.dealSerial || 0,
       // Which seat this snapshot was masked for. The client renders the table

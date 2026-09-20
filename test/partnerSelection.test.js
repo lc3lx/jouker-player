@@ -694,3 +694,88 @@ test("a Tarneeb pairing of adjacent chairs moves them too", async () => {
     game.destroy();
   }
 });
+
+// ── the table session, which the chat lives and dies with ───────────────────
+//
+// Table chat is never stored — it is broadcast and then lives only in each
+// client's list, which was never cleared. A player who stayed kept every
+// message from everyone who had since left. Clients drop their chat when this
+// id changes, so it has to change exactly when the table turns over.
+
+test("a table session is minted per game instance, not per deal", async () => {
+  const game = new TrixGame("trix_session", { gameMode: "solo" });
+  try {
+    const atBirth = game.tableSessionId;
+    assert.ok(atBirth, "a table has a session from the moment it exists");
+
+    for (let i = 0; i < 4; i += 1) {
+      game.players.push({
+        userId: `u${i}`,
+        seatIndex: i,
+        chair: i,
+        isBot: false,
+        displayName: `P${i}`,
+        chips: 100,
+      });
+    }
+    game.botFillReleased = true;
+    await game.startGame();
+
+    assert.equal(
+      game.tableSessionId,
+      atBirth,
+      "dealing does not end the conversation — the same people are still there",
+    );
+    assert.notEqual(
+      game.tableSessionId,
+      game.sessionId,
+      "the per-دق settlement id is a different thing",
+    );
+    assert.equal(game.getGameState(0).tableSessionId, atBirth);
+
+    game.clearBotTimer();
+    game.clearTurnTimer();
+  } finally {
+    game.destroy();
+  }
+});
+
+test("a fresh table instance is a fresh conversation", () => {
+  // The engine destroys a table's game when the last human leaves, so the next
+  // occupants get a new instance — and must not inherit the old chat.
+  const first = new TrixGame("trix_turnover", { gameMode: "solo" });
+  const firstId = first.tableSessionId;
+  first.destroy();
+
+  const second = new TrixGame("trix_turnover", { gameMode: "solo" });
+  try {
+    assert.notEqual(
+      second.tableSessionId,
+      firstId,
+      "same table, different sitting",
+    );
+  } finally {
+    second.destroy();
+  }
+});
+
+test("Tarneeb carries a table session too", async () => {
+  const game = new Tarneeb41Game("t41_session", { mongoTableId: "t1" });
+  try {
+    assert.ok(game.tableSessionId);
+    for (let i = 0; i < 4; i += 1) {
+      game.players.push({
+        userId: `u${i}`,
+        socketId: `s${i}`,
+        seatIndex: i,
+        chair: i,
+        isBot: false,
+        displayName: `P${i}`,
+        chips: 1000,
+      });
+    }
+    assert.equal(game.getGameState(0).tableSessionId, game.tableSessionId);
+  } finally {
+    game.destroy();
+  }
+});

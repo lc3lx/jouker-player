@@ -448,6 +448,23 @@ class PokerTable {
     this.minimumBet = deriveMinimumBet(this.buyIn, table.minimumBet);
     this.rakePolicy = resolveRakePolicy(table);
     this.tableKind = table.tableKind || null;
+    /**
+     * Identity of this *sitting* — one group of people occupying the table.
+     *
+     * Table chat is never stored anywhere: the server broadcasts a message and
+     * forgets it, so it lives only in each client's own list, and that list was
+     * never cleared. A player who stayed kept every message from everyone who
+     * had since left, while the people who arrived after them saw an empty
+     * chat — the same table showing two different conversations.
+     *
+     * A poker table is permanent, so unlike the card games there is no "new
+     * game object" moment to key on. This rolls when the seated humans reach
+     * zero, and rides the snapshot so a server restart does **not** wipe a live
+     * conversation.
+     */
+    this.tableSessionId = crypto.randomUUID();
+    /** Whether anyone was seated last time we looked — for the edge, not the level. */
+    this._hadSeatedHumans = false;
     this.arenaTournament = table.arenaTournament || null;
     this.clanTournamentMatch = table.clanTournamentMatch || null;
     this.capacity = normalizeCapacity(toSafeInt(table.capacity, 9));
@@ -756,6 +773,10 @@ class PokerTable {
       currentHandId: this.currentHandId,
       handStartedAt: this.handStartedAt,
       handStartTotal: this.handStartTotal,
+      // Carried so a restart resumes the same sitting rather than looking like
+      // a new one and wiping everyone's chat mid-hand.
+      tableSessionId: this.tableSessionId,
+      hadSeatedHumans: this._hadSeatedHumans,
       handJackpotFees: this.handJackpotFees,
       uncollectedRake: this.uncollectedRake,
       handCounter: this.handCounter,
@@ -836,6 +857,10 @@ class PokerTable {
     this.currentHandId = snapshot.currentHandId || null;
     this.handStartedAt = snapshot.handStartedAt || null;
     this.handStartTotal = hasHandStartTotal ? toSafeInt(snapshot.handStartTotal, 0) : 0;
+    // Keep the sitting we already had when the snapshot carries none (an older
+    // snapshot), rather than minting one and clearing chat for no reason.
+    if (snapshot.tableSessionId) this.tableSessionId = snapshot.tableSessionId;
+    this._hadSeatedHumans = snapshot.hadSeatedHumans === true;
     this.handJackpotFees = toSafeInt(snapshot.handJackpotFees, 0);
     this.uncollectedRake = toSafeInt(snapshot.uncollectedRake, 0);
     this.handCounter = toSafeInt(snapshot.handCounter, 0);
@@ -2137,6 +2162,25 @@ class PokerTable {
   /** Humans still sitting, including a just-busted stack waiting for auto-rebuy. */
   seatedHumanCount() {
     return this.seats.filter((s) => isHumanSeat(s)).length;
+  }
+
+  /**
+   * End the sitting when the last human leaves, so the next group does not
+   * inherit their conversation. See [tableSessionId].
+   *
+   * Keyed on the **edge**, not the level: an empty table broadcasts repeatedly
+   * and must not mint a new id each time. Read-only with respect to seats,
+   * chips and hands — it only reads a count.
+   */
+  _rollTableSessionIfEmptied() {
+    const humans = this.seatedHumanCount();
+    if (humans > 0) {
+      this._hadSeatedHumans = true;
+      return;
+    }
+    if (!this._hadSeatedHumans) return; // already empty, or never occupied
+    this._hadSeatedHumans = false;
+    this.tableSessionId = crypto.randomUUID();
   }
 
   /** Bots currently holding a seat — the ceiling [maxBotsPerTable] applies to. */
@@ -5337,6 +5381,9 @@ class PokerTable {
 
     return {
       tableId: this.tableId,
+      // The sitting this state belongs to — clients drop their chat when it
+      // changes. See the constructor.
+      tableSessionId: this.tableSessionId,
       stateRevision: toSafeInt(this.stateRevision, 0),
       serverTime: Date.now(),
       round: this.round,
@@ -5424,6 +5471,9 @@ class PokerTable {
     // H-3: only the owner broadcasts + persists. Followers never emit table state
     // (the owner reaches every socket cluster-wide through the redis-adapter).
     if (!this.isOwner) return;
+    // One read, in the one place every state change already passes through —
+    // deliberately not in the six seat-removal paths, which are money code.
+    this._rollTableSessionIfEmptied();
     // Persist snapshot first, then derive outgoing events from state.
     const snapshotSaved = await this.saveSnapshot({
       finished: !this.running && (this.round === "idle" || this.round === "showdown"),

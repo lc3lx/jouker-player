@@ -826,6 +826,9 @@ function registerGameHandlers(nsp, jwtVerify) {
             waiting: true,
             roomId: String(tableId),
             seatIndex: game.getPlayerIndex(userId),
+            // No game state yet, but chat is already live — so the table
+            // session has to reach the client here too.
+            tableSessionId: game.tableSessionId,
             waitingForPlayers: {
               remainingSeconds: game.remainingWaitSeconds(),
               humanCount: game.humanCount(),
@@ -2074,7 +2077,14 @@ function registerGameHandlers(nsp, jwtVerify) {
           room = `tarneeb41:${tid}`;
           game = roomManager.getTarneeb41GameForTable(tid);
         }
-        if (!room) return;
+        if (!room) {
+          // The socket is not in this table's room — a spectator, or a client
+          // that sent before its rejoin completed. Silently returning meant the
+          // player typed, pressed send, and watched nothing happen with no way
+          // to tell whether it had gone.
+          if (typeof ack === "function") ack({ ok: false, reason: "not_seated" });
+          return;
+        }
 
         const rate = tableChat.checkRate(userId);
         if (!rate.ok) {
