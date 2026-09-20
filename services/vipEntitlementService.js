@@ -16,7 +16,7 @@
  * out of step with the subscription.
  */
 
-/** Lowest to highest. A tier entitles a player to every tier below it. */
+/** Lowest to highest. Ordering is for ranking seats, not for inheritance. */
 const VIP_ORDER = ["bronze", "silver", "gold", "platinum"];
 
 function normalizeLevel(level) {
@@ -36,15 +36,21 @@ function isVipGated(item) {
 }
 
 /**
- * Does `userLevel` reach `requiredLevel`?
+ * Does `userLevel` entitle the player to `requiredLevel`?
  *
- * Higher tiers include lower ones, so a platinum member wears the bronze frame
- * if they want it. An unknown or missing requirement is not a VIP gate at all.
+ * **A tier gets its own set and nothing else.** This used to be cumulative
+ * (`vipRank(user) >= vipRank(need)`), which handed a platinum member all
+ * sixteen items at once — "لي دخلت الدنيا ببعضا". The set is the tier's
+ * identity: a platinum table should say platinum on sight, and it cannot if
+ * the platinum member is sitting on the bronze felt. Higher tiers are worth
+ * more because their art is better, not because they hold more of it.
+ *
+ * An unknown or missing requirement is not a VIP gate at all.
  */
 function entitles(userLevel, requiredLevel) {
   const need = normalizeLevel(requiredLevel);
   if (!need) return false;
-  return vipRank(userLevel) >= vipRank(need);
+  return normalizeLevel(userLevel) === need;
 }
 
 /**

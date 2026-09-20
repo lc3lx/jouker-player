@@ -329,8 +329,94 @@ function payloadFromRowAndIdMap(row, idTo) {
 }
 
 /**
+ * `assetKey` → required tier, for every VIP-gated cosmetic in the catalog.
+ *
+ * A dozen rows that only change when an admin edits the catalog, read on the
+ * seat-render path — so it is memoised briefly rather than queried per render.
+ * The cost of the memo is that a gate an admin adds or removes takes up to
+ * [VIP_GATE_TTL_MS] to be felt, which is the right trade for a catalog that
+ * changes a few times a year.
+ */
+const VIP_GATE_TTL_MS = 30_000;
+let vipGateMemo = { at: 0, map: null };
+
+async function vipGatedAssetKeys() {
+  const now = Date.now();
+  if (vipGateMemo.map && now - vipGateMemo.at < VIP_GATE_TTL_MS) {
+    return vipGateMemo.map;
+  }
+  const rows = await Cosmetic.find({ vipLevelRequired: { $ne: null } })
+    .select("assetKey vipLevelRequired")
+    .lean();
+  const map = new Map();
+  for (const r of rows) {
+    if (r.assetKey) map.set(String(r.assetKey), r.vipLevelRequired);
+  }
+  vipGateMemo = { at: now, map };
+  return map;
+}
+
+/** For tests and for any caller that has just rewritten the catalog. */
+function invalidateVipGateCache() {
+  vipGateMemo = { at: 0, map: null };
+}
+
+/**
+ * Take off anything the player's subscription no longer entitles them to.
+ *
+ * A VIP item is held, not owned, so the equip record outlives the entitlement:
+ * the id stays in `equippedBySlot` when the subscription lapses, and — now that
+ * a tier grants only its own set — also when the player moves to another tier.
+ * Without this a lapsed member keeps wearing the platinum felt forever, and an
+ * upgraded one sits at a gold table while paying for platinum.
+ *
+ * Nothing is written. The equip is simply not resolved, so it comes back by
+ * itself if the player returns to that tier.
+ */
+async function dropUnentitledVipEquips(payloads) {
+  if (payloads.size === 0) return payloads;
+
+  const gated = await vipGatedAssetKeys();
+  if (gated.size === 0) return payloads;
+
+  // Almost every player wears nothing VIP-gated, and then this costs nothing.
+  const affected = [];
+  for (const [uid, p] of payloads) {
+    const keys = Object.values(p.bySlot || {});
+    if (keys.some((k) => gated.has(String(k)))) affected.push(uid);
+  }
+  if (affected.length === 0) return payloads;
+
+  const levels = await require("./vipService").getVipLevelsForUsers(affected);
+  const vipEntitlement = require("./vipEntitlementService");
+
+  for (const uid of affected) {
+    const p = payloads.get(uid);
+    const level = levels.get(String(uid)) || null;
+    const bySlot = {};
+    for (const [slot, key] of Object.entries(p.bySlot || {})) {
+      const need = gated.get(String(key));
+      if (need && !vipEntitlement.entitles(level, need)) continue;
+      bySlot[slot] = key;
+    }
+    const avatarFrame = bySlot.avatar_frame || null;
+    payloads.set(uid, {
+      tableTheme: bySlot.table_theme || null,
+      cardSkin: bySlot.card_back || null,
+      avatarFrame,
+      skin: avatarFrame,
+      bySlot,
+    });
+  }
+  return payloads;
+}
+
+/**
  * Map userId string -> { tableTheme, cardSkin, avatarFrame } asset keys
  * Redis-backed when configured, else memory; invalidated on buy/equip.
+ *
+ * The cache holds what the player chose; entitlement is applied after reading
+ * it, so a subscription that lapses between writes still takes effect at once.
  */
 async function resolveEquippedPayloadForUsers(userIds) {
   const ids = [...new Set((userIds || []).map((u) => String(u)).filter(Boolean))];
@@ -352,7 +438,7 @@ async function resolveEquippedPayloadForUsers(userIds) {
       missing.push(uid);
     }
   }
-  if (missing.length === 0) return out;
+  if (missing.length === 0) return dropUnentitledVipEquips(out);
 
   const objectIds = missing.map((s) => toObjectId(s)).filter(Boolean);
   if (objectIds.length === 0) {
@@ -361,7 +447,7 @@ async function resolveEquippedPayloadForUsers(userIds) {
       await equippedCache.set(uid, empty);
       out.set(uid, empty);
     }
-    return out;
+    return dropUnentitledVipEquips(out);
   }
 
   const rows = await UserCosmetics.find({ user: { $in: objectIds } }).lean();
@@ -401,7 +487,7 @@ async function resolveEquippedPayloadForUsers(userIds) {
     }
   }
 
-  return out;
+  return dropUnentitledVipEquips(out);
 }
 
 /**
@@ -732,4 +818,5 @@ module.exports = {
   publicCosmeticDisplay,
   invalidateEquippedCache,
   invalidateEquippedCacheMany,
+  invalidateVipGateCache,
 };

@@ -39,11 +39,26 @@ test("tiers rank upward and a non-subscriber ranks zero", () => {
   assert.ok(vipRank("gold") < vipRank("platinum"));
 });
 
-test("a higher tier is entitled to everything below it", () => {
-  assert.equal(entitles("platinum", "bronze"), true);
+test("a tier is entitled to its own set and to no other", () => {
+  // "ابو الـVIP البلاتينم يطلع عندو بس البلاتينم والذهب بس الذهبي" — the set is
+  // the tier's identity. Cumulative entitlement handed a platinum member all
+  // sixteen items and the tiers stopped meaning anything on sight.
   assert.equal(entitles("gold", "gold"), true);
+  assert.equal(entitles("platinum", "platinum"), true);
+
+  assert.equal(entitles("platinum", "bronze"), false);
+  assert.equal(entitles("platinum", "gold"), false);
+  assert.equal(entitles("gold", "silver"), false);
+
   assert.equal(entitles("bronze", "gold"), false);
   assert.equal(entitles(null, "bronze"), false);
+});
+
+test("ranking still orders the tiers — it just does not grant across them", () => {
+  // resolveTableFelt picks the highest VIP at the table, so the order has to
+  // survive even though entitlement no longer uses it.
+  assert.ok(vipRank("platinum") > vipRank("gold"));
+  assert.equal(entitles("platinum", "gold"), false);
 });
 
 test("an item with no tier is not a VIP item", () => {
@@ -61,13 +76,20 @@ test("a subscriber equips VIP art without ever owning it", () => {
   // ownership here is what made the VIP items unreachable.
   const item = { vipLevelRequired: "gold" };
   assert.equal(canEquip({ item, isOwned: false, vipLevel: "gold" }), true);
-  assert.equal(canEquip({ item, isOwned: false, vipLevel: "platinum" }), true);
 });
 
 test("the entitlement lapses with the subscription, on its own", () => {
   const item = { vipLevelRequired: "gold" };
   assert.equal(canEquip({ item, isOwned: false, vipLevel: "silver" }), false);
   assert.equal(canEquip({ item, isOwned: false, vipLevel: null }), false);
+});
+
+test("moving up a tier gives up the old tier's art", () => {
+  // The upgrade is not a superset, so the gold felt stops being equippable the
+  // moment the member becomes platinum. It has to stop rendering too, which is
+  // what dropUnentitledVipEquips is for.
+  const gold = { vipLevelRequired: "gold" };
+  assert.equal(canEquip({ item: gold, isOwned: false, vipLevel: "platinum" }), false);
 });
 
 test("a bought item still needs to be owned, VIP or not", () => {

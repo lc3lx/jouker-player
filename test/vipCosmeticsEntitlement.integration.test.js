@@ -30,6 +30,7 @@ const { resetMongoTransactionProbeForTests } = require("../services/walletLedger
 let replSet = null;
 const savedEnv = {};
 const realGetVipLevel = vipService.getVipLevel;
+const realGetVipLevelsForUsers = vipService.getVipLevelsForUsers;
 
 /** Who is a VIP, for this test. The real lookup reads subscriptions. */
 let levelByUser = new Map();
@@ -59,6 +60,11 @@ test.before(async () => {
   // The services call `require("./vipService").getVipLevel` at call time, so
   // this patch is visible to them without any injection seam.
   vipService.getVipLevel = async (uid) => levelByUser.get(String(uid)) || null;
+  // The render path resolves tiers in bulk. Patching only the single lookup
+  // let the seat resolver fall through to the real subscription collection,
+  // read "not a VIP", and strip the equip it was meant to be testing.
+  vipService.getVipLevelsForUsers = async (uids) =>
+    new Map((uids || []).map((u) => [String(u), levelByUser.get(String(u)) || null]));
   levelByUser.set(String(SUBSCRIBER), "gold");
 
   vipFelt = await Cosmetic.create({
@@ -81,6 +87,7 @@ test.before(async () => {
 
 test.after(async () => {
   vipService.getVipLevel = realGetVipLevel;
+  vipService.getVipLevelsForUsers = realGetVipLevelsForUsers;
   if (mongoose.connection.readyState !== 0) {
     await mongoose.connection.dropDatabase();
     await mongoose.disconnect();
@@ -188,6 +195,79 @@ test("when the subscription lapses the items simply stop being listed", async ()
     assert.equal(list.some((x) => x.vipGranted), false);
   } finally {
     levelByUser.set(String(SUBSCRIBER), "gold");
+  }
+});
+
+// ── one tier, one set ─────────────────────────────────────────────────────
+
+test("a tier sees its own set and no other tier's", async () => {
+  // "ابو الـVIP البلاتينم يطلع عندو بس البلاتينم والذهب بس الذهبي". Entitlement
+  // used to be cumulative, so a platinum member's catalog carried all four
+  // tiers at once and the art stopped identifying the tier.
+  const platinumFelt = await Cosmetic.create({
+    type: "table_theme", name: "VIP platinum felt", assetKey: "vip_platinum",
+    price: 0, vipLevelRequired: "platinum", isActive: true,
+  });
+  cosmeticsService.invalidateVipGateCache();
+
+  const gold = await cosmeticsService.listCatalog(SUBSCRIBER);
+  assert.ok(
+    gold.some((x) => x.assetKey === "vip_gold" && x.vipGranted),
+    "the gold member lost their own felt"
+  );
+  assert.equal(
+    gold.some((x) => x.assetKey === "vip_platinum"),
+    false,
+    "a gold member was handed the platinum felt"
+  );
+
+  levelByUser.set(String(SUBSCRIBER), "platinum");
+  try {
+    const plat = await cosmeticsService.listCatalog(SUBSCRIBER);
+    assert.ok(plat.some((x) => x.assetKey === "vip_platinum" && x.vipGranted));
+    assert.equal(
+      plat.some((x) => x.assetKey === "vip_gold" && x.vipGranted),
+      false,
+      "a platinum member kept the gold felt as well"
+    );
+  } finally {
+    levelByUser.set(String(SUBSCRIBER), "gold");
+    await Cosmetic.deleteOne({ _id: platinumFelt._id });
+    cosmeticsService.invalidateVipGateCache();
+  }
+});
+
+test("an equipped VIP item comes off by itself when the tier stops covering it", async () => {
+  // Nothing writes to the equip record when a subscription changes, so the id
+  // outlives the entitlement. Before this the member kept wearing the gold felt
+  // after upgrading to platinum, and kept it forever once VIP lapsed.
+  await cosmeticsService.equipCosmetic(SUBSCRIBER, vipFelt._id);
+  const worn = await cosmeticsService.resolveEquippedPayloadForUsers([SUBSCRIBER]);
+  assert.equal(worn.get(String(SUBSCRIBER)).tableTheme, "vip_gold");
+
+  levelByUser.set(String(SUBSCRIBER), "platinum");
+  try {
+    // No invalidation happens on a tier change — the cached payload still says
+    // vip_gold, and the entitlement has to be applied after reading it.
+    const after = await cosmeticsService.resolveEquippedPayloadForUsers([SUBSCRIBER]);
+    assert.equal(after.get(String(SUBSCRIBER)).tableTheme, null);
+  } finally {
+    levelByUser.set(String(SUBSCRIBER), "gold");
+    await cosmeticsService.unequipCosmetic(SUBSCRIBER, "table_theme");
+  }
+});
+
+test("a bought item is untouched by any of this", async () => {
+  // The rule is about lent art. Something paid for must survive every tier
+  // change, or the fix above is a way to lose purchases.
+  await cosmeticsService.equipCosmetic(SUBSCRIBER, storeFelt._id);
+  levelByUser.delete(String(SUBSCRIBER));
+  try {
+    const worn = await cosmeticsService.resolveEquippedPayloadForUsers([SUBSCRIBER]);
+    assert.equal(worn.get(String(SUBSCRIBER)).tableTheme, "emerald_deep");
+  } finally {
+    levelByUser.set(String(SUBSCRIBER), "gold");
+    await cosmeticsService.unequipCosmetic(SUBSCRIBER, "table_theme");
   }
 });
 
