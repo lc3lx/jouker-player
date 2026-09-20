@@ -120,6 +120,57 @@ module.exports = [
     isActive: true,
     games: ["poker", "trix", "tarneeb41"],
   },
+  // The five below are not recolours. Each one picks its own cloth weave,
+  // edge inlay and centre ornament in
+  // frontapp/lib/features/game/cosmetics/table_surface_design.dart, so two of
+  // them side by side are different tables rather than one table twice.
+  {
+    type: "table_theme",
+    name: "طاولة ليل الأرابيسك",
+    assetKey: "arabesque_night",
+    price: 8500,
+    rarity: "legendary",
+    isActive: true,
+    featured: true,
+    featuredOrder: 3,
+    games: ["poker", "trix", "tarneeb41"],
+  },
+  {
+    type: "table_theme",
+    name: "طاولة الكربون النخبوية",
+    assetKey: "carbon_elite",
+    price: 6500,
+    rarity: "epic",
+    isActive: true,
+    games: ["poker", "trix", "tarneeb41"],
+  },
+  {
+    type: "table_theme",
+    name: "طاولة الرخام العاجي",
+    assetKey: "marble_ivory",
+    price: 7000,
+    rarity: "epic",
+    isActive: true,
+    games: ["poker", "trix", "tarneeb41"],
+  },
+  {
+    type: "table_theme",
+    name: "طاولة الجمر القرمزي",
+    assetKey: "crimson_ember",
+    price: 5500,
+    rarity: "epic",
+    isActive: true,
+    games: ["poker", "trix", "tarneeb41"],
+  },
+  {
+    type: "table_theme",
+    name: "طاولة اليشم الإمبراطوري",
+    assetKey: "imperial_jade",
+    price: 9000,
+    rarity: "legendary",
+    isActive: true,
+    games: ["poker", "trix", "tarneeb41"],
+  },
   // Legacy frames kept inactive so country skins become the primary store skins.
   {
     type: "avatar_frame",
