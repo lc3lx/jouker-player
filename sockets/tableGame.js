@@ -6644,7 +6644,9 @@ function initTableGame(io, options = {}) {
           socket.emit("table_event", { type: "rate_limited", tableId: String(tableId) });
           return;
         }
-        const table = await Table.findById(tableId).select("gameType seats vacatingPlayers settings isPrivate");
+        const table = await Table.findById(tableId).select(
+          "gameType seats vacatingPlayers settings isPrivate owner allowedUsers"
+        );
         if (!table || table.gameType !== "poker") {
           socket.emit("table_event", { type: "table_not_found", tableId: String(tableId) });
           return;
@@ -6656,9 +6658,12 @@ function initTableGame(io, options = {}) {
         if (seated || vacating) {
           return handleJoinTable({ tableId });
         }
-        // A seat password is not a spectator credential. Private tables stay
-        // non-watchable until an explicit viewer-grant model is introduced.
-        if (table.isPrivate || (table.settings && table.settings.allowSpectators === false)) {
+        // A seat password is still not a spectator credential. The viewer-grant
+        // model this used to wait for is `owner` + `allowedUsers`, which the
+        // invite flow already writes — and which seat picking depends on, since
+        // both the VIP host and the guests they invite reach their seats
+        // through the spectator view.
+        if (!require("../services/tableAdmissionService").canWatchTable(table, socket.userId)) {
           socket.emit("table_event", { type: "spectating_denied", tableId: String(tableId) });
           return;
         }

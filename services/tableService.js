@@ -1043,20 +1043,24 @@ exports.joinTable = asyncHandler(async (req, res, next) => {
   // Check private table password. VIP tables store a bcrypt hash; legacy
   // admin-created tables store plaintext.
   if (table.isPrivate) {
-    const invitationGranted = (table.allowedUsers || []).some(
-      (user) => String(user) === String(req.user._id)
-    );
-    const isOwner = String(table.owner || "") === String(req.user._id);
-    let passwordOk = invitationGranted || isOwner;
+    let passwordMatches = false;
     if (password && table.password) {
       if (/^\$2[aby]\$/.test(String(table.password))) {
         const bcrypt = require("bcryptjs");
-        passwordOk = await bcrypt.compare(String(password), String(table.password));
+        passwordMatches = await bcrypt.compare(String(password), String(table.password));
       } else {
-        passwordOk = password === table.password;
+        passwordMatches = password === table.password;
       }
     }
-    if (!passwordOk) {
+    // An invitation is an independent reason to be admitted, not a weaker
+    // password. This used to assign the compare result straight over the grant,
+    // so an invited guest whose client sent any password at all was rejected.
+    const admitted = require("./tableAdmissionService").canJoinPrivateTable({
+      table,
+      userId: req.user._id,
+      passwordMatches,
+    });
+    if (!admitted) {
       return next(new ApiError("Invalid table password", 400));
     }
   }
