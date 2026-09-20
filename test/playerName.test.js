@@ -97,6 +97,27 @@ test("three renames cost 1M, then 5M, then 10M — and there is no fourth", asyn
   assert.equal(await countOf(user._id), 3);
 });
 
+test("an account created before this feature can still rename", async () => {
+  // The state every existing player is in on the day this deploys: mongoose
+  // defaults only apply to documents mongoose creates, so `nameChangeCount` is
+  // absent — and `$lt` does not match a missing field. Without the `$exists`
+  // arm in the claim, the whole player base is told it has used up all three
+  // changes and nobody can rename at all.
+  const user = await makeUser(100_000_000);
+  await User.collection.updateOne(
+    { _id: user._id },
+    { $unset: { nameChangeCount: "" } }
+  );
+  const raw = await User.collection.findOne({ _id: user._id });
+  assert.equal("nameChangeCount" in raw, false, "the field really is absent");
+
+  const res = await svc.changeName({ userId: user._id, name: "اسم بعد الترقية" });
+
+  assert.equal(res.charged, 1_000_000, "charged the first slot, not a later one");
+  assert.equal(await nameOf(user._id), "اسم بعد الترقية");
+  assert.equal(await countOf(user._id), 1);
+});
+
 test("the quote tracks what is left", async () => {
   const user = await makeUser();
   let q = await svc.getQuote(user._id);

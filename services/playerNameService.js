@@ -165,8 +165,21 @@ async function changeName({ userId, name: rawName, requestKey }) {
       // Claim any remaining slot atomically. `new: false` is the point: the
       // pre-image says which slot we just took, so the price cannot be derived
       // from a read that another request has already invalidated.
+      //
+      // The `$exists: false` arm is not belt-and-braces — `$lt` does NOT match
+      // a document that lacks the field, and every account created before this
+      // feature shipped lacks it (a mongoose default only applies to documents
+      // mongoose itself creates). Without this arm the claim matches nobody and
+      // the entire existing player base is told it has used up all three
+      // changes.
       const pre = await User.findOneAndUpdate(
-        { _id: userId, nameChangeCount: { $lt: MAX_NAME_CHANGES } },
+        {
+          _id: userId,
+          $or: [
+            { nameChangeCount: { $lt: MAX_NAME_CHANGES } },
+            { nameChangeCount: { $exists: false } },
+          ],
+        },
         { $inc: { nameChangeCount: 1 } },
         { new: false, session }
       );
@@ -220,6 +233,17 @@ async function changeName({ userId, name: rawName, requestKey }) {
   } catch (err) {
     if (err?.message === "INSUFFICIENT_BALANCE") {
       throw new ApiError("رصيدك لا يكفي لتغيير الاسم", 402);
+    }
+    if (err?.message === "MONGO_TRANSACTIONS_REQUIRED") {
+      // A bare Error carries no status, so this reached the client as an
+      // opaque 500 with nothing to act on. It means the database is not a
+      // replica set, which is an operator problem, not a player one — say so
+      // in the log and give the player something that isn't a blank failure.
+      logger.error("name_change_requires_transactions", {
+        userId: String(userId),
+        hint: "mongod must run as a replica set for money operations",
+      });
+      throw new ApiError("الخدمة غير متاحة حالياً، حاول لاحقاً", 503);
     }
     throw err;
   }

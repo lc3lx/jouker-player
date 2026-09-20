@@ -285,7 +285,10 @@ test("a purchase refuses to run without a real transaction", async () => {
   try {
     await assert.rejects(
       () => specialPlayerIdService.purchaseSpecialId({ userId: user._id, number: 785 }),
-      /MONGO_TRANSACTIONS_REQUIRED/
+      // 503, not a bare Error: a database that is not a replica set is an
+      // operator problem, and reaching the player as an opaque 500 tells
+      // nobody anything.
+      (err) => err.statusCode === 503
     );
   } finally {
     ledger.withMongoTransaction = real;

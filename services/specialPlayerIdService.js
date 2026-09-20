@@ -227,6 +227,15 @@ async function purchaseSpecialId({ userId, number, requestKey }) {
     if (playerIdService.isDuplicateKey(err)) {
       throw new ApiError("هذا الرقم لم يعد متاحًا", 409);
     }
+    if (err?.message === "MONGO_TRANSACTIONS_REQUIRED") {
+      // Same as the rename path: an operator problem surfacing as an opaque
+      // 500. The database is not a replica set.
+      logger.error("special_id_purchase_requires_transactions", {
+        userId: String(userId),
+        hint: "mongod must run as a replica set for money operations",
+      });
+      throw new ApiError("الخدمة غير متاحة حالياً، حاول لاحقاً", 503);
+    }
     throw err;
   }
 
