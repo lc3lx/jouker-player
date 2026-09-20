@@ -30,8 +30,14 @@ function limits() {
   };
 }
 
+/**
+ * What an ordinary player gets for showing up today.
+ *
+ * A VIP gets their level's `dailyChips` instead when that is higher — see
+ * `statsService.resolveDailyBonusGrant`.
+ */
 function dailyBonusBaseChips() {
-  const base = parseInt(process.env.DAILY_BONUS_CHIPS || "2500", 10);
+  const base = parseInt(process.env.DAILY_BONUS_CHIPS || "50000", 10);
   if (!isProduction()) {
     return Math.floor(base * parseFloat(process.env.BETA_BONUS_MULTIPLIER || "1.5"));
   }

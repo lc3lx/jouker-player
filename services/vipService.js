@@ -914,14 +914,20 @@ exports.getRewards = asyncHandler(async (req, res) => {
   });
 });
 
-exports.postClaimDaily = asyncHandler(async (req, res) => {
-  const result = await claimDailyVipChips(req.user._id);
-  const Wallet = require("../models/walletModel");
-  const wallet = await Wallet.findOne({ user: req.user._id }).lean();
-  res.status(200).json({
-    status: "success",
-    data: { ...result, balance: wallet?.balance ?? 0 },
-  });
+/**
+ * The VIP daily claim.
+ *
+ * Delegates to the one daily grant in statsService rather than paying from
+ * `DailyVIPClaim`. The two used to be separate endpoints with separate
+ * day-guards — `User.lastDailyBonusAt` here, a `DailyVIPClaim` row there — so a
+ * VIP who called both got paid twice on the same day. Neither was ever wired
+ * into the app, which is the only reason that never happened.
+ */
+exports.postClaimDaily = asyncHandler(async (req, res, next) => {
+  const level = await getVipLevel(req.user._id);
+  if (!level) throw new ApiError("VIP membership required", 403);
+  const { claimDailyBonus } = require("./statsService");
+  return claimDailyBonus(req, res, next);
 });
 
 exports.postClaimCashback = asyncHandler(async (req, res) => {

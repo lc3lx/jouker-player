@@ -66,6 +66,59 @@ module.exports = [
     price: 5000,
     rarity: "epic",
     isActive: true,
+    games: ["poker", "trix", "tarneeb41"],
+  },
+  // Every felt below is drawn from a gradient key on the client — see
+  // frontapp/lib/features/game/cosmetics/poker_table_theme.dart. There is no
+  // image to ship, and a key with no matching case there renders as the default
+  // green, which looks to the buyer like the item does nothing. The Flutter
+  // test `table_and_card_cosmetics_test.dart` holds these two lists together.
+  {
+    type: "table_theme",
+    name: "طاولة الزمرّد",
+    assetKey: "emerald_deep",
+    price: 3000,
+    rarity: "rare",
+    isActive: true,
+    games: ["poker", "trix", "tarneeb41"],
+  },
+  {
+    type: "table_theme",
+    name: "طاولة السبج الذهبي",
+    assetKey: "obsidian_gold",
+    price: 7500,
+    rarity: "legendary",
+    isActive: true,
+    featured: true,
+    featuredOrder: 1,
+    games: ["poker", "trix", "tarneeb41"],
+  },
+  {
+    type: "table_theme",
+    name: "طاولة رمال الصحراء",
+    assetKey: "desert_sand",
+    price: 4000,
+    rarity: "epic",
+    isActive: true,
+    games: ["poker", "trix", "tarneeb41"],
+  },
+  {
+    type: "table_theme",
+    name: "طاولة البحيرة الفيروزية",
+    assetKey: "azure_lagoon",
+    price: 4000,
+    rarity: "epic",
+    isActive: true,
+    games: ["poker", "trix", "tarneeb41"],
+  },
+  {
+    type: "table_theme",
+    name: "طاولة البنفسج الإمبراطوري",
+    assetKey: "violet_imperial",
+    price: 6000,
+    rarity: "epic",
+    isActive: true,
+    games: ["poker", "trix", "tarneeb41"],
   },
   // Legacy frames kept inactive so country skins become the primary store skins.
   {
@@ -102,10 +155,61 @@ module.exports = [
     isActive: true,
     featured: true,
     featuredOrder: 3,
+    games: ["poker", "tarneeb41"],
     promoMeta: {
       discountPercent: 15,
       expiresAt: new Date(Date.now() + 14 * 24 * 60 * 60 * 1000).toISOString(),
     },
+  },
+  // `games` deliberately excludes trix: it renders no face-down cards at all,
+  // so a card back has no surface to appear on there. Selling one as a trix
+  // cosmetic would be selling nothing.
+  {
+    type: "card_skin",
+    name: "ظهر الأرابيسك الذهبي",
+    assetKey: "arabesque_gold",
+    price: 4500,
+    rarity: "legendary",
+    isActive: true,
+    featured: true,
+    featuredOrder: 4,
+    games: ["poker", "tarneeb41"],
+  },
+  {
+    type: "card_skin",
+    name: "ظهر الشبك الماسي",
+    assetKey: "diamond_lattice",
+    price: 2000,
+    rarity: "rare",
+    isActive: true,
+    games: ["poker", "tarneeb41"],
+  },
+  {
+    type: "card_skin",
+    name: "ظهر النقش الملكي",
+    assetKey: "royal_guilloche",
+    price: 3500,
+    rarity: "epic",
+    isActive: true,
+    games: ["poker", "tarneeb41"],
+  },
+  {
+    type: "card_skin",
+    name: "ظهر النسيج الزمرّدي",
+    assetKey: "emerald_weave",
+    price: 2500,
+    rarity: "rare",
+    isActive: true,
+    games: ["poker", "tarneeb41"],
+  },
+  {
+    type: "card_skin",
+    name: "ظهر السبج الأسود",
+    assetKey: "obsidian_minimal",
+    price: 3000,
+    rarity: "epic",
+    isActive: true,
+    games: ["poker", "tarneeb41"],
   },
 ];
 

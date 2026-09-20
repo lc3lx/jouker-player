@@ -18,7 +18,7 @@ const { PartnerSelection } = require('../../engine/partnerSelection');
 const StateMachine = require('../../engine/StateMachine');
 const { STATE: TRIX_STATE, TRANSITIONS: TRIX_TRANSITIONS } = require('../../engine/states/trixStates');
 const {
-  resolveProfileOnlyCosmeticsForSeats,
+  resolveCardGameCosmeticsForSeats,
   publicCosmeticsPayload,
   emptyCosmetics,
 } = require('../../services/playerPublicCosmeticsService');
@@ -638,11 +638,16 @@ class TrixGame extends BaseGameEngine {
    * bot-replace, syncLobbyFromTable) before building outgoing state.
    */
   async applyCosmeticsToPlayers() {
-    const seatsForResolve = this.players.map((p) => ({
+    const seatsForResolve = this.players.map((p, index) => ({
       userId: p.userId,
       isBot: !!p.isBot,
+      seatIndex: Number.isFinite(p.seatIndex) ? p.seatIndex : index,
     }));
-    const map = await resolveProfileOnlyCosmeticsForSeats(seatsForResolve);
+    // Also resolves the table-wide felt now. This game used to get profile
+    // skins only, so a table theme a player owned could not reach it.
+    const { byUserId: map, activeTableTheme } =
+      await resolveCardGameCosmeticsForSeats(seatsForResolve);
+    this.activeTableTheme = activeTableTheme || null;
     for (const p of this.players) {
       if (p.isBot || !p.userId) {
         p.cosmetics = emptyCosmetics();
@@ -1136,6 +1141,10 @@ class TrixGame extends BaseGameEngine {
       // تركس شركة re-seats everyone when the pairs settle — so every snapshot
       // has to say which chair the receiver is sitting in *now*.
       viewPlayerIndex: forPlayerIndex,
+      // The felt everyone at this table sees — resolved in
+      // applyCosmeticsToPlayers from seated VIP first, then the lowest-seated
+      // player's equipped theme. Same key space as poker.
+      activeTableTheme: this.activeTableTheme || null,
       // "solo" (يهودية) or "partnership" (شركة) — the client pairs facing
       // seats and shows one combined total per team when partnership.
       gameMode: this.gameMode,

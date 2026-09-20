@@ -19,7 +19,12 @@ const RENDER_TYPES = ["png", "webp", "gif", "lottie", "rive"];
 const STATUSES = ["draft", "published", "disabled", "archived"];
 
 function defaultGamesForType(type) {
-  if (type === "table_theme" || type === "card_skin") return ["poker"];
+  // Felts are shared by all three card games.
+  if (type === "table_theme") return ["poker", "trix", "tarneeb41"];
+  // Card backs are not: trix never renders a face-down card, so a back has no
+  // surface to appear on there. Listing it would sell a cosmetic that cannot
+  // show up.
+  if (type === "card_skin") return ["poker", "tarneeb41"];
   return ["all"];
 }
 

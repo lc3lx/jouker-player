@@ -8,6 +8,7 @@ const { dailyBonusBaseChips, limits, appMode } = require("../utils/appConfig");
 const { assertCanClaimBonus, recordBonusClaim } = require("./fraudService");
 const { trackEventServerFireAndForget } = require("./analyticsService");
 const { withMongoTransaction, ledgerDeposit } = require("./walletLedgerService");
+const logger = require("../utils/logger");
 
 function startOfUtcDay(d) {
   return new Date(Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), d.getUTCDate()));
@@ -136,6 +137,76 @@ exports.getBalanceLeaderboard = asyncHandler(async (req, res) => {
   });
 });
 
+/**
+ * What this player gets for showing up today.
+ *
+ * An ordinary player gets the base. A VIP gets their level's `dailyChips` —
+ * but only when that is actually more, because those amounts are configured by
+ * hand in the admin panel and a level left at 0, or set below the base, would
+ * otherwise make paying for VIP a downgrade.
+ *
+ * Exported so the amount can be tested without going through HTTP, a wallet
+ * and a fraud check.
+ */
+async function resolveDailyBonusGrant(userId, base) {
+  let level = null;
+  let vipDailyChips = 0;
+  try {
+    // Required lazily: vipService pulls in the wallet ledger, and statsService
+    // is itself reached from there during settlement.
+    const { getVipLevel } = require("./vipService");
+    const { vipLevelConfig } = require("../config/vipConfig");
+    level = await getVipLevel(userId);
+    if (level) {
+      const cfg = vipLevelConfig(level);
+      vipDailyChips = Math.max(0, Math.floor(cfg?.dailyChips || 0));
+    }
+  } catch (e) {
+    // A VIP lookup failure must not cost an ordinary player their bonus.
+    logger.warn("daily_bonus_vip_lookup_failed", {
+      userId: String(userId),
+      reason: e?.message || "unknown",
+    });
+  }
+
+  const amount = Math.max(base, vipDailyChips);
+  return {
+    amount,
+    base,
+    isVip: !!level,
+    vipLevel: level,
+    vipDailyChips,
+    // True only when VIP actually changed the number, so the client can say
+    // so honestly instead of claiming a perk that did nothing.
+    vipApplied: !!level && vipDailyChips > base,
+  };
+}
+
+exports.resolveDailyBonusGrant = resolveDailyBonusGrant;
+
+/** Whether today's bonus is still there, without claiming it. */
+exports.getDailyBonusStatus = asyncHandler(async (req, res) => {
+  const base = dailyBonusBaseChips();
+  const now = new Date();
+  const user = await User.findById(req.user._id).select(
+    "lastDailyBonusAt dailyBonusStreak trustRestricted"
+  );
+  const claimedToday =
+    !!user?.lastDailyBonusAt &&
+    startOfUtcDay(user.lastDailyBonusAt).getTime() === startOfUtcDay(now).getTime();
+
+  const grant = await resolveDailyBonusGrant(req.user._id, base);
+  res.status(200).json({
+    status: "success",
+    data: {
+      available: base > 0 && !claimedToday && !user?.trustRestricted,
+      claimedToday,
+      dailyBonusStreak: user?.dailyBonusStreak || 0,
+      ...grant,
+    },
+  });
+});
+
 exports.claimDailyBonus = asyncHandler(async (req, res, next) => {
   const base = dailyBonusBaseChips();
   if (base <= 0) {
@@ -166,13 +237,19 @@ exports.claimDailyBonus = asyncHandler(async (req, res, next) => {
     return next(new ApiError("Account restricted — contact support", 403));
   }
 
-  if (L.maxBonusClaimsPerDay <= 1) {
-    if (
-      user.lastDailyBonusAt &&
-      startOfUtcDay(user.lastDailyBonusAt).getTime() === startOfUtcDay(now).getTime()
-    ) {
-      return next(new ApiError("Daily bonus already claimed", 400));
-    }
+  // Once per UTC day, unconditionally.
+  //
+  // This used to be gated on `maxBonusClaimsPerDay <= 1`, which is 1 only in
+  // production mode and 3 everywhere else — and this deployment does not run in
+  // production mode (the same setting is why the wallet falls back to
+  // non-transactional writes). So the daily bonus was claimable three times a
+  // day. That is a fraud ceiling, not the definition of "daily"; the two are
+  // separate limits and the day guard belongs here regardless.
+  if (
+    user.lastDailyBonusAt &&
+    startOfUtcDay(user.lastDailyBonusAt).getTime() === startOfUtcDay(now).getTime()
+  ) {
+    return next(new ApiError("Daily bonus already claimed", 400));
   }
 
   const todayStr = utcDayStr(now);
@@ -186,8 +263,10 @@ exports.claimDailyBonus = asyncHandler(async (req, res, next) => {
     nextStreak = 1;
   }
 
+  // VIP first, then the win-streak multiplier on top of whichever amount won.
+  const tier = await resolveDailyBonusGrant(userId, base);
   const winMult = 1 + Math.min(0.02 * Math.min(user.pokerWinStreak || 0, 50), 0.2);
-  const grant = Math.floor(base * winMult);
+  const grant = Math.floor(tier.amount * winMult);
 
   await withMongoTransaction(async (session) => {
     await ledgerDeposit({
@@ -199,6 +278,8 @@ exports.claimDailyBonus = asyncHandler(async (req, res, next) => {
         dailyBonusStreak: nextStreak,
         winStreakMultiplier: winMult,
         baseChips: base,
+        tierAmount: tier.amount,
+        vipLevel: tier.vipLevel,
       },
       ledgerType: "confirmed_deposit",
     });
@@ -227,6 +308,10 @@ exports.claimDailyBonus = asyncHandler(async (req, res, next) => {
     data: {
       granted: grant,
       baseChips: base,
+      tierAmount: tier.amount,
+      isVip: tier.isVip,
+      vipLevel: tier.vipLevel,
+      vipApplied: tier.vipApplied,
       dailyBonusStreak: nextStreak,
       winStreakMultiplier: winMult,
       balance: wallet?.balance ?? 0,

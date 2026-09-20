@@ -272,31 +272,18 @@ test("two buyers race for one number: one wins, the loser is not charged", async
   assert.notEqual(await playerIdOf(loser._id), 780);
 });
 
-test("a purchase refuses to run without a real transaction", async () => {
-  // This is the guarantee the rest of the money safety rests on. Without a
-  // session, withMongoTransaction runs the callback anyway and a failure
-  // halfway through would leave a player debited and un-numbered.
+test("this suite really is running inside transactions", async () => {
+  // The mirror of the guard in playerIdStandalone.test.js. If this ever starts
+  // yielding a null session, every race and rollback test in this file is
+  // quietly exercising the compensation path instead of a real transaction and
+  // proving something other than what it claims.
   const ledger = require("../services/walletLedgerService");
-  const real = ledger.withMongoTransaction;
-  ledger.withMongoTransaction = (work) => work(null);
-
-  await listNumber(785, 1_000);
-  const user = await makeUser({ balance: 50_000 });
-  try {
-    await assert.rejects(
-      () => specialPlayerIdService.purchaseSpecialId({ userId: user._id, number: 785 }),
-      // 503, not a bare Error: a database that is not a replica set is an
-      // operator problem, and reaching the player as an opaque 500 tells
-      // nobody anything.
-      (err) => err.statusCode === 503
-    );
-  } finally {
-    ledger.withMongoTransaction = real;
-  }
-
-  assert.equal(await balanceOf(user._id), 50_000, "nothing was charged");
-  const listing = await SpecialPlayerId.findOne({ number: 785 }).lean();
-  assert.equal(listing.status, "listed", "nothing was claimed");
+  let seen = "not-run";
+  await ledger.withMongoTransaction(async (session) => {
+    seen = session;
+  });
+  assert.notEqual(seen, "not-run", "the callback ran");
+  assert.notEqual(seen, null, "a replica set must yield a real session");
 });
 
 test("the same buyer submitting twice is charged once", async () => {

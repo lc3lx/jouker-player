@@ -49,29 +49,66 @@ function resolveProfileOnlyCosmetics({ equipped }) {
 }
 
 /**
- * Pick the highest VIP among seated humans (chips > 0) for shared table felt.
- * @param {Array<{ vipLevel?: string|null }>} seatedHumans
+ * The felt everyone at this table sees.
+ *
+ * One table, one felt, so somebody has to win. The order is:
+ *
+ *   1. The highest seated VIP. That is a paid perk and stays on top.
+ *   2. Otherwise the lowest-seated player who has a table theme equipped.
+ *
+ * Rule 2 is new. This function used to receive `{ vipLevel }` and nothing else,
+ * so a theme a player had bought and equipped could not reach the felt even in
+ * principle — the store sold table themes that changed nothing. Picking by seat
+ * index rather than, say, whoever joined last keeps the answer stable: the same
+ * players in the same seats always produce the same felt, instead of it
+ * flickering as unrelated state moves around.
+ *
+ * @param {Array<{ vipLevel?: string|null, equippedTableTheme?: string|null,
+ *                 seatIndex?: number }>} seatedHumans
  */
 function resolveActiveTableCosmetics(seatedHumans) {
   let bestLevel = null;
   let bestRank = 0;
+  let equippedTheme = null;
+  let equippedSeat = Infinity;
+
   for (const row of seatedHumans || []) {
     const lvl = row?.vipLevel || null;
-    if (!lvl) continue;
-    const rank = vipLevelRank(lvl);
-    if (rank > bestRank) {
-      bestRank = rank;
-      bestLevel = lvl;
+    if (lvl) {
+      const rank = vipLevelRank(lvl);
+      if (rank > bestRank) {
+        bestRank = rank;
+        bestLevel = lvl;
+      }
+    }
+
+    const theme = row?.equippedTableTheme || null;
+    if (theme) {
+      const seat = Number.isFinite(row?.seatIndex) ? row.seatIndex : Infinity;
+      if (seat < equippedSeat) {
+        equippedSeat = seat;
+        equippedTheme = theme;
+      }
     }
   }
-  if (!bestLevel) {
-    return { activeTableTheme: null, activeTableAsset: null };
+
+  if (bestLevel) {
+    const vip = vipCosmeticsForLevel(bestLevel);
+    if (vip?.tableTheme) {
+      return {
+        activeTableTheme: vip.tableTheme,
+        activeTableAsset: vip.tableAsset || null,
+      };
+    }
   }
-  const vip = vipCosmeticsForLevel(bestLevel);
-  return {
-    activeTableTheme: vip?.tableTheme || null,
-    activeTableAsset: vip?.tableAsset || null,
-  };
+
+  // A bought theme is a gradient key, not a sprite, so there is no asset path
+  // to go with it — the client renders it from the key alone.
+  if (equippedTheme) {
+    return { activeTableTheme: equippedTheme, activeTableAsset: null };
+  }
+
+  return { activeTableTheme: null, activeTableAsset: null };
 }
 
 function humanIdsFromSeats(seats) {
@@ -105,12 +142,18 @@ async function resolvePublicCosmeticsForPokerSeats(seats) {
   ]);
 
   const seatedForTable = [];
-  for (const s of seats || []) {
+  for (const [index, s] of (seats || []).entries()) {
     if (!s || s.isBot || !s.userId) continue;
     if (toSafeChips(s.chips) <= 0) continue;
     const uid = String(s.userId);
-    const vipLevel = vipMap.get(uid) || null;
-    seatedForTable.push({ vipLevel });
+    // `equippedMap` was already being fetched and its tableTheme thrown away
+    // here, which is the whole reason bought table themes did nothing.
+    // `s.seatIndex` when the caller supplies one, else position in the array.
+    seatedForTable.push({
+      vipLevel: vipMap.get(uid) || null,
+      equippedTableTheme: equippedMap.get(uid)?.tableTheme || null,
+      seatIndex: Number.isFinite(s.seatIndex) ? s.seatIndex : index,
+    });
   }
 
   for (const uid of humanIds) {
@@ -149,6 +192,51 @@ async function resolveProfileOnlyCosmeticsForSeats(seats) {
   return out;
 }
 
+/**
+ * Trix / Tarneeb: profile skin per seat, plus the table-wide felt.
+ *
+ * Same felt rule as poker — see `resolveActiveTableCosmetics`. Card backs are
+ * deliberately absent: Trix renders no face-down cards at all, and keeping the
+ * two games on one resolver means the felt cannot drift between them.
+ *
+ * @returns {Promise<{ byUserId: Map<string, object>, activeTableTheme: string|null }>}
+ */
+async function resolveCardGameCosmeticsForSeats(seats) {
+  const humanIds = humanIdsFromSeats(seats);
+  const byUserId = new Map();
+  if (humanIds.length === 0) {
+    return { byUserId, activeTableTheme: null };
+  }
+
+  const [equippedMap, vipMap] = await Promise.all([
+    cosmeticsService.resolveEquippedPayloadForUsers(humanIds),
+    vipService.getVipLevelsForUsers(humanIds),
+  ]);
+
+  const seatedForTable = [];
+  for (const [index, s] of (seats || []).entries()) {
+    if (!s || s.isBot || !s.userId) continue;
+    const uid = String(s.userId);
+    seatedForTable.push({
+      vipLevel: vipMap.get(uid) || null,
+      equippedTableTheme: equippedMap.get(uid)?.tableTheme || null,
+      seatIndex: Number.isFinite(s.seatIndex) ? s.seatIndex : index,
+    });
+  }
+
+  for (const uid of humanIds) {
+    byUserId.set(uid, {
+      vipLevel: vipMap.get(uid) || null,
+      cosmetics: resolveProfileOnlyCosmetics({
+        equipped: equippedMap.get(uid) || {},
+      }),
+    });
+  }
+
+  const { activeTableTheme } = resolveActiveTableCosmetics(seatedForTable);
+  return { byUserId, activeTableTheme };
+}
+
 /** Backward-compatible alias for poker resolvers. */
 async function resolvePublicCosmeticsForSeats(seats) {
   const { byUserId } = await resolvePublicCosmeticsForPokerSeats(seats);
@@ -183,6 +271,7 @@ module.exports = {
   resolvePublicCosmeticsForSeats,
   resolvePublicCosmeticsForPokerSeats,
   resolveProfileOnlyCosmeticsForSeats,
+  resolveCardGameCosmeticsForSeats,
   publicCosmeticsPayload,
   publicSeatCosmeticsPayload,
   vipCosmeticsForLevel,

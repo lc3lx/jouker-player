@@ -7,6 +7,7 @@ const {
   getWinsLeaderboard,
   getWeeklyPokerWinsLeaderboard,
   claimDailyBonus,
+  getDailyBonusStatus,
   getPokerRetention,
 } = require("../services/statsService");
 
@@ -18,6 +19,7 @@ router.get("/leaderboard/balance", authService.protect, getBalanceLeaderboard);
 router.get("/leaderboard/wins", authService.protect, getWinsLeaderboard);
 router.get("/leaderboard/poker-weekly", authService.protect, getWeeklyPokerWinsLeaderboard);
 router.get("/poker-retention", authService.protect, getPokerRetention);
+router.get("/daily-bonus", authService.protect, getDailyBonusStatus);
 router.post("/daily-bonus", authService.protect, claimDailyBonus);
 
 module.exports = router;
