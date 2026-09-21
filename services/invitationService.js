@@ -121,11 +121,19 @@ async function sendInvitation(fromId, {
     expiresAt,
   });
 
-  // A private-table invitation is an admission grant. Creating the invitation
-  // first prevents a failed invite write from granting access by itself.
+  // An invitation is an admission grant, whatever the table's privacy.
+  //
+  // It used to be written only when `isPrivate`, because the grant's only job
+  // was to get past the privacy gate. It now also decides who may stand at a
+  // *full* table waiting for a seat — so an invitation to a full public table
+  // would have been refused at the door, which is the main thing invitations
+  // are for. On a public table the grant is otherwise inert.
+  //
+  // Creating the invitation first prevents a failed invite write from granting
+  // access by itself.
   if (tableId) {
     await Table.updateOne(
-      { _id: tableId, isPrivate: true },
+      { _id: tableId },
       { $addToSet: { allowedUsers: toUserId } }
     );
   }
@@ -174,12 +182,12 @@ async function respondInvitation(userId, invitationId, accept) {
   if (accept && invite.table) {
     const table = await Table.findById(invite.table).select("isPrivate");
     if (!table) throw new ApiError("Invited table no longer exists", 404);
-    if (table.isPrivate) {
-      await Table.updateOne(
-        { _id: invite.table },
-        { $addToSet: { allowedUsers: userId } }
-      );
-    }
+    // Same rule as on send: accepting grants admission whatever the privacy,
+    // because the grant is now also what lets a guest wait at a full table.
+    await Table.updateOne(
+      { _id: invite.table },
+      { $addToSet: { allowedUsers: userId } }
+    );
   }
 
   invite.status = accept ? "accepted" : "declined";

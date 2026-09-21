@@ -11,15 +11,24 @@ const GAME_LABEL_AR = {
 /**
  * House catalog. Length is a round count (4 / 8 / 12 games), not a clock.
  * `durationMinutes` is kept on the document as the round target (legacy field).
- * House events fire on a 2-hour grid. Prize numbers shown in the lobby are
- * the full-field pool (entryFee × maxPlayers); the live prizePool is the
- * escrow actually collected.
+ * Prize numbers shown in the lobby are the full-field pool
+ * (entryFee × maxPlayers); the live prizePool is the escrow actually collected.
+ *
+ * `id` is the wire value and is written onto every tournament document and into
+ * the admin's per-tier overrides, so it never changes. The names are display
+ * only — they were placeholders ("صغيرة", "أكبر بشوي", "أكبر بكثير") that read
+ * as sizes rather than as events, with no sense of a ladder being climbed.
+ *
+ * `rank` exists so the ordering has one definition. It used to be re-declared
+ * as a literal array in the lobby screen, which is a list that can silently
+ * disagree with this one.
  */
 const TIERS = [
   {
     id: "mini",
-    nameAr: "صغيرة",
-    nameEn: "Mini",
+    rank: 1,
+    nameAr: "كأس المبتدئين",
+    nameEn: "Rookie Cup",
     durationMinutes: 4,
     maxPlayers: 8,
     minPlayers: 4,
@@ -29,8 +38,9 @@ const TIERS = [
   },
   {
     id: "small",
-    nameAr: "أكبر بشوي",
-    nameEn: "A bit bigger",
+    rank: 2,
+    nameAr: "كأس الصاعدين",
+    nameEn: "Challenger Cup",
     durationMinutes: 4,
     maxPlayers: 12,
     minPlayers: 4,
@@ -40,8 +50,9 @@ const TIERS = [
   },
   {
     id: "medium",
-    nameAr: "أكبر",
-    nameEn: "Bigger",
+    rank: 3,
+    nameAr: "كأس المحترفين",
+    nameEn: "Pro Cup",
     durationMinutes: 8,
     maxPlayers: 16,
     minPlayers: 8,
@@ -51,8 +62,9 @@ const TIERS = [
   },
   {
     id: "large",
-    nameAr: "أكبر بكثير",
-    nameEn: "Much bigger",
+    rank: 4,
+    nameAr: "كأس النخبة",
+    nameEn: "Elite Cup",
     durationMinutes: 8,
     maxPlayers: 24,
     minPlayers: 8,
@@ -62,8 +74,9 @@ const TIERS = [
   },
   {
     id: "pro",
-    nameAr: "الأكبر",
-    nameEn: "Biggest",
+    rank: 5,
+    nameAr: "كأس الأساطير",
+    nameEn: "Legends Cup",
     durationMinutes: 12,
     maxPlayers: 32,
     minPlayers: 8,
@@ -73,8 +86,53 @@ const TIERS = [
   },
 ];
 
+/**
+ * The names these tiers used to carry.
+ *
+ * An admin who renamed a tier from the CMS gets an override row that wins over
+ * the default forever, so a stale override would keep a retired placeholder on
+ * screen. `scripts/retireLegacyArenaTierNames.js` clears exactly these.
+ */
+const LEGACY_TIER_NAMES_AR = ["صغيرة", "أكبر بشوي", "أكبر", "أكبر بكثير", "الأكبر"];
+
 const CREATE_FEE = 5_000_000;
-const SLOT_MS = 2 * 60 * 60 * 1000;
+
+/**
+ * The house schedule.
+ *
+ * Every tier of every game used to start on the same 2-hour boundary, so the
+ * lobby was empty for two hours and then held fifteen simultaneous events —
+ * no rhythm, and a player who missed the moment waited two hours for anything
+ * at all.
+ *
+ * Now one tier starts every half hour, climbing the ladder. The cycle is three
+ * hours because it is the shortest span that both fits the five rungs at
+ * half-hour spacing *and* divides the day evenly: 24 / 3 = 8 identical cycles,
+ * so a given cup always starts at the same clock times, every day. A 2.5-hour
+ * cycle would fit the rungs exactly but 1440 / 150 = 9.6, so the times would
+ * drift daily and no player could ever learn them.
+ *
+ * That leaves one spare rung, which goes to the entry tier — the busiest, the
+ * cheapest to enter, and the one a new player most needs to find running. So
+ * something starts every half hour with no dead air anywhere in the cycle.
+ */
+const CYCLE_MS = 3 * 60 * 60 * 1000;
+const RUNG_MS = 30 * 60 * 1000;
+
+const LADDER = [
+  { tierId: "mini", offsetMs: 0 * RUNG_MS },
+  { tierId: "small", offsetMs: 1 * RUNG_MS },
+  { tierId: "medium", offsetMs: 2 * RUNG_MS },
+  { tierId: "large", offsetMs: 3 * RUNG_MS },
+  { tierId: "pro", offsetMs: 4 * RUNG_MS },
+  { tierId: "mini", offsetMs: 5 * RUNG_MS },
+];
+
+/** Registration opens this many cycles ahead. */
+const SCHEDULE_CYCLES = 2;
+
+/** Legacy alias: the client reads `slotMs` from the serialized catalog. */
+const SLOT_MS = CYCLE_MS;
 const DURATIONS = [4, 8, 12];
 const ROUND_SAFETY_MS = 6 * 60 * 60 * 1000;
 
@@ -125,8 +183,38 @@ async function loadFromDb() {
   return resolvedTiers();
 }
 
+/** The top of the cycle containing `ms`, on the UTC epoch grid. */
+function cycleStart(ms = Date.now()) {
+  return Math.floor(ms / CYCLE_MS) * CYCLE_MS;
+}
+
+/**
+ * Every start from now to `cycles` cycles ahead, in time order.
+ *
+ * Returns `[{ tierId, startMs }]` — a tier can appear twice per cycle (the
+ * entry tier does), which is why this is a list of starts rather than a map
+ * keyed by tier.
+ */
+function upcomingStarts(fromMs = Date.now(), cycles = SCHEDULE_CYCLES) {
+  const out = [];
+  const base = cycleStart(fromMs);
+  const span = Math.max(1, Math.trunc(cycles));
+  // Start one cycle back so a rung later in the current cycle is not missed.
+  for (let c = 0; c <= span; c += 1) {
+    const top = base + c * CYCLE_MS;
+    for (const rung of LADDER) {
+      const startMs = top + rung.offsetMs;
+      if (startMs > fromMs) out.push({ tierId: rung.tierId, startMs });
+    }
+  }
+  out.sort((a, b) => a.startMs - b.startMs);
+  return out.filter((s) => s.startMs <= base + span * CYCLE_MS + CYCLE_MS);
+}
+
+/** The very next start, whatever tier it belongs to. */
 function nextSlotStart(fromMs = Date.now()) {
-  return Math.ceil((fromMs + 1) / SLOT_MS) * SLOT_MS;
+  const next = upcomingStarts(fromMs, 1)[0];
+  return next ? next.startMs : cycleStart(fromMs) + CYCLE_MS;
 }
 
 function slotKey(game, tierId, slotStartMs) {
@@ -176,11 +264,16 @@ function pokerBlindsForHand(startingChips, gamesCompleted = 0) {
   };
 }
 
+/**
+ * The title on the card — the cup first, then the game.
+ *
+ * It used to read "بوكر · أكبر · 8 جولات": three data fields joined by dots,
+ * with the format repeated from the card body right below it. The cup is what
+ * the player is entering, so the cup leads; the format stays where it already
+ * was, in the card's own rows.
+ */
 function houseName(game, tier) {
-  if (isPokerFreezeout(game)) {
-    return `${GAME_LABEL_AR[game] || game} · ${tier.nameAr} · حتى الفوز`;
-  }
-  return `${GAME_LABEL_AR[game] || game} · ${tier.nameAr} · ${roundsOf(tier)} جولات`;
+  return `${tier.nameAr} · ${GAME_LABEL_AR[game] || game}`;
 }
 
 function defaultPrizeDistribution(playerCount) {
@@ -205,6 +298,11 @@ function serializeCatalog() {
   return {
     createFee: CREATE_FEE,
     slotMs: SLOT_MS,
+    cycleMs: CYCLE_MS,
+    rungMs: RUNG_MS,
+    // The client draws the cycle so a player can see the whole schedule at
+    // once; sending it beats hardcoding the same ladder on both sides.
+    ladder: LADDER.map((r) => ({ tierId: r.tierId, offsetMs: r.offsetMs })),
     durations: DURATIONS,
     rounds: DURATIONS,
     games: GAMES.map((id) => ({ id, nameAr: GAME_LABEL_AR[id] })),
@@ -222,10 +320,17 @@ module.exports = {
   GAMES,
   GAME_LABEL_AR,
   TIERS,
+  LEGACY_TIER_NAMES_AR,
   CREATE_FEE,
   SLOT_MS,
+  CYCLE_MS,
+  RUNG_MS,
+  LADDER,
+  SCHEDULE_CYCLES,
   DURATIONS,
   ROUND_SAFETY_MS,
+  cycleStart,
+  upcomingStarts,
   getTier,
   resolvedTiers,
   applyOverrides,

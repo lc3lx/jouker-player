@@ -2249,6 +2249,8 @@ class PokerTable {
       }
       this.clearReconnectTimer(uid);
       this.seats.splice(idx, 1);
+      // A chair just opened; an invited guest may be standing here waiting.
+      void this.notifySeatOpened();
       if (this.seats.length > 0) {
         this.dealerIndex =
           ((this.dealerIndex % this.seats.length) + this.seats.length) % this.seats.length;
@@ -2328,6 +2330,8 @@ class PokerTable {
         }
       }
       this.seats.splice(idx, 1);
+      // A chair just opened; an invited guest may be standing here waiting.
+      void this.notifySeatOpened();
       if (this.seats.length > 0) {
         this.dealerIndex =
           ((this.dealerIndex % this.seats.length) + this.seats.length) % this.seats.length;
@@ -2626,6 +2630,8 @@ class PokerTable {
         if (gone >= 0) {
           this.seats.splice(gone, 1);
           this.reindexSeatsByPosition();
+          // A chair just opened; an invited guest may be standing here waiting.
+          void this.notifySeatOpened();
         }
         if (this.seatedHumanCount() >= 1) {
           this.addBotsForMissingSeats();
@@ -2901,6 +2907,7 @@ class PokerTable {
       /* pool release is best-effort */
     }
     this.seats.splice(index, 1);
+    void this.notifySeatOpened();
 
     const find = (uid) =>
       uid == null
@@ -5595,6 +5602,40 @@ class PokerTable {
     }
   }
 
+  /**
+   * Tell whoever is standing at the table that a chair opened.
+   *
+   * An invited guest waiting at a full table does see the seat free up in the
+   * delayed feed — but up to thirty seconds later, by which time the chair is
+   * usually gone. This carries only roster information (how many seats are
+   * open), never anything from the hand in progress, so it is safe to send at
+   * once while the delay keeps doing its job for everything else.
+   *
+   * Bots are not counted as occupants: they hand their chair to a human, so a
+   * bot-filled table has room. This is the same count the admission gate uses.
+   */
+  async notifySeatOpened() {
+    if (this.spectatorUserIds.size === 0) return;
+    const humans = this.seats.filter((s) => s && !s.isBot).length;
+    const open = Math.max(0, toSafeInt(this.capacity, 0) - humans);
+    if (open <= 0) return;
+    try {
+      const sockets = await this.nsp.in(`tg:${this.tableId}`).fetchSockets();
+      for (const sock of sockets) {
+        const uid = sock.data?.userId ?? sock.userId;
+        if (!uid) continue;
+        if (this.seats.some((s) => String(s.userId) === String(uid))) continue;
+        sock.emit("table_event", {
+          type: "seat_available",
+          tableId: String(this.tableId),
+          openSeats: open,
+        });
+      }
+    } catch (_) {
+      /* transient fetch failure — the delayed frame still carries the seats */
+    }
+  }
+
   /** Pump the newest READY delayed frame to spectators (deduped by revision). */
   async drainSpectatorFrame() {
     if (this.spectatorUserIds.size === 0) {
@@ -6645,7 +6686,7 @@ function initTableGame(io, options = {}) {
           return;
         }
         const table = await Table.findById(tableId).select(
-          "gameType seats vacatingPlayers settings isPrivate owner allowedUsers"
+          "gameType seats capacity vacatingPlayers settings isPrivate owner allowedUsers"
         );
         if (!table || table.gameType !== "poker") {
           socket.emit("table_event", { type: "table_not_found", tableId: String(tableId) });
@@ -6658,15 +6699,31 @@ function initTableGame(io, options = {}) {
         if (seated || vacating) {
           return handleJoinTable({ tableId });
         }
-        // A seat password is still not a spectator credential. The viewer-grant
-        // model this used to wait for is `owner` + `allowedUsers`, which the
-        // invite flow already writes — and which seat picking depends on, since
-        // both the VIP host and the guests they invite reach their seats
-        // through the spectator view.
-        if (!require("../services/tableAdmissionService").canWatchTable(table, socket.userId)) {
-          socket.emit("table_event", { type: "spectating_denied", tableId: String(tableId) });
+        // Standing at a table without a seat is not watching — it is how a
+        // player picks their chair. So it is allowed on the way to a seat, or
+        // while an invited guest waits for one at a full table, and refused
+        // otherwise. A seat password is still not a credential for either.
+        const admission = require("../services/tableAdmissionService");
+        const openSeats = admission.openSeatCount(table, table.capacity);
+        if (
+          !admission.canStandAtTable({
+            table,
+            userId: socket.userId,
+            hasOpenSeat: openSeats > 0,
+          })
+        ) {
+          socket.emit("table_event", {
+            type: "spectating_denied",
+            tableId: String(tableId),
+            // The lobby offers another table at the same stake when the reason
+            // is only that this one is full.
+            reason: openSeats > 0 ? "not_allowed" : "table_full",
+          });
           return;
         }
+        // An invited guest standing at a full table is waiting for a seat, and
+        // has to be told the moment one opens.
+        socket.isWaitingForSeat = openSeats === 0;
         socket.isSpectator = true;
         socket.join(`tg:${tableId}`);
         // Send an immediate frame ONLY if a ≥delay-old spectator frame is ready

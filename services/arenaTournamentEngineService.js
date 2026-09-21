@@ -18,7 +18,7 @@ const {
   GAMES,
   CREATE_FEE,
   getTier,
-  nextSlotStart,
+  upcomingStarts,
   slotKey,
   houseName,
   defaultPrizeDistribution,
@@ -818,13 +818,18 @@ async function cancelTournament(tournamentId, reason = "Cancelled", opts = {}) {
 
 // ─── house schedule ───────────────────────────────────────────────────────────
 async function ensureSchedule(nowMs = Date.now()) {
-  const slot = nextSlotStart(nowMs);
-  const slots = [slot, slot + catalog.SLOT_MS];
   const tiers = catalog.resolvedTiers();
-  for (const startMs of slots) {
+  const byId = new Map(tiers.map((t) => [t.id, t]));
+  const starts = upcomingStarts(nowMs);
+  const liveKeys = [];
+
+  for (const { tierId, startMs } of starts) {
+    const tier = byId.get(tierId);
+    if (!tier) continue;
     for (const game of GAMES) {
-      for (const tier of tiers) {
-        const key = slotKey(game, tier.id, startMs);
+      const key = slotKey(game, tier.id, startMs);
+      {
+        liveKeys.push(key);
         try {
           await ArenaTournament.updateOne(
             { slotKey: key },
@@ -887,6 +892,45 @@ async function ensureSchedule(nowMs = Date.now()) {
         }
       );
     }
+  }
+
+  await retireStaleSlots(liveKeys, nowMs);
+}
+
+/**
+ * Drop house slots the ladder no longer schedules.
+ *
+ * Changing the schedule strands whatever the old one had already seeded — the
+ * lobby would carry two grids at once until they aged out. These are removed
+ * rather than moved, because moving a start time is only safe when nobody has
+ * made a decision based on it.
+ *
+ * **A tournament with even one participant is never touched.** That is money
+ * already taken and a start time a player is waiting on; it runs to its own
+ * schedule and finishes normally. `adminEdited` is left alone for the same
+ * reason — someone set it deliberately.
+ *
+ * Only slots that are still in the future are retired. A slot whose start time
+ * has arrived is not in the upcoming list either, and deleting it here would
+ * race the very next step of the same tick, which is the one that starts it.
+ */
+async function retireStaleSlots(liveKeys, nowMs = Date.now()) {
+  if (!Array.isArray(liveKeys) || liveKeys.length === 0) return 0;
+  try {
+    const res = await ArenaTournament.deleteMany({
+      origin: "house",
+      lifecycle: "registering",
+      adminEdited: { $ne: true },
+      participants: { $size: 0 },
+      startAt: { $gt: new Date(nowMs) },
+      slotKey: { $ne: null, $nin: liveKeys },
+    });
+    const removed = res?.deletedCount || 0;
+    if (removed > 0) logger.info("arena_schedule_retired_slots", { removed });
+    return removed;
+  } catch (err) {
+    logger.warn("arena_schedule_retire_failed", { reason: err?.message });
+    return 0;
   }
 }
 

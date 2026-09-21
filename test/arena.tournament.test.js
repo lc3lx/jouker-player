@@ -81,14 +81,25 @@ test("catalog exposes 5 tiers and 4/8/12 round lengths", () => {
   assert.equal(data.tiers.length, 5);
   assert.deepEqual(data.durations, [4, 8, 12]);
   assert.deepEqual(data.rounds, [4, 8, 12]);
-  assert.equal(data.tiers[0].nameAr, "صغيرة");
-  assert.equal(data.tiers[1].nameAr, "أكبر بشوي");
-  assert.equal(data.tiers[2].nameAr, "أكبر");
-  assert.equal(data.tiers[3].nameAr, "أكبر بكثير");
-  assert.equal(data.tiers[4].nameAr, "الأكبر");
+  assert.equal(data.tiers[0].nameAr, "كأس المبتدئين");
+  assert.equal(data.tiers[1].nameAr, "كأس الصاعدين");
+  assert.equal(data.tiers[2].nameAr, "كأس المحترفين");
+  assert.equal(data.tiers[3].nameAr, "كأس النخبة");
+  assert.equal(data.tiers[4].nameAr, "كأس الأساطير");
+  // The ladder is ranked, and the rank rises with the entry fee — a tier that
+  // costs more must never sit lower on the ladder than one that costs less.
+  assert.deepEqual(data.tiers.map((t) => t.rank), [1, 2, 3, 4, 5]);
+  for (let i = 1; i < data.tiers.length; i += 1) {
+    assert.ok(
+      data.tiers[i].entryFee > data.tiers[i - 1].entryFee,
+      `${data.tiers[i].nameAr} ranks above ${data.tiers[i - 1].nameAr} but costs no more`
+    );
+  }
   assert.ok(data.tiers.every((t) => [4, 8, 12].includes(t.rounds)));
   assert.equal(data.createFee, catalog.CREATE_FEE);
-  assert.equal(data.slotMs, 2 * 60 * 60 * 1000);
+  assert.equal(data.cycleMs, 3 * 60 * 60 * 1000);
+  assert.equal(data.rungMs, 30 * 60 * 1000);
+  assert.equal(data.ladder.length, 6);
   assert.ok(data.tiers.every((t) => t.guaranteedPrize > 0 && t.entryFee > 0));
   assert.equal(data.pokerOpeningFraction, 10);
   assert.equal(data.pokerMode, "freezeout");
@@ -310,24 +321,35 @@ test("poker freezeout keeps going after 4 hands and ends when one stack remains"
   assert.equal(champ.finishPlace, 1);
 });
 
-test("house names use freezeout label for poker and rounds for cards", () => {
+test("the house title names the cup, then the game", () => {
+  // It used to read "بوكر · أكبر · 8 جولات" — three data fields joined by
+  // dots, with the format repeated in the card body right underneath.
   const poker = catalog.houseName("poker", catalog.TIERS[0]);
-  assert.match(poker, /حتى الفوز/);
-  assert.match(poker, /صغيرة/);
-  const trix = catalog.houseName("trix", catalog.TIERS[0]);
-  assert.match(trix, /جولات/);
-  assert.equal(trix.includes(" د"), false);
+  assert.equal(poker, "كأس المبتدئين · بوكر");
+  assert.equal(catalog.houseName("trix", catalog.TIERS[4]), "كأس الأساطير · تركس");
+  // The format belongs to the card's own rows, not to the title.
+  assert.equal(poker.includes("جولات"), false);
+  assert.equal(poker.includes("حتى الفوز"), false);
 });
 
-test("house schedule is idempotent across 3 games × 5 tiers", async () => {
+test("house schedule is idempotent across 3 games × the ladder", async () => {
   await engine.ensureSchedule();
   const n1 = await ArenaTournament.countDocuments({ origin: "house" });
-  assert.equal(n1, 3 * 5 * 2);
+  assert.ok(n1 > 0, "nothing was scheduled");
   await engine.ensureSchedule();
   const n2 = await ArenaTournament.countDocuments({ origin: "house" });
   assert.equal(n2, n1);
   const keys = await ArenaTournament.distinct("slotKey", { origin: "house" });
-  assert.equal(keys.length, n1);
+  assert.equal(keys.length, n1, "two slots share a key");
+  // Three games on every rung, and no rung left unseeded.
+  const byStart = new Map();
+  for (const row of await ArenaTournament.find({ origin: "house" }).lean()) {
+    const k = row.startAt.getTime();
+    byStart.set(k, (byStart.get(k) || 0) + 1);
+  }
+  for (const [startMs, count] of byStart) {
+    assert.equal(count, 3, `the rung at ${new Date(startMs).toISOString()} is missing a game`);
+  }
 });
 
 test("private tournaments are hidden from strangers", async () => {

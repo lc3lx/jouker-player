@@ -89,12 +89,23 @@ test("a public table with spectators off is closed to strangers", () => {
   assert.equal(canWatchTable(t, STRANGER), false);
 });
 
-test("an ordinary public table is watchable", () => {
-  assert.equal(canWatchTable({ isPrivate: false, settings: {} }, STRANGER), true);
-  assert.equal(canWatchTable({ isPrivate: false }, STRANGER), true);
+test("an ordinary public table is joinable while it has a seat", () => {
+  // It used to be *watchable*: any public table admitted anyone who asked,
+  // with no obligation to ever sit. Standing there is now only the walk to a
+  // chair, so it lasts exactly as long as there is a chair to walk to.
+  const withRoom = { isPrivate: false, settings: {}, capacity: 6, seats: [] };
+  assert.equal(canWatchTable(withRoom, STRANGER), true);
+
+  const full = {
+    isPrivate: false,
+    settings: {},
+    capacity: 2,
+    seats: [{ user: "a" }, { user: "b" }],
+  };
+  assert.equal(canWatchTable(full, STRANGER), false);
 });
 
-test("a missing table is not watchable", () => {
+test("a missing table admits nobody", () => {
   assert.equal(canWatchTable(null, HOST), false);
 });
 
