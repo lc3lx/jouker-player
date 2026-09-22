@@ -358,6 +358,20 @@ guarded("agent wallet summary aggregates deposit stats", async () => {
   assert.equal(res.body.data.lifetime.volume, 5000);
 });
 
+guarded("admin can create an agent from an existing email", async () => {
+  const res = await api(
+    "POST",
+    "/api/v1/agent-deposits/admin/agents",
+    users.admin.token,
+    { email: "  Stranger@test.local ", countries: ["SA"], displayName: "غريب" }
+  );
+  assert.equal(res.status, 201, JSON.stringify(res.body));
+  const profile = await AgentProfile.findOne({ user: users.stranger.doc._id });
+  assert.ok(profile);
+  assert.equal(profile.status, "approved");
+  assert.equal(profile.deposit.enabled, true);
+});
+
 guarded("admin can recharge and withdraw the agent wallet", async () => {
   const profile = await AgentProfile.findOne({ user: users.agent.doc._id }).lean();
   const before = await balanceOf(users.agent.doc._id);

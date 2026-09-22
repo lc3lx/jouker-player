@@ -37,7 +37,8 @@ exports.approveDepositValidator = [
 
 exports.adminCreateAgentValidator = [
   check("userId").optional().isMongoId(),
-  check("email").optional().isEmail(),
+  check("email").optional({ checkFalsy: true }).isString().isLength({ min: 2, max: 160 }),
+  check("playerId").optional({ checkFalsy: true }).isInt({ min: 1 }),
   check("countries").isArray({ min: 1 }).withMessage("حدد دولة واحدة على الأقل"),
   check("displayName").optional().isString().isLength({ max: 80 }),
   check("paymentMethods").optional().isArray(),
