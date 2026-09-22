@@ -12,7 +12,9 @@ const svc = require("../services/adminUserModerationService");
 const router = express.Router();
 router.use(authService.protect, authService.allowedTo("admin", "manager"));
 
+router.get("/", svc.adminListUsers);
 router.get("/search", svc.adminSearchUsers);
+router.patch("/:id/access", svc.adminSetUserAccess);
 
 router.get("/:id/overview", svc.adminUserOverview);
 router.get("/:id/transactions", svc.adminUserTransactions);

@@ -37,6 +37,7 @@ const { normalizeVipLevel } = require("../config/vipConfig");
 const { rankAgents, foldResponseTime } = require("./agentRanking");
 const logger = require("../utils/logger");
 const { priceUsdForLevel } = require("./vipPricingService");
+const { findRegisteredUser } = require("../utils/findRegisteredUser");
 
 const { ACTIVE_STATUSES } = DepositTicket;
 const APPROVABLE_STATUSES = ["accepted", "waiting_payment", "receipt_uploaded"];
@@ -1599,10 +1600,17 @@ exports.adminCreateAgent = asyncHandler(async (req, res) => {
     workingHours = "",
   } = req.body || {};
 
-  const user = userId
-    ? await User.findById(userId)
-    : await User.findOne({ email: String(email || "").toLowerCase() });
-  if (!user) throw new ApiError("المستخدم غير موجود", 404);
+  const user = await findRegisteredUser({
+    userId,
+    email,
+    playerId: req.body?.playerId,
+  });
+  if (!user) {
+    throw new ApiError(
+      "المستخدم غير موجود — ابحث عنه من صفحة المستخدمين وعيّنه وكيلاً من هناك",
+      404
+    );
+  }
 
   const cleanCountries = countries
     .map((c) => String(c).toUpperCase())
