@@ -74,6 +74,68 @@ test.after(async () => {
 
 // ── data model: de-enum + defaults + status mirror ───────────────────────────
 
+test("new eastern table is added to existing catalogs without resetting an admin price", async () => {
+  await Cosmetic.create({ type: "table_theme", name: "Existing", assetKey: "existing_before_east", price: 10 });
+  let catalog = await cosmeticsService.listCatalog();
+  const table = catalog.find((row) => row.assetKey === "arabesque_palace");
+  assert.equal(table.price, 30_000_000);
+  await Cosmetic.updateOne({ _id: table.id }, { $set: { price: 31_000_000 } });
+  catalog = await cosmeticsService.listCatalog();
+  assert.equal(catalog.find((row) => row.assetKey === "arabesque_palace").price, 31_000_000);
+  assert.equal(await Cosmetic.countDocuments({ assetKey: "arabesque_palace" }), 1);
+});
+
+test("admin table upload, price update and equipped image reach the table without a client asset key", async () => {
+  const admin = require("../services/adminCosmeticsService");
+  const sharp = require("sharp");
+  const fs = require("fs/promises");
+  const path = require("path");
+  async function call(handler, req) {
+    let result, error;
+    const res = { status() { return this; }, json(value) { result = value; } };
+    await handler(req, res, (err) => { error = err; });
+    if (error) throw error;
+    return result;
+  }
+  const req = { body: { type: "table_theme", name: "Custom moon table", assetKey: "custom_moon_123",
+    price: "750", status: "published", games: '["poker"]' }, params: {}, headers: {},
+    file: { buffer: await sharp({ create: { width: 1600, height: 640, channels: 4,
+      background: { r: 80, g: 100, b: 140, alpha: 0.5 } } }).png().toBuffer() } };
+  await call(admin.resizeCosmeticPreview, req);
+  const file = path.resolve("uploads", "cosmetics", req.body.previewImage);
+  const generatedFiles = [file];
+  try {
+    const metadata = await sharp(file).metadata();
+    assert.equal(metadata.width, 1600);
+    assert.equal(metadata.height, 640);
+    assert.equal(metadata.hasAlpha, true);
+    assert.equal(metadata.format, "png");
+    const created = (await call(admin.adminCreateCosmetic, req)).data;
+    const uid = new mongoose.Types.ObjectId();
+    await ownRow(uid, created.id);
+    await cosmeticsService.equipCosmetic(uid, created.id);
+    const payload = (await cosmeticsService.resolveEquippedPayloadForUsers([uid])).get(String(uid));
+    assert.equal(payload.tableAsset, `/uploads/cosmetics/${req.body.previewImage}`);
+    const active = require("../services/playerPublicCosmeticsService").resolveActiveTableCosmetics([
+      { seatIndex: 0, equippedTableTheme: payload.tableTheme, equippedTableAsset: payload.tableAsset },
+    ]);
+    assert.equal(active.activeTableAsset, payload.tableAsset);
+    const updateReq = { params: { id: created.id }, headers: {}, body: { price: "1250" }, file: { buffer: req.file.buffer } };
+    await call(admin.resizeCosmeticPreview, updateReq);
+    generatedFiles.push(path.resolve("uploads", "cosmetics", updateReq.body.previewImage));
+    const updated = await call(admin.adminUpdateCosmetic, updateReq);
+    assert.equal(updated.data.basePrice, 1250);
+    assert.equal((await cosmeticsService.listCatalog()).find((x) => x.id === created.id).price, 1250);
+    await assert.rejects(() => call(admin.adminUpdateCosmetic, { params: { id: created.id }, headers: {}, body: { price: "invalid" } }), /Price must/);
+    assert.equal((await Cosmetic.findById(created.id)).price, 1250);
+    const changed = (await cosmeticsService.resolveEquippedPayloadForUsers([uid])).get(String(uid));
+    assert.equal(changed.tableAsset, `/uploads/cosmetics/${updateReq.body.previewImage}`);
+    assert.notEqual(changed.tableAsset, payload.tableAsset, "replacing art invalidates equipped-user cache");
+  } finally {
+    await Promise.all(generatedFiles.map((file) => fs.unlink(file)));
+  }
+});
+
 test("cosmetic model: free-string type/rarity + pre-save defaults", async () => {
   const c = await Cosmetic.create({ type: "chat_badge", name: "Sparkle", assetKey: "badge_sparkle", price: 500, rarity: "mythic" });
   assert.equal(c.type, "chat_badge");

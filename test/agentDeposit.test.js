@@ -62,6 +62,11 @@ async function balanceOf(userId) {
   return wallet.balance;
 }
 
+async function casinoOf(userId) {
+  const profile = await AgentProfile.findOne({ user: userId }).lean();
+  return profile?.deposit?.casinoBalance || 0;
+}
+
 before(async () => {
   try {
     await mongoose.connect(MONGO_URI, { serverSelectionTimeoutMS: 2500 });
@@ -104,15 +109,17 @@ before(async () => {
       countries: ["SY"],
       paymentMethods: ["حوالة", "كاش"],
       workingHours: "10:00 - 22:00",
+      casinoBalance: 1000000,
+      floatSeparated: true,
     },
   });
 
-  // seed the agent wallet
+  // The agent's own playing chips. Sales must not touch this.
   await ledger.ledgerDeposit({
     session: null,
     userId: users.agent.doc._id,
-    amount: 1000000,
-    ledgerType: "admin_agent_credit",
+    amount: 40000,
+    ledgerType: "admin_grant",
     meta: { seed: true },
   });
 });
@@ -235,7 +242,8 @@ guarded("full lifecycle: create → accept → chat → approve moves money atom
   assert.equal(afterChat.body.data.status, "waiting_payment");
 
   // approve — atomic transfer
-  const agentBefore = await balanceOf(users.agent.doc._id);
+  const agentBefore = await casinoOf(users.agent.doc._id);
+  const playerBefore = await balanceOf(users.agent.doc._id);
   const customerBefore = await balanceOf(users.customer.doc._id);
 
   const approved = await api(
@@ -248,7 +256,8 @@ guarded("full lifecycle: create → accept → chat → approve moves money atom
   assert.equal(approved.body.data.status, "completed");
   assert.equal(approved.body.data.amountApproved, 5000);
 
-  assert.equal(await balanceOf(users.agent.doc._id), agentBefore - 5000);
+  assert.equal(await casinoOf(users.agent.doc._id), agentBefore - 5000);
+  assert.equal(await balanceOf(users.agent.doc._id), playerBefore);
   assert.equal(await balanceOf(users.customer.doc._id), customerBefore + 5000);
 
   // double approval rejected
@@ -259,7 +268,8 @@ guarded("full lifecycle: create → accept → chat → approve moves money atom
     { amount: 5000 }
   );
   assert.equal(again.status, 409);
-  assert.equal(await balanceOf(users.agent.doc._id), agentBefore - 5000);
+  assert.equal(await casinoOf(users.agent.doc._id), agentBefore - 5000);
+  assert.equal(await balanceOf(users.agent.doc._id), playerBefore);
 });
 
 guarded("insufficient agent balance → 402 and ticket status restored", async () => {
@@ -360,7 +370,8 @@ guarded("agent wallet summary aggregates deposit stats", async () => {
 
 guarded("admin can recharge and withdraw the agent wallet", async () => {
   const profile = await AgentProfile.findOne({ user: users.agent.doc._id }).lean();
-  const before = await balanceOf(users.agent.doc._id);
+  const before = await casinoOf(users.agent.doc._id);
+  const playerBefore = await balanceOf(users.agent.doc._id);
 
   const recharge = await api(
     "POST",
@@ -370,6 +381,7 @@ guarded("admin can recharge and withdraw the agent wallet", async () => {
   );
   assert.equal(recharge.status, 200);
   assert.equal(recharge.body.data.balance, before + 20000);
+  assert.equal(recharge.body.data.playerBalance, playerBefore);
 
   const withdraw = await api(
     "POST",
@@ -707,7 +719,8 @@ guarded("the log pages backwards without repeating a sale", async () => {
 
 guarded("a direct credit moves coins and is written down as a sale", async () => {
   const before = {
-    agent: await balanceOf(users.agent.doc._id),
+    agent: await casinoOf(users.agent.doc._id),
+    playerChips: await balanceOf(users.agent.doc._id),
     player: await balanceOf(users.stranger.doc._id),
   };
 
@@ -721,7 +734,8 @@ guarded("a direct credit moves coins and is written down as a sale", async () =>
   assert.equal(res.body.data.amount, 2500);
   assert.equal(res.body.data.player.name, "stranger");
 
-  assert.equal(await balanceOf(users.agent.doc._id), before.agent - 2500);
+  assert.equal(await casinoOf(users.agent.doc._id), before.agent - 2500);
+  assert.equal(await balanceOf(users.agent.doc._id), before.playerChips);
   assert.equal(await balanceOf(users.stranger.doc._id), before.player + 2500);
   assert.equal(
     res.body.data.agentBalance,
@@ -735,6 +749,42 @@ guarded("a direct credit moves coins and is written down as a sale", async () =>
   assert.ok(line, "a direct credit must appear in the sales book");
   assert.equal(line.amount, 2500);
   assert.equal(line.player.name, "stranger");
+});
+
+guarded("a public player number credits that player from the casino purse", async () => {
+  await User.updateOne({ _id: users.stranger.doc._id }, { $set: { playerId: 4321 } });
+  const lookup = await api(
+    "GET",
+    "/api/v1/agent-deposits/agent/lookup-player?playerId=4321",
+    users.agent.token
+  );
+  assert.equal(lookup.status, 200, JSON.stringify(lookup.body));
+  assert.equal(lookup.body.data.name, "stranger");
+  assert.equal(lookup.body.data.playerId, 4321);
+
+  const before = {
+    casino: await casinoOf(users.agent.doc._id),
+    chips: await balanceOf(users.agent.doc._id),
+    player: await balanceOf(users.stranger.doc._id),
+  };
+  const res = await api(
+    "POST",
+    "/api/v1/agent-deposits/agent/direct-credit",
+    users.agent.token,
+    { playerId: "4321", amount: 300 }
+  );
+  assert.equal(res.status, 201, JSON.stringify(res.body));
+  assert.equal(res.body.data.player.playerId, 4321);
+  assert.equal(await casinoOf(users.agent.doc._id), before.casino - 300);
+  assert.equal(await balanceOf(users.agent.doc._id), before.chips);
+  assert.equal(await balanceOf(users.stranger.doc._id), before.player + 300);
+
+  const missing = await api(
+    "GET",
+    "/api/v1/agent-deposits/agent/lookup-player?playerId=999999",
+    users.agent.token
+  );
+  assert.equal(missing.status, 404);
 });
 
 guarded("a direct credit can be addressed by email instead of id", async () => {
@@ -751,7 +801,8 @@ guarded("a direct credit can be addressed by email instead of id", async () => {
 
 guarded("sending more than the agent holds moves nothing", async () => {
   const before = {
-    agent: await balanceOf(users.agent.doc._id),
+    agent: await casinoOf(users.agent.doc._id),
+    playerChips: await balanceOf(users.agent.doc._id),
     player: await balanceOf(users.stranger.doc._id),
   };
 
@@ -763,7 +814,8 @@ guarded("sending more than the agent holds moves nothing", async () => {
   );
   assert.equal(res.status, 402);
 
-  assert.equal(await balanceOf(users.agent.doc._id), before.agent, "no debit");
+  assert.equal(await casinoOf(users.agent.doc._id), before.agent, "no debit");
+  assert.equal(await balanceOf(users.agent.doc._id), before.playerChips);
   assert.equal(
     await balanceOf(users.stranger.doc._id),
     before.player,
@@ -804,7 +856,7 @@ guarded("a direct credit needs a real player, and a real amount", async () => {
 });
 
 guarded("an agent cannot credit themselves", async () => {
-  const before = await balanceOf(users.agent.doc._id);
+  const before = await casinoOf(users.agent.doc._id);
   const res = await api(
     "POST",
     "/api/v1/agent-deposits/agent/direct-credit",
@@ -812,7 +864,7 @@ guarded("an agent cannot credit themselves", async () => {
     { playerId: String(users.agent.doc._id), amount: 1000 }
   );
   assert.equal(res.status, 400);
-  assert.equal(await balanceOf(users.agent.doc._id), before);
+  assert.equal(await casinoOf(users.agent.doc._id), before);
 });
 
 guarded("a player cannot use the agent's send endpoint", async () => {

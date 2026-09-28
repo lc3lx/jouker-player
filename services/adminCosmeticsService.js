@@ -110,7 +110,13 @@ function buildCosmeticBody(req, { partial = false } = {}) {
   setIfPresent("category", (v) => (v == null ? null : String(v).trim()));
   setIfPresent("slot", (v) => (v == null ? null : String(v).trim()));
   setIfPresent("assetKey", assertAssetKey);
-  setIfPresent("price", (v) => Math.max(0, Math.floor(Number(v) || 0)));
+  setIfPresent("price", (v) => {
+    const price = Number(v);
+    if (v === "" || v == null || !Number.isSafeInteger(price) || price < 0) {
+      throw new ApiError("Price must be a non-negative whole number of coins", 400);
+    }
+    return price;
+  });
   setIfPresent("currencyId", (v) => String(v || "coins").trim());
   setIfPresent("rarity", (v) => String(v || "common").trim());
   setIfPresent("renderType", (v) => String(v || "png").trim().toLowerCase());
@@ -172,13 +178,18 @@ exports.resizeCosmeticPreview = asyncHandler(async (req, res, next) => {
   if (!req.file) return next();
   const uploadsDir = path.join("uploads", "cosmetics");
   ensureDir(uploadsDir);
-  const filename = `cosmetic-${uuidv4()}-${Date.now()}.jpeg`;
-
-  await sharp(req.file.buffer)
-    .resize(512, 512, { fit: "inside", withoutEnlargement: true })
-    .toFormat("jpeg")
-    .jpeg({ quality: 90 })
-    .toFile(path.join(uploadsDir, filename));
+  const existing = req.params?.id && mongoose.isValidObjectId(req.params.id)
+    ? await Cosmetic.findById(req.params.id).select("type").lean() : null;
+  const isTable = (req.body.type || existing?.type) === "table_theme";
+  const filename = `cosmetic-${uuidv4()}-${Date.now()}.${isTable ? "png" : "jpeg"}`;
+  let image = sharp(req.file.buffer).rotate();
+  if (isTable) {
+    const clean = await require("../utils/normalizeTableArtwork").normalizeTableArtwork(req.file.buffer);
+    await fs.promises.writeFile(path.join(uploadsDir, filename), clean);
+  } else {
+    image = image.resize(512, 512, { fit: "inside", withoutEnlargement: true }).jpeg({ quality: 90 });
+    await image.toFile(path.join(uploadsDir, filename));
+  }
 
   req.body.previewImage = filename;
   next();
@@ -257,6 +268,12 @@ exports.adminUpdateCosmetic = asyncHandler(async (req, res, next) => {
   const doc = await Cosmetic.findByIdAndUpdate(id, body, { new: true, runValidators: true }).lean();
   if (!doc) return next(new ApiError("Cosmetic not found", 404));
   await economyAudit.record({ req, action: "update", entity: "cosmetic", entityId: String(id), before, after: doc, reason: req.body?.reason });
+  if (doc.type === "table_theme") {
+    const users = await require("../models/userCosmeticsModel").find({ $or: [
+      { "equipped.tableTheme": id }, { "equippedBySlot.table_theme": id },
+    ] }).select("user").lean();
+    await Promise.all(users.map((row) => require("../utils/cosmeticsEquippedCache").del(row.user)));
+  }
   cosmeticsLive.refresh({ reason: "cosmetic_update", keys: [String(id)] });
   res.status(200).json({ status: "success", data: publicCosmeticDisplay(doc) });
 });

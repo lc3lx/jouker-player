@@ -4,7 +4,7 @@
  */
 const logger = require("./logger");
 
-const PREFIX = "cosm_eq:";
+const PREFIX = "cosm_eq:v3:";
 const memory = new Map();
 
 let redis = null;
@@ -56,6 +56,7 @@ async function set(userId, payload) {
 
   memory.set(key, {
     tableTheme: payload.tableTheme ?? null,
+    tableAsset: payload.tableAsset ?? null,
     cardSkin: payload.cardSkin ?? null,
     avatarFrame: payload.avatarFrame ?? null,
     skin: payload.skin ?? payload.avatarFrame ?? null,

@@ -97,18 +97,21 @@ async function executeSpin(userId, betAmountInput) {
 
     const totalWin = roundMoney(totalWinX * betAmount);
 
-    // --- free spins: 4+ base / 3+ during bonus (bought or natural) ---
+    // --- free spins: 4 heads in base / 3 heads during bonus ---
     const multiplierCount = spin.multipliers.length;
+    const scatterCount = Number.isFinite(spin.scatterCount)
+      ? spin.scatterCount
+      : (spin.scatters || []).length;
     let freeSpinsTriggered = false;
     let freeSpinsAwarded = 0;
     let stagedBonusAction = null;
     if (isFreeSpin) {
-      if (multiplierCount >= TRIGGER_RETRIGGER_MIN) {
+      if (scatterCount >= TRIGGER_RETRIGGER_MIN) {
         stagedBonusAction = { type: "retrigger", spins: RETRIGGER_AWARD };
         freeSpinsAwarded = RETRIGGER_AWARD;
       }
     } else if (
-      multiplierCount >= TRIGGER_NATURAL_MIN &&
+      scatterCount >= TRIGGER_NATURAL_MIN &&
       !roundManager.hasActiveBonusSession(userKey)
     ) {
       stagedBonusAction = {
@@ -197,6 +200,7 @@ async function executeSpin(userId, betAmountInput) {
       multipliers: spin.multipliers,
       multiplierSum: spin.multiplierSum,
       multiplierCount,
+      scatterCount,
       appliedMultiplier,
       bonusMultiplier: isFreeSpin ? nextCarried : 0,
       baseWinAmount: roundMoney(spin.baseWin * betAmount),

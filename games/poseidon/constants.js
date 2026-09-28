@@ -8,8 +8,9 @@
  * the sequence ends with a win, their sum multiplies it. Base game is
  * per-spin. During free spins, plaques from winning spins bank into a
  * session total that multiplies later wins (a losing spin does not add).
- * Plaques are also the free-spins trigger: 4+ plaques in base game award
- * free spins; during free spins (natural or bought) 3+ plaques add more.
+ * The character-head scatter is the free-spins trigger: 4+ heads in the base
+ * game award 5 free spins; during free spins 3+ heads add 5 more. Multiplier
+ * plaques only multiply wins — they never open the bonus.
  *
  * RTP was originally tuned for MIN_MATCH=8; lowering to 7 raises hit rate.
  * Re-tune with the seeded sim in test/poseidon.test.js if needed.
@@ -22,10 +23,15 @@ const BET_MIN = 10000;
 const BET_MAX = 1000000000;
 const MAX_WIN_MULTIPLIER = 5000;
 
-/** 4+ multiplier plaques in the base game trigger free spins. */
+/** 4+ character-head scatters in the base game trigger free spins. */
 const TRIGGER_NATURAL_MIN = 4;
-/** 3+ plaques during free spins (incl. bought bonus) award +5 spins. */
+/** 3+ heads during free spins (incl. bought bonus) award +5 spins. */
 const TRIGGER_RETRIGGER_MIN = 3;
+/** Reel id for the Poseidon-head bonus scatter. */
+const SCATTER = "head";
+/** Visible often enough that 4-of-a-kind is reachable, not a once-a-session ghost. */
+const HEAD_WEIGHT_BASE = 2.4;
+const HEAD_WEIGHT_BONUS = 1.7;
 /** @deprecated use TRIGGER_NATURAL_MIN / TRIGGER_RETRIGGER_MIN */
 const TRIGGER_MIN_MULTIPLIERS = TRIGGER_RETRIGGER_MIN;
 const FREE_SPINS_NATURAL = 5;
@@ -181,6 +187,7 @@ const BASE_WEIGHTS = Object.freeze([
   [SYMBOLS.CROWN, 5.5],
   [SYMBOLS.PEARL, 5],
   ["mult", 0.44],
+  [SCATTER, HEAD_WEIGHT_BASE],
   ["jackpot", 0.25],
 ]);
 
@@ -196,6 +203,7 @@ const BONUS_WEIGHTS = Object.freeze([
   [SYMBOLS.CROWN, 5.5],
   [SYMBOLS.PEARL, 5],
   ["mult", 0.55],
+  [SCATTER, HEAD_WEIGHT_BONUS],
   ["jackpot", 0.25],
 ]);
 
@@ -208,6 +216,10 @@ const WIN_TIERS = Object.freeze([
 ]);
 
 const MIN_MATCH = 8;
+
+function isScatter(cell) {
+  return cell === SCATTER;
+}
 
 function isMultiplier(cell) {
   return typeof cell === "string" && cell.charCodeAt(0) === 120 /* 'x' */;
@@ -253,6 +265,9 @@ module.exports = {
   BUY_BONUS_COST,
   SUPER_BUY_BONUS_COST,
   SYMBOLS,
+  SCATTER,
+  HEAD_WEIGHT_BASE,
+  HEAD_WEIGHT_BONUS,
   MULTIPLIER_VALUES,
   MULTIPLIER_GATES,
   BASE_MULTIPLIER_WEIGHTS,
@@ -270,6 +285,7 @@ module.exports = {
   BONUS_WEIGHTS,
   WIN_TIERS,
   MIN_MATCH,
+  isScatter,
   isMultiplier,
   multiplierValue,
   payoutFor,

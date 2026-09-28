@@ -141,7 +141,7 @@ function resolveEffectiveSeatCosmetics({ equipped, vipLevel }) {
     cardSkin,
     // Sprite paths belong to the VIP art. Pairing them with a store key would
     // paint VIP pictures over the theme the player actually picked.
-    tableAsset: tableTheme && tableTheme === vip?.tableTheme ? vip.tableAsset || null : null,
+    tableAsset: eq.tableAsset || (tableTheme && tableTheme === vip?.tableTheme ? vip.tableAsset || null : null),
     cardAssets: cardSkin && cardSkin === vip?.cardSkin ? vip.cardAssets || null : null,
   };
 }

@@ -9,6 +9,7 @@ const {
   MIN_MATCH,
   PAYING_SYMBOLS,
   isMultiplier,
+  isScatter,
   multiplierValue,
   payoutFor,
 } = require("./constants");
@@ -22,8 +23,8 @@ function findWins(matrix) {
   for (let col = 0; col < REEL_COUNT; col += 1) {
     for (let row = 0; row < ROW_COUNT; row += 1) {
       const cell = matrix[col][row];
-      // Multiplier plaques and jackpot scatters don't form winning pay lines.
-      if (isMultiplier(cell) || cell === "jackpot") continue;
+      // Plaques, the head scatter, and jackpot scatters don't form pay lines.
+      if (isMultiplier(cell) || isScatter(cell) || cell === "jackpot") continue;
       let list = positionsBySymbol.get(cell);
       if (!list) positionsBySymbol.set(cell, (list = []));
       list.push([col, row]);
@@ -68,8 +69,20 @@ function collectMultipliers(matrix) {
   return found;
 }
 
+/** Character-head scatters on the final matrix: [{ col, row }]. */
+function collectScatters(matrix) {
+  const found = [];
+  for (let col = 0; col < REEL_COUNT; col += 1) {
+    for (let row = 0; row < ROW_COUNT; row += 1) {
+      if (isScatter(matrix[col][row])) found.push({ col, row });
+    }
+  }
+  return found;
+}
+
 module.exports = {
   findWins,
   collectMultipliers,
+  collectScatters,
   collectJackpotSymbols,
 };

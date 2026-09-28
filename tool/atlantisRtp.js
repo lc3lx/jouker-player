@@ -44,7 +44,7 @@ function poseidonBonusRound({ bought = false, superBonus = false } = {}) {
     remaining -= 1;
     const s = poseidonEngine.resolveSpin({ bonusMode: true, superBonus });
     won += poseidonWin(s, true);
-    if (s.multipliers.length >= P.TRIGGER_RETRIGGER_MIN) {
+    if ((s.scatterCount || 0) >= P.TRIGGER_RETRIGGER_MIN) {
       remaining += P.RETRIGGER_AWARD;
     }
   }
@@ -61,7 +61,7 @@ function probePoseidon(spins, bonusRounds) {
     const s = poseidonEngine.resolveSpin({ bonusMode: false });
     let win = poseidonWin(s, false);
     if (s.multipliers.length) plaqueSpins += 1;
-    if (s.multipliers.length >= P.TRIGGER_NATURAL_MIN) {
+    if ((s.scatterCount || 0) >= P.TRIGGER_NATURAL_MIN) {
       triggers += 1;
       win += poseidonBonusRound();
     }

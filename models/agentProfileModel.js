@@ -50,6 +50,15 @@ const agentProfileSchema = new mongoose.Schema(
       enabled: { type: Boolean, default: false, index: true },
       displayName: { type: String, default: "", trim: true, maxlength: 80 },
       countries: [{ type: String, uppercase: true, trim: true }],
+      /**
+       * Selling float. Players are paid from this, never from the agent's
+       * own playing wallet.
+       */
+      casinoBalance: { type: Number, default: 0, min: 0 },
+      /** Set once the old mixed wallet has been moved into casinoBalance. */
+      floatSeparated: { type: Boolean, default: false },
+      /** Serves every country that no other approved agent owns. */
+      coversRemaining: { type: Boolean, default: false },
       paymentMethods: [{ type: String, trim: true, maxlength: 60 }],
       workingHours: { type: String, default: "", trim: true, maxlength: 120 },
       /**

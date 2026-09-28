@@ -17,7 +17,13 @@ const MULTIPLIER_VALUES = [2, 5, 10, 20, 50, 100, 200, 500, 1000];
 const JACKPOT = REGULAR_SYMBOLS + MULTIPLIER_VALUES.length; // 17
 const JACKPOT_WEIGHT = 0.25;
 const JACKPOT_MIN_SYMBOLS = 3;
-const SYMBOL_COUNT = JACKPOT + 1;
+// Kept as the bonus counter name. The character head (not multiplier plaques)
+// is the free-spins scatter: 4 in the base game, 3 during free spins.
+const HEAD = JACKPOT + 1; // 18
+const HEAD_WEIGHT_BASE = 2.4;
+const HEAD_WEIGHT_BONUS = 1.6;
+const SCATTER = HEAD;
+const SYMBOL_COUNT = HEAD + 1;
 const FREE_SPINS_AWARD = 5;
 const FREE_SPINS_BOUGHT = 10;
 const RETRIGGER_AWARD = 5;
@@ -32,8 +38,7 @@ const BET_MAX = 1000000000;
 const MIN_MATCH = 8;
 
 // Kept as aliases because the socket/client response historically calls the
-// plaque counter `scatterCount`.
-const SCATTER = MULTIPLIER;
+// head-scatter counter `scatterCount`. Multiplier plaques no longer open bonus.
 const GEM_SYMBOLS = [0, 1, 2, 3];
 
 // A, E, N, S, book, ring, class, crown.  Bands: 8-9 / 10-11 / 12+ matches.
@@ -84,16 +89,24 @@ function isJackpot(symbol) {
   return symbol === JACKPOT;
 }
 
+function isHead(symbol) { return symbol === HEAD; }
+function headCells(grid) {
+  const cells = [];
+  for (let c = 0; c < COLS; c++) for (let r = 0; r < ROWS; r++) if (isHead(grid[c][r])) cells.push({ col: c, row: r });
+  return cells;
+}
 function pickSymbol(rng, isFreeSpin, bigAlready, superBonus = false) {
   const plaqueWeight = isFreeSpin ? 0.55 : 0.44;
+  const headWeight = isFreeSpin ? HEAD_WEIGHT_BONUS : HEAD_WEIGHT_BASE;
   const regular = isFreeSpin ? FREESPIN_WEIGHTS : BASE_WEIGHTS;
-  const choice = weightedIndex(rng, [...regular, plaqueWeight, JACKPOT_WEIGHT]);
+  const choice = weightedIndex(rng, [...regular, plaqueWeight, JACKPOT_WEIGHT, headWeight]);
   if (choice < REGULAR_SYMBOLS) return choice;
   if (choice === REGULAR_SYMBOLS) {
     const value = pickMultiplierValue(rng, "medium", { bonus: isFreeSpin, bigAlready, superBonus });
     return MULTIPLIER + MULTIPLIER_VALUES.indexOf(value);
   }
-  return JACKPOT;
+  if (choice === REGULAR_SYMBOLS + 1) return JACKPOT;
+  return HEAD;
 }
 
 function countJackpotSymbols(grid) {
@@ -161,14 +174,14 @@ function runTumbles(initialGrid, rng, options) {
   });
   return { finalGrid: grid, baseWin, collectedMultiplier: collected, appliedMultiplier: resolved.applied, nextFreeSpinMultiplier: resolved.nextCarried, multipliedWin: roundMoney(baseWin * resolved.applied), lineWins, winningCells, cascadeSteps };
 }
-function calculateWins(grid, stake, freeSpinMultiplier = 0) { const { wins, winningCells } = findPayAnywhereWins(grid, stake); const totalWin = wins.reduce((sum, w) => sum + w.win, 0); return { totalWin: roundMoney(totalWin), winningCells: [...winningCells].map((key) => { const [col, row] = key.split(",").map(Number); return { col, row }; }), lineWins: wins, scatterCount: multiplierCells(grid).length }; }
+function calculateWins(grid, stake, freeSpinMultiplier = 0) { const { wins, winningCells } = findPayAnywhereWins(grid, stake); const totalWin = wins.reduce((sum, w) => sum + w.win, 0); return { totalWin: roundMoney(totalWin), winningCells: [...winningCells].map((key) => { const [col, row] = key.split(",").map(Number); return { col, row }; }), lineWins: wins, scatterCount: headCells(grid).length }; }
 function spin(baseBet, options = {}) {
   const rng = createSeededRng(options.serverSeed, options.clientSeed, options.nonce), isFreeSpin = !!options.isFreeSpin, superBonus = !!(isFreeSpin && options.superBonus), stake = roundMoney(baseBet);
   const initialGrid = generateGrid(rng, options.volatility, false, isFreeSpin, superBonus);
   const tumble = runTumbles(initialGrid, rng, { stake, volatility: normalizeVolatility(options.volatility), doubleChance: false, isFreeSpin, superBonus, freeSpinMultiplier: options.freeSpinMultiplier });
-  const scatterCount = multiplierCells(tumble.finalGrid).length, winCap = roundMoney(MAX_WIN_MULTIPLIER * stake);
+  const scatterCount = headCells(tumble.finalGrid).length, winCap = roundMoney(MAX_WIN_MULTIPLIER * stake);
   const totalWin = Math.min(tumble.multipliedWin, winCap);
   const jackpotSymbolCount = countJackpotSymbols(tumble.finalGrid);
   return { grid: initialGrid, initialGrid, finalGrid: tumble.finalGrid, stake, baseBet: stake, doubleChance: false, isFreeSpin, freeSpinPayoutMult: 1, volatility: normalizeVolatility(options.volatility), nearMiss: false, almostBonus: !isFreeSpin && scatterCount === 3, capped: tumble.multipliedWin > winCap, maxWin: winCap, totalWin, baseWin: tumble.baseWin, winningCells: [...tumble.winningCells].map((key) => { const [col, row] = key.split(",").map(Number); return { col, row }; }), lineWins: tumble.lineWins, scatterCount, jackpotSymbolCount, jackpotTriggered: jackpotSymbolCount >= JACKPOT_MIN_SYMBOLS, winType: classifyWinType(totalWin, stake), cascadeSteps: tumble.cascadeSteps, multipliers: { collected: tumble.collectedMultiplier, applied: tumble.appliedMultiplier, freeSpinTotal: tumble.nextFreeSpinMultiplier }, freeSpinsAwarded: !isFreeSpin && scatterCount >= 4 ? FREE_SPINS_AWARD : 0 };
 }
-module.exports = { COLS, ROWS, MIN_MATCH, REGULAR_SYMBOLS, SYMBOL_COUNT, SCATTER, MULTIPLIER, JACKPOT, JACKPOT_WEIGHT, JACKPOT_MIN_SYMBOLS, GEM_SYMBOLS, FREE_SPINS_AWARD, FREE_SPINS_BOUGHT, RETRIGGER_AWARD, RETRIGGER_MIN_SCATTER, BUY_COST_MULT, SUPER_BUY_COST_MULT, SUPER_MULTIPLIER_MIN, MAX_WIN_MULTIPLIER, BET_MIN, BET_MAX, PAYTABLE, MULTIPLIER_VALUES, BASE_WEIGHTS, FREESPIN_WEIGHTS, MULTIPLIER_GATES, BASE_MULTIPLIER_WEIGHTS, BONUS_MULTIPLIER_WEIGHTS, SUPPRESSED_MULTIPLIER_WEIGHTS, BIG_MULTIPLIER_THRESHOLD, APPLIED_MULTIPLIER_CAP_BASE, APPLIED_MULTIPLIER_CAP_BONUS, appliedMultiplierFor, resolvePayoutMultiplier, normalizeVolatility, pickMultiplierValue, symbolMultiplier, isJackpot, countJackpotSymbols, generateGrid, calculateWins, spin, classifyWinType };
+module.exports = { COLS, ROWS, MIN_MATCH, REGULAR_SYMBOLS, SYMBOL_COUNT, SCATTER, HEAD, HEAD_WEIGHT_BASE, HEAD_WEIGHT_BONUS, MULTIPLIER, JACKPOT, JACKPOT_WEIGHT, JACKPOT_MIN_SYMBOLS, GEM_SYMBOLS, FREE_SPINS_AWARD, FREE_SPINS_BOUGHT, RETRIGGER_AWARD, RETRIGGER_MIN_SCATTER, BUY_COST_MULT, SUPER_BUY_COST_MULT, SUPER_MULTIPLIER_MIN, MAX_WIN_MULTIPLIER, BET_MIN, BET_MAX, PAYTABLE, MULTIPLIER_VALUES, BASE_WEIGHTS, FREESPIN_WEIGHTS, MULTIPLIER_GATES, BASE_MULTIPLIER_WEIGHTS, BONUS_MULTIPLIER_WEIGHTS, SUPPRESSED_MULTIPLIER_WEIGHTS, BIG_MULTIPLIER_THRESHOLD, APPLIED_MULTIPLIER_CAP_BASE, APPLIED_MULTIPLIER_CAP_BONUS, appliedMultiplierFor, resolvePayoutMultiplier, normalizeVolatility, pickMultiplierValue, symbolMultiplier, isJackpot, isHead, countJackpotSymbols, generateGrid, calculateWins, spin, classifyWinType };

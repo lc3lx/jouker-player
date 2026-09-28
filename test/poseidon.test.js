@@ -511,32 +511,39 @@ test("free spins consume the session without charging bets", async () => {
   assert.equal(res.balance, before - bet + res.totalWin);
 });
 
-test("natural trigger awards 5 free spins on 4+ plaques", async () => {
+test("natural trigger awards 5 free spins on 4+ character heads", async () => {
   const engine = require("../games/poseidon/spinEngine");
   const original = engine.resolveSpin;
+  const head = "head";
+  const matrix = Array.from({ length: REEL_COUNT }, () =>
+    Array.from({ length: ROW_COUNT }, () => SYMBOLS.A)
+  );
+  matrix[0][0] = head;
+  matrix[1][0] = head;
+  matrix[2][0] = head;
+  matrix[3][0] = head;
   engine.resolveSpin = () => ({
-    initialMatrix: Array.from({ length: REEL_COUNT }, () =>
-      Array.from({ length: ROW_COUNT }, () => SYMBOLS.A)
-    ),
-    finalMatrix: Array.from({ length: REEL_COUNT }, () =>
-      Array.from({ length: ROW_COUNT }, () => SYMBOLS.A)
-    ),
+    initialMatrix: matrix,
+    finalMatrix: matrix,
     steps: [],
     baseWin: 0,
-    multipliers: [
-      { col: 0, row: 0, value: 2 },
-      { col: 1, row: 0, value: 5 },
-      { col: 2, row: 0, value: 10 },
-      { col: 3, row: 0, value: 20 },
+    multipliers: [],
+    multiplierSum: 0,
+    scatters: [
+      { col: 0, row: 0 },
+      { col: 1, row: 0 },
+      { col: 2, row: 0 },
+      { col: 3, row: 0 },
     ],
-    multiplierSum: 37,
+    scatterCount: 4,
   });
   try {
     wallet.seedStubBalance("user-6", 5000000000);
     const res = await poseidonService.executeSpin("user-6", 10000);
     assert.equal(res.isFreeSpin, false);
     assert.equal(res.freeSpinsTriggered, true);
-    assert.ok(res.multiplierCount >= TRIGGER_NATURAL_MIN);
+    assert.equal(res.scatterCount, 4);
+    assert.equal(res.multiplierCount, 0);
     assert.equal(res.freeSpinsAwarded, FREE_SPINS_NATURAL);
     assert.equal(res.freeSpinsRemaining, FREE_SPINS_NATURAL);
   } finally {
@@ -547,7 +554,7 @@ test("natural trigger awards 5 free spins on 4+ plaques", async () => {
   }
 });
 
-test("bought bonus retriggers +5 free spins on 3+ plaques", async () => {
+test("bought bonus retriggers +5 free spins on 3+ character heads", async () => {
   const engine = require("../games/poseidon/spinEngine");
   const original = engine.resolveSpin;
   wallet.seedStubBalance("user-6b", 5000000000);
@@ -561,12 +568,9 @@ test("bought bonus retriggers +5 free spins on 3+ plaques", async () => {
     ),
     steps: [],
     baseWin: 0,
-    multipliers: [
-      { col: 0, row: 0, value: 2 },
-      { col: 1, row: 0, value: 5 },
-      { col: 2, row: 0, value: 10 },
-    ],
-    multiplierSum: 17,
+    multipliers: [],
+    multiplierSum: 0,
+    scatterCount: 3,
   });
   try {
     const sessionBefore = await poseidonService.getActiveSession("user-6b");
@@ -574,7 +578,7 @@ test("bought bonus retriggers +5 free spins on 3+ plaques", async () => {
     const res = await poseidonService.executeSpin("user-6b", 10000);
     assert.equal(res.isFreeSpin, true);
     assert.equal(res.freeSpinsAwarded, 5);
-    assert.equal(res.multiplierCount, 3);
+    assert.equal(res.scatterCount, 3);
     // consumed 1 spin, then +5 retrigger
     assert.equal(res.freeSpinsRemaining, before - 1 + 5);
   } finally {
@@ -610,7 +614,7 @@ test("seeded RTP simulation stays in the tuned band", () => {
       remaining -= 1;
       const s = resolveSpin({ bonusMode: true, rng });
       won += winOf(s, true);
-      if (s.multipliers.length >= TRIGGER_RETRIGGER_MIN) remaining += 5;
+      if (s.scatterCount >= TRIGGER_RETRIGGER_MIN) remaining += 5;
     }
     return won;
   };
@@ -619,7 +623,7 @@ test("seeded RTP simulation stays in the tuned band", () => {
     totalBet += 1;
     const s = resolveSpin({ rng });
     let win = winOf(s, false);
-    if (s.multipliers.length >= TRIGGER_NATURAL_MIN) win += playBonus();
+    if ((s.scatterCount || 0) >= TRIGGER_NATURAL_MIN) win += playBonus();
     totalWon += win;
   }
 

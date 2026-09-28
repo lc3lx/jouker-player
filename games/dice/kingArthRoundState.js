@@ -8,8 +8,8 @@ const crypto = require("crypto");
 const LOCK_TTL_MS = 45_000;
 const FREE_SPIN_TTL_SEC = 7 * 24 * 3600;
 const MAX_BANKED_FREE_SPINS = 50;
-const FREE_SPINS_AWARD = 5; // initial trigger (4+ multiplier plaques)
-const RETRIGGER_AWARD = 5; // 3+ scatters during free spins add 5 more
+const FREE_SPINS_AWARD = 5; // 4+ Zeus-head scatters in the base game
+const RETRIGGER_AWARD = 5; // 3+ heads during free spins add 5 more
 
 function roundMoney(n) {
   return Math.round(Number(n) * 100) / 100;
@@ -215,7 +215,7 @@ async function startFreeSpinSession(
 }
 
 /**
- * Initial free-spins award — only on 4+ scatters from a base spin.
+ * Initial free-spins award — only on 4+ Zeus-head scatters from a base spin.
  * @returns {Promise<object|null>}
  */
 async function awardFreeSpins(
@@ -236,7 +236,7 @@ async function awardFreeSpins(
   });
 }
 
-/** Retrigger — add `extra` spins to the active session (3+ scatters in FS). */
+/** Retrigger — add `extra` spins to the active session (3+ Zeus heads in FS). */
 async function addRetriggerSpins(userId, tableId, extra = RETRIGGER_AWARD) {
   const cur = await getFreeSpinSession(userId, tableId);
   if (!cur || cur.remaining <= 0) return null;

@@ -122,6 +122,7 @@ async function resolvePublicCosmeticsForPokerSeats(seats) {
     seatedForTable.push({
       vipLevel: vipMap.get(uid) || null,
       equippedTableTheme: equippedMap.get(uid)?.tableTheme || null,
+      equippedTableAsset: equippedMap.get(uid)?.tableAsset || null,
       seatIndex: Number.isFinite(s.seatIndex) ? s.seatIndex : index,
     });
   }

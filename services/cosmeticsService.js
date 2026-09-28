@@ -127,6 +127,7 @@ function publicCosmeticDisplay(doc) {
 function resolveAssetUrl(assetPath) {
   const p = assetPath ? String(assetPath).trim() : "";
   if (!p) return null;
+  if (p === "/assets/tables/wolf_night.png") return "/assets/tables/wolf_night_clean.png";
   if (p.startsWith("skin/") || p.startsWith("vip/")) return `/assets/${p.replace(/^\/+/, "")}`;
   if (p.startsWith("/assets/") || p.startsWith("http")) return p;
   return `/uploads/cosmetics/${p}`;
@@ -205,6 +206,15 @@ async function ensureDefaultCatalog() {
         { upsert: true }
       );
     }
+  }
+
+  // Add the new table to existing catalogs without overwriting admin prices.
+  const easternTable = DEFAULT_CATALOG.find((row) => row.assetKey === "arabesque_palace");
+  if (easternTable) {
+    await Cosmetic.updateOne(
+      { type: "table_theme", assetKey: easternTable.assetKey },
+      { $setOnInsert: easternTable }, { upsert: true }
+    );
   }
 
   // Country skins: upsert when missing even if the catalog already has items.
@@ -304,10 +314,14 @@ async function getOrCreateUserRow(userId, session) {
 function payloadFromRowAndIdMap(row, idTo) {
   // Data-driven: resolve every equipped slot to its asset key.
   const bySlot = {};
+  const assetBySlot = {};
   for (const [slot, cid] of entriesOf(row.equippedBySlot)) {
     if (!cid) continue;
     const c = idTo.get(String(cid));
-    if (c) bySlot[slot] = c.assetKey;
+    if (c) {
+      bySlot[slot] = c.assetKey;
+      assetBySlot[slot] = resolveAssetUrl(c.previewImage);
+    }
   }
   // Legacy fallback for rows created before the equippedBySlot migration.
   const legacyPairs = [
@@ -318,14 +332,17 @@ function payloadFromRowAndIdMap(row, idTo) {
   for (const [field, slot] of legacyPairs) {
     if (!bySlot[slot] && row.equipped?.[field]) {
       const c = idTo.get(String(row.equipped[field]));
-      if (c) bySlot[slot] = c.assetKey;
+      if (c) {
+        bySlot[slot] = c.assetKey;
+        assetBySlot[slot] = resolveAssetUrl(c.previewImage);
+      }
     }
   }
   const tableTheme = bySlot.table_theme || null;
   const cardSkin = bySlot.card_back || null;
   const avatarFrame = bySlot.avatar_frame || null;
   // `skin` is the public alias for equipped avatar_frame (country skins).
-  return { tableTheme, cardSkin, avatarFrame, skin: avatarFrame, bySlot };
+  return { tableTheme, tableAsset: assetBySlot.table_theme || null, cardSkin, avatarFrame, skin: avatarFrame, bySlot };
 }
 
 /**
@@ -402,6 +419,7 @@ async function dropUnentitledVipEquips(payloads) {
     const avatarFrame = bySlot.avatar_frame || null;
     payloads.set(uid, {
       tableTheme: bySlot.table_theme || null,
+      tableAsset: bySlot.table_theme === p.tableTheme ? p.tableAsset || null : null,
       cardSkin: bySlot.card_back || null,
       avatarFrame,
       skin: avatarFrame,
@@ -429,6 +447,7 @@ async function resolveEquippedPayloadForUsers(userIds) {
     if (p && typeof p === "object") {
       out.set(uid, {
         tableTheme: p.tableTheme ?? null,
+        tableAsset: p.tableAsset ?? null,
         cardSkin: p.cardSkin ?? null,
         avatarFrame: p.avatarFrame ?? null,
         skin: p.skin ?? p.avatarFrame ?? null,
@@ -466,7 +485,7 @@ async function resolveEquippedPayloadForUsers(userIds) {
           _id: { $in: [...cosmeticIds].map((x) => toObjectId(x)).filter(Boolean) },
           isActive: true,
         })
-          .select("assetKey type")
+          .select("assetKey type previewImage")
           .lean()
       : [];
   const idTo = new Map(cDocs.map((c) => [String(c._id), c]));

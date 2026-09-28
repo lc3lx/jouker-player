@@ -4,6 +4,7 @@ const {
   // user
   listCountries,
   listAgents,
+  listAgentRoster,
   createTicket,
   createVipTicket,
   getMyTickets,
@@ -65,6 +66,7 @@ router.use(authService.protect);
 // --- user ---
 router.get("/countries", listCountries);
 router.get("/countries/:country/agents", listAgents);
+router.get("/roster", listAgentRoster);
 router.post("/tickets", createTicketValidator, createTicket);
 router.post("/vip-tickets", createVipTicketValidator, createVipTicket);
 router.get("/tickets", getMyTickets);

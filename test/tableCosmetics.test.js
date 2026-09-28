@@ -41,6 +41,15 @@ test("an equipped theme reaches the felt", () => {
   assert.equal(result.activeTableAsset, null, "a gradient key has no sprite");
 });
 
+test("a custom image follows the winning theme priority, including VIP choice", () => {
+  const selected = resolveActiveTableCosmetics([
+    { seatIndex: 0, equippedTableTheme: "other", equippedTableAsset: "/uploads/cosmetics/other.png" },
+    { seatIndex: 1, vipLevel: "platinum", equippedTableTheme: "moon", equippedTableAsset: "/uploads/cosmetics/moon.png" },
+  ]);
+  assert.equal(selected.activeTableTheme, "moon");
+  assert.equal(selected.activeTableAsset, "/uploads/cosmetics/moon.png");
+});
+
 test("no theme and no VIP leaves the felt alone", () => {
   const result = resolveActiveTableCosmetics([
     { vipLevel: null, equippedTableTheme: null, seatIndex: 0 },

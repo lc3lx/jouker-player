@@ -20,7 +20,7 @@ const {
   SUPER_MULTIPLIER_MIN,
   multiplierValue,
 } = require("./constants");
-const { findWins, collectMultipliers } = require("./winCalculator");
+const { findWins, collectMultipliers, collectScatters } = require("./winCalculator");
 
 /** Hard stop — a legit sequence exhausts long before this. */
 const MAX_TUMBLES = 40;
@@ -214,6 +214,7 @@ function resolveSpin({ bonusMode = false, superBonus = false, rng = secureRandom
   }
 
   const multipliers = collectMultipliers(matrix);
+  const scatters = collectScatters(matrix);
   return {
     initialMatrix,
     finalMatrix: matrix,
@@ -221,6 +222,8 @@ function resolveSpin({ bonusMode = false, superBonus = false, rng = secureRandom
     baseWin,
     multipliers,
     multiplierSum: multipliers.reduce((sum, m) => sum + m.value, 0),
+    scatters,
+    scatterCount: scatters.length,
   };
 }
 

@@ -89,6 +89,7 @@ function resolveTableFelt(seats, vipCosmeticsFor) {
   let best = null;
   let bestRank = 0;
   let equippedTheme = null;
+  let equippedAsset = null;
   let equippedSeat = Infinity;
 
   for (const row of seats || []) {
@@ -103,6 +104,7 @@ function resolveTableFelt(seats, vipCosmeticsFor) {
       if (seat < equippedSeat) {
         equippedSeat = seat;
         equippedTheme = theme;
+        equippedAsset = row.equippedTableAsset || null;
       }
     }
   }
@@ -112,7 +114,7 @@ function resolveTableFelt(seats, vipCosmeticsFor) {
     // the priority, not losing it. Falling straight through to the tier felt
     // here is what made the table impossible to change.
     if (best.equippedTableTheme) {
-      return { activeTableTheme: best.equippedTableTheme, activeTableAsset: null };
+      return { activeTableTheme: best.equippedTableTheme, activeTableAsset: best.equippedTableAsset || null };
     }
     const vip = vipCosmeticsFor(best.vipLevel);
     if (vip?.tableTheme) {
@@ -124,7 +126,7 @@ function resolveTableFelt(seats, vipCosmeticsFor) {
   }
 
   if (equippedTheme) {
-    return { activeTableTheme: equippedTheme, activeTableAsset: null };
+    return { activeTableTheme: equippedTheme, activeTableAsset: equippedAsset };
   }
   return { activeTableTheme: null, activeTableAsset: null };
 }

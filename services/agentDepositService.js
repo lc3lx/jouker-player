@@ -1,6 +1,7 @@
 /**
- * Agent Deposit System — country agents credit users from their own wallet
- * after confirming an out-of-app payment, over a private per-ticket chat.
+ * Agent Deposit System — country agents credit users from their casino
+ * float (not their playing chips) after confirming an out-of-app payment,
+ * over a private per-ticket chat.
  *
  * Reuses: walletLedgerService (atomic transfer), notificationService (+push),
  * auditService (hash-chained log), tableChat sanitize/rate-limit, and the
@@ -22,6 +23,14 @@ const User = require("../models/userModel");
 const WalletTransaction = require("../models/walletTransactionModel");
 const Wallet = require("../models/walletModel");
 const { COUNTRIES, findCountry } = require("../data/countries");
+const {
+  casinoOf,
+  separatePlayerAndCasino,
+  changeCasinoBalance,
+} = require("./agentCasinoBalance");
+
+/** Countries with no dedicated agent are served by this account. */
+const FALLBACK_AGENT_EMAIL = "anasqanbar099@gmail.com";
 const { sanitizeBody, checkRate } = require("../sockets/tableChat");
 const { uploadSingleImage } = require("../middlewares/uploadImageMiddleware");
 const {
@@ -386,21 +395,112 @@ const requireDepositAgent = asyncHandler(async (req, res, next) => {
 // USER endpoints
 // ==============================================================================
 
-exports.listCountries = asyncHandler(async (req, res) => {
-  const codes = await AgentProfile.distinct("deposit.countries", {
-    status: "approved",
-    "deposit.enabled": true,
+async function ensureFallbackAgent() {
+  const user = await User.findOne({
+    email: { $regex: /^anasqanbar099@gmail\.com$/i },
+  }).select("_id");
+  if (!user) return null;
+  await AgentProfile.updateOne(
+    { user: user._id },
+    { $set: { "deposit.coversRemaining": true } }
+  );
+  return user._id;
+}
+
+function ownedCountryCodes(profile) {
+  return (profile?.deposit?.countries || [])
+    .map((c) => String(c).toUpperCase())
+    .filter((c) => findCountry(c));
+}
+
+/** Codes any approved agent lists by name, including the fallback agent. */
+function dedicatedCountrySet(profiles) {
+  const codes = new Set();
+  for (const profile of profiles) {
+    for (const code of ownedCountryCodes(profile)) codes.add(code);
+  }
+  return codes;
+}
+
+function territoryLabel(profile) {
+  const names = ownedCountryCodes(profile)
+    .map((code) => findCountry(code)?.nameAr)
+    .filter(Boolean);
+  if (profile.deposit?.coversRemaining) names.push("باقي الدول");
+  return names.join(" · ");
+}
+
+async function assertAgentServesCountry(profile, rawCountry) {
+  const fallback = ownedCountryCodes(profile)[0] || "";
+  const code = String(rawCountry || fallback || "").toUpperCase();
+  if (!findCountry(code)) return fallback;
+  if (ownedCountryCodes(profile).includes(code)) return code;
+  if (!profile.deposit?.coversRemaining) {
+    throw new ApiError("هذا الوكيل لا يخدم هذه الدولة", 400);
+  }
+  const dedicated = await AgentProfile.exists({
+    ...activeDepositQuery(),
+    _id: { $ne: profile._id },
+    "deposit.countries": code,
   });
-  const codeSet = new Set(codes.map((c) => String(c).toUpperCase()));
-  const counts = await AgentProfile.aggregate([
-    { $match: { status: "approved", "deposit.enabled": true } },
-    { $unwind: "$deposit.countries" },
-    { $group: { _id: "$deposit.countries", agents: { $sum: 1 } } },
-  ]);
-  const countByCode = new Map(counts.map((c) => [String(c._id).toUpperCase(), c.agents]));
-  const data = COUNTRIES.filter((c) => codeSet.has(c.code)).map((c) => ({
+  if (dedicated) throw new ApiError("هذه الدولة لها وكيل مخصص", 400);
+  return code;
+}
+
+function countryPayload(code) {
+  const found = findCountry(code);
+  if (!found) return null;
+  return {
+    code: found.code,
+    nameAr: found.nameAr,
+    flag: found.flag,
+    currency: found.currency,
+  };
+}
+
+function cardFromProfile(profile, { uncovered = [] } = {}) {
+  const owned = ownedCountryCodes(profile)
+    .map(countryPayload)
+    .filter(Boolean);
+  const covers = !!profile.deposit?.coversRemaining;
+  return {
+    agentProfileId: String(profile._id),
+    name: profile.deposit?.displayName || profile.user?.name || "وكيل",
+    avatar: profile.user?.profileImg || null,
+    online: isAgentOnline(profile.user?._id),
+    paymentMethods: profile.deposit?.paymentMethods || [],
+    workingHours: profile.deposit?.workingHours || "",
+    rating: profile.deposit?.rating ?? 5,
+    ratingCount: profile.deposit?.ratingCount || 0,
+    avgResponseMinutes: profile.deposit?.avgResponseMinutes || 0,
+    totalDeposits: profile.deposit?.stats?.totalDeposits || 0,
+    territoryLabel: territoryLabel(profile),
+    coversRemaining: covers,
+    countries: owned,
+    uncoveredCountries: covers ? uncovered : [],
+  };
+}
+
+function activeDepositQuery() {
+  return { status: "approved", "deposit.enabled": true };
+}
+
+exports.listCountries = asyncHandler(async (req, res) => {
+  await ensureFallbackAgent();
+  const profiles = await AgentProfile.find(activeDepositQuery())
+    .select("deposit.countries deposit.coversRemaining")
+    .lean();
+  const hasFallback = profiles.some((p) => p.deposit?.coversRemaining);
+  const countByCode = new Map();
+  for (const profile of profiles) {
+    for (const code of ownedCountryCodes(profile)) {
+      countByCode.set(code, (countByCode.get(code) || 0) + 1);
+    }
+  }
+  const data = COUNTRIES.filter((c) => countByCode.has(c.code) || hasFallback).map((c) => ({
     ...c,
-    agents: countByCode.get(c.code) || 0,
+    agents: countByCode.get(c.code) || (hasFallback ? 1 : 0),
+    coveredByFallback: !countByCode.has(c.code) && hasFallback,
   }));
   res.status(200).json({ status: "success", results: data.length, data });
 });
@@ -409,29 +509,32 @@ exports.listAgents = asyncHandler(async (req, res) => {
   const country = String(req.params.country || "").toUpperCase();
   if (!findCountry(country)) throw new ApiError("دولة غير مدعومة", 400);
 
-  const profiles = await AgentProfile.find({
-    status: "approved",
-    "deposit.enabled": true,
-    "deposit.countries": country,
-  })
+  await ensureFallbackAgent();
+  const profiles = await AgentProfile.find(activeDepositQuery())
     .populate("user", "name profileImg")
     .lean();
-
-  const data = profiles.map((p) => ({
-    agentProfileId: String(p._id),
-    name: p.deposit?.displayName || p.user?.name || "وكيل",
-    avatar: p.user?.profileImg || null,
-    online: isAgentOnline(p.user?._id),
-    paymentMethods: p.deposit?.paymentMethods || [],
-    workingHours: p.deposit?.workingHours || "",
-    rating: p.deposit?.rating ?? 5,
-    ratingCount: p.deposit?.ratingCount || 0,
-    avgResponseMinutes: p.deposit?.avgResponseMinutes || 0,
-    totalDeposits: p.deposit?.stats?.totalDeposits || 0,
-  }));
+  const dedicated = profiles.filter((p) => ownedCountryCodes(p).includes(country));
+  const serving = dedicated.length
+    ? dedicated
+    : profiles.filter((p) => p.deposit?.coversRemaining);
+  const uncovered = COUNTRIES.filter(
+    (c) => !dedicatedCountrySet(profiles).has(c.code)
+  ).map(countryPayload);
+  const data = serving.map((p) => cardFromProfile(p, { uncovered }));
   res
     .status(200)
     .json({ status: "success", results: data.length, data: rankAgents(data) });
+});
+
+exports.listAgentRoster = asyncHandler(async (req, res) => {
+  await ensureFallbackAgent();
+  const profiles = await AgentProfile.find(activeDepositQuery())
+    .populate("user", "name profileImg email")
+    .lean();
+  const dedicated = dedicatedCountrySet(profiles);
+  const uncovered = COUNTRIES.filter((c) => !dedicated.has(c.code)).map(countryPayload);
+  const data = rankAgents(profiles.map((p) => cardFromProfile(p, { uncovered })));
+  res.status(200).json({ status: "success", results: data.length, data });
 });
 
 exports.createTicket = asyncHandler(async (req, res) => {
@@ -470,12 +573,12 @@ exports.createTicket = asyncHandler(async (req, res) => {
     throw new ApiError("لديك عدد كبير من الطلبات المفتوحة", 400);
   }
 
-  const requestedCountry = String(req.body.country || country || "").toUpperCase();
+  const requestedCountry = await assertAgentServesCountry(profile, req.body.country || country);
   const ticket = await DepositTicket.create({
     user: req.user._id,
     agentProfile: profile._id,
     agentUser: profile.user._id,
-    country: findCountry(requestedCountry) ? requestedCountry : country,
+    country: requestedCountry || country,
     amountRequested,
     currency: String(currency).slice(0, 12),
     paymentMethod: sanitizeBody(paymentMethod).slice(0, 60),
@@ -543,13 +646,13 @@ exports.createVipTicket = asyncHandler(async (req, res) => {
   if (pairActive > 0) throw new ApiError("لديك طلب VIP مفتوح مع هذا الوكيل بالفعل", 400);
   if (totalVipActive > 0) throw new ApiError("لديك طلب VIP قيد المعالجة بالفعل", 400);
 
-  const requestedCountry = String(req.body.country || country || "").toUpperCase();
+  const requestedCountry = await assertAgentServesCountry(profile, req.body.country || country);
   const levelLabel = vipLevelLabelAr(level);
   const ticket = await DepositTicket.create({
     user: req.user._id,
     agentProfile: profile._id,
     agentUser: profile.user._id,
-    country: findCountry(requestedCountry) ? requestedCountry : country,
+    country: requestedCountry || country,
     ticketType: "vip",
     vipLevel: level,
     priceUsd,
@@ -1166,10 +1269,12 @@ exports.approveDeposit = asyncHandler(async (req, res) => {
 
   try {
     await withMongoTransaction(async (session) => {
-      await ledgerWithdraw({
+      const profile = await AgentProfile.findOne({ user: req.user._id }).session(session);
+      if (!profile) throw new Error("AGENT_NOT_FOUND");
+      await changeCasinoBalance({
         session,
-        userId: req.user._id,
-        amount: finalAmount,
+        profileId: profile._id,
+        delta: -finalAmount,
         ledgerType: "agent_deposit_out",
         meta: { ticketId: String(prev._id), toUser: String(prev.user) },
       });
@@ -1208,7 +1313,7 @@ exports.approveDeposit = asyncHandler(async (req, res) => {
       { status: prev.status }
     );
     if (err?.message === "INSUFFICIENT_BALANCE" || err?.code === "INSUFFICIENT_BALANCE") {
-      throw new ApiError("رصيد محفظتك غير كافٍ لإتمام الإيداع", 402);
+      throw new ApiError("رصيد الكازينو غير كافٍ لإتمام الإيداع", 402);
     }
     throw err;
   }
@@ -1317,6 +1422,28 @@ function maskEmail(email) {
 }
 
 /**
+ * The id an agent types is the public player number (1, 1001, …).
+ * A Mongo id still works for older clients that already resolved one.
+ * Returns `{ user, invalid }`. `invalid` is a malformed id (400);
+ * a well-formed id that matches nobody is a miss (404).
+ */
+async function resolveCreditTarget(rawId) {
+  const raw = String(rawId || "").trim();
+  const select = "_id name email profileImg active playerId";
+  if (mongoose.isValidObjectId(raw)) {
+    const byId = await User.findById(raw).select(select);
+    return { user: byId, invalid: false };
+  }
+  if (/^\d{1,9}$/.test(raw)) {
+    const n = Number(raw);
+    if (!Number.isSafeInteger(n) || n < 1) return { user: null, invalid: true };
+    const byNumber = await User.findOne({ playerId: n, isBot: { $ne: true } }).select(select);
+    return { user: byNumber, invalid: false };
+  }
+  return { user: null, invalid: true };
+}
+
+/**
  * Credit a player straight from the agent's wallet, found by id or by email.
  *
  * The ticket flow exists because a deposit usually needs a conversation — the
@@ -1356,13 +1483,12 @@ exports.agentDirectCredit = asyncHandler(async (req, res) => {
 
   let target = null;
   if (rawId) {
-    if (!mongoose.isValidObjectId(rawId)) {
-      throw new ApiError("معرّف اللاعب غير صالح", 400);
-    }
-    target = await User.findById(rawId).select("_id name email active");
+    const resolved = await resolveCreditTarget(rawId);
+    if (resolved.invalid) throw new ApiError("معرّف اللاعب غير صالح", 400);
+    target = resolved.user;
   } else {
     target = await User.findOne({ email: rawEmail }).select(
-      "_id name email active"
+      "_id name email active playerId"
     );
   }
   if (!target) throw new ApiError("لم يتم العثور على اللاعب", 404);
@@ -1377,10 +1503,10 @@ exports.agentDirectCredit = asyncHandler(async (req, res) => {
   let ticketId = null;
   try {
     await withMongoTransaction(async (session) => {
-      await ledgerWithdraw({
+      await changeCasinoBalance({
         session,
-        userId: req.user._id,
-        amount,
+        profileId: profile._id,
+        delta: -amount,
         ledgerType: "agent_deposit_out",
         meta: { direct: true, toUser: String(target._id) },
       });
@@ -1425,7 +1551,7 @@ exports.agentDirectCredit = asyncHandler(async (req, res) => {
     });
   } catch (err) {
     if (err?.message === "INSUFFICIENT_BALANCE") {
-      throw new ApiError("رصيدك غير كافٍ", 402);
+      throw new ApiError("رصيد الكازينو غير كافٍ", 402);
     }
     throw err;
   }
@@ -1447,13 +1573,20 @@ exports.agentDirectCredit = asyncHandler(async (req, res) => {
   });
 
   const wallet = await getOrCreateWallet(req.user._id, null);
+  const fresh = await AgentProfile.findById(profile._id).select("deposit.casinoBalance");
   res.status(201).json({
     status: "success",
     data: {
       ticketId: ticketId ? String(ticketId) : null,
       amount,
-      player: { id: String(target._id), name: target.name, email: target.email },
-      agentBalance: wallet.balance,
+      player: {
+        id: String(target._id),
+        playerId: target.playerId || null,
+        name: target.name,
+        email: target.email,
+      },
+      agentBalance: casinoOf(fresh),
+      playerBalance: wallet.balance,
     },
   });
 });
@@ -1469,13 +1602,12 @@ exports.agentLookupPlayer = asyncHandler(async (req, res) => {
 
   let target = null;
   if (rawId) {
-    if (!mongoose.isValidObjectId(rawId)) {
-      throw new ApiError("معرّف اللاعب غير صالح", 400);
-    }
-    target = await User.findById(rawId).select("_id name email profileImg active");
+    const resolved = await resolveCreditTarget(rawId);
+    if (resolved.invalid) throw new ApiError("معرّف اللاعب غير صالح", 400);
+    target = resolved.user;
   } else {
     target = await User.findOne({ email: rawEmail }).select(
-      "_id name email profileImg active"
+      "_id name email profileImg active playerId"
     );
   }
   if (!target) throw new ApiError("لم يتم العثور على اللاعب", 404);
@@ -1484,6 +1616,7 @@ exports.agentLookupPlayer = asyncHandler(async (req, res) => {
     status: "success",
     data: {
       id: String(target._id),
+      playerId: target.playerId || null,
       name: target.name,
       // Enough to recognise the person without handing out full addresses.
       email: maskEmail(target.email),
@@ -1494,7 +1627,15 @@ exports.agentLookupPlayer = asyncHandler(async (req, res) => {
 });
 
 exports.getAgentWalletSummary = asyncHandler(async (req, res) => {
-  const wallet = await getOrCreateWallet(req.user._id, null);
+  const profile = await AgentProfile.findOne({ user: req.user._id });
+  if (!profile) throw new ApiError("لست وكيل إيداع", 404);
+  await withMongoTransaction(async (session) => {
+    await separatePlayerAndCasino(profile._id, session);
+  });
+  const [fresh, wallet] = await Promise.all([
+    AgentProfile.findById(profile._id).select("deposit.casinoBalance"),
+    getOrCreateWallet(req.user._id, null),
+  ]);
 
   const now = new Date();
   const dayStart = new Date(now.getFullYear(), now.getMonth(), now.getDate());
@@ -1533,7 +1674,9 @@ exports.getAgentWalletSummary = asyncHandler(async (req, res) => {
   res.status(200).json({
     status: "success",
     data: {
-      balance: wallet.balance || 0,
+      balance: casinoOf(fresh),
+      casinoBalance: casinoOf(fresh),
+      playerBalance: wallet.balance || 0,
       lockedBalance: wallet.lockedBalance || 0,
       daily: pick(facet.daily),
       monthly: pick(facet.monthly),
@@ -1566,11 +1709,26 @@ exports.adminListAgents = asyncHandler(async (req, res) => {
     .lean();
   const walletByUser = new Map(wallets.map((w) => [String(w.user), w]));
 
+  await ensureFallbackAgent();
+  for (const row of rows) {
+    if (!row.deposit?.floatSeparated) {
+      await withMongoTransaction(async (session) => {
+        await separatePlayerAndCasino(row._id, session);
+      });
+    }
+  }
+  const fresh = await AgentProfile.find({ _id: { $in: rows.map((p) => p._id) } })
+    .select("deposit.casinoBalance deposit.coversRemaining deposit.floatSeparated")
+    .lean();
+  const freshById = new Map(fresh.map((p) => [String(p._id), p]));
+
   res.status(200).json({
     status: "success",
     results: rows.length,
     data: rows.map((p) => {
       const wallet = walletByUser.get(String(p.user?._id || ""));
+      const current = freshById.get(String(p._id));
+      const casinoBalance = casinoOf(current || p);
       return {
         agentProfileId: String(p._id),
         user: briefUser(p.user),
@@ -1578,12 +1736,21 @@ exports.adminListAgents = asyncHandler(async (req, res) => {
         status: p.status,
         displayName: p.deposit?.displayName || "",
         countries: p.deposit?.countries || [],
+        coversRemaining: !!(current?.deposit?.coversRemaining ?? p.deposit?.coversRemaining),
+        territoryLabel: territoryLabel({
+          deposit: {
+            countries: p.deposit?.countries,
+            coversRemaining: current?.deposit?.coversRemaining ?? p.deposit?.coversRemaining,
+          },
+        }),
         paymentMethods: p.deposit?.paymentMethods || [],
         workingHours: p.deposit?.workingHours || "",
         depositEnabled: !!p.deposit?.enabled,
         online: isAgentOnline(p.user?._id),
         stats: p.deposit?.stats || {},
-        balance: wallet?.balance ?? 0,
+        balance: casinoBalance,
+        casinoBalance,
+        playerBalance: wallet?.balance ?? 0,
         lockedBalance: wallet?.lockedBalance ?? 0,
       };
     }),
@@ -1694,46 +1861,39 @@ async function adminAdjustAgentWallet(req, res, direction) {
   if (!profile) throw new ApiError("الوكيل غير موجود", 404);
 
   try {
-    await withMongoTransaction(async (session) => {
-      if (direction === "credit") {
-        await ledgerDeposit({
-          session,
-          userId: profile.user,
-          amount,
-          ledgerType: "admin_agent_credit",
-          meta: { by: String(req.user._id) },
-        });
-      } else {
-        await ledgerWithdraw({
-          session,
-          userId: profile.user,
-          amount,
-          ledgerType: "admin_agent_debit",
-          meta: { by: String(req.user._id) },
-        });
-      }
+    const casinoBalance = await withMongoTransaction(async (session) =>
+      changeCasinoBalance({
+        session,
+        profileId: profile._id,
+        delta: direction === "credit" ? amount : -amount,
+        ledgerType: direction === "credit" ? "admin_agent_credit" : "admin_agent_debit",
+        meta: { by: String(req.user._id) },
+      })
+    );
+    logEvent({
+      event: direction === "credit" ? "agent_wallet_recharged" : "agent_wallet_withdrawn",
+      actor: req.user._id,
+      targetUser: profile.user,
+      meta: { amount, purse: "casino" },
+      ip: req.ip,
+      userAgent: req.headers["user-agent"],
+    });
+    const wallet = await getOrCreateWallet(profile.user, null);
+    res.status(200).json({
+      status: "success",
+      data: {
+        balance: casinoBalance,
+        casinoBalance,
+        playerBalance: wallet.balance,
+        lockedBalance: wallet.lockedBalance,
+      },
     });
   } catch (err) {
     if (err?.message === "INSUFFICIENT_BALANCE") {
-      throw new ApiError("رصيد الوكيل غير كافٍ", 402);
+      throw new ApiError("رصيد الكازينو غير كافٍ", 402);
     }
     throw err;
   }
-
-  logEvent({
-    event: direction === "credit" ? "agent_wallet_recharged" : "agent_wallet_withdrawn",
-    actor: req.user._id,
-    targetUser: profile.user,
-    meta: { amount },
-    ip: req.ip,
-    userAgent: req.headers["user-agent"],
-  });
-
-  const wallet = await getOrCreateWallet(profile.user, null);
-  res.status(200).json({
-    status: "success",
-    data: { balance: wallet.balance, lockedBalance: wallet.lockedBalance },
-  });
 }
 
 exports.adminRechargeAgentWallet = asyncHandler((req, res) =>
@@ -1752,6 +1912,10 @@ exports.adminGetAgentWallet = asyncHandler(async (req, res) => {
   if (!profile) throw new ApiError("الوكيل غير موجود", 404);
 
   const wallet = await getOrCreateWallet(profile.user._id, null);
+  await withMongoTransaction(async (session) => {
+    await separatePlayerAndCasino(profile._id, session);
+  });
+  const fresh = await AgentProfile.findById(profile._id).select("deposit.casinoBalance deposit.stats");
   const transactions = await WalletTransaction.find({
     userId: profile.user._id,
     type: {
@@ -1766,9 +1930,11 @@ exports.adminGetAgentWallet = asyncHandler(async (req, res) => {
     status: "success",
     data: {
       user: briefUser(profile.user),
-      balance: wallet.balance,
+      balance: casinoOf(fresh),
+      casinoBalance: casinoOf(fresh),
+      playerBalance: wallet.balance,
       lockedBalance: wallet.lockedBalance,
-      stats: profile.deposit?.stats || {},
+      stats: fresh.deposit?.stats || profile.deposit?.stats || {},
       transactions: transactions.map((t) => ({
         id: String(t._id),
         type: t.type,

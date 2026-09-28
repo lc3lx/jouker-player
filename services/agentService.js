@@ -2,7 +2,6 @@ const asyncHandler = require("express-async-handler");
 const ApiError = require("../utils/apiError");
 const AgentProfile = require("../models/agentProfileModel");
 const SystemSettings = require("../models/systemSettingsModel");
-const Wallet = require("../models/walletModel");
 const User = require("../models/userModel");
 
 exports.applyAgent = asyncHandler(async (req, res, next) => {
@@ -88,9 +87,6 @@ exports.topupByAgent = asyncHandler(async (req, res, next) => {
   if (!targetUserId || !amount || amount <= 0) return next(new ApiError("Invalid input", 400));
   const profile = await AgentProfile.findOne({ user: req.user._id });
   if (!profile || profile.status !== "approved") return next(new ApiError("Not an approved agent", 403));
-  const agentWallet = await Wallet.findOne({ user: req.user._id });
-  if (!agentWallet) return next(new ApiError("Agent wallet not found", 404));
-  if (!agentWallet.hasSufficientBalance(amount)) return next(new ApiError("Insufficient balance", 400));
   const targetUser = await User.findById(targetUserId);
   if (!targetUser) return next(new ApiError("Target user not found", 404));
   const percent =
@@ -101,16 +97,16 @@ exports.topupByAgent = asyncHandler(async (req, res, next) => {
 
   const {
     withMongoTransaction,
-    ledgerWithdraw,
     ledgerDeposit,
   } = require("./walletLedgerService");
+  const { changeCasinoBalance } = require("./agentCasinoBalance");
 
   try {
     await withMongoTransaction(async (session) => {
-      await ledgerWithdraw({
+      await changeCasinoBalance({
         session,
-        userId: req.user._id,
-        amount: Math.round(amount),
+        profileId: profile._id,
+        delta: -Math.round(amount),
         ledgerType: "agent_deposit_out",
         meta: {
           source: "agent_topup",
