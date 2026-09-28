@@ -423,11 +423,11 @@ function dedicatedCountrySet(profiles) {
 }
 
 function territoryLabel(profile) {
-  const names = ownedCountryCodes(profile)
+  if (profile.deposit?.coversRemaining) return "باقي الدول";
+  return ownedCountryCodes(profile)
     .map((code) => findCountry(code)?.nameAr)
-    .filter(Boolean);
-  if (profile.deposit?.coversRemaining) names.push("باقي الدول");
-  return names.join(" · ");
+    .filter(Boolean)
+    .join(" · ");
 }
 
 async function assertAgentServesCountry(profile, rawCountry) {
@@ -533,7 +533,11 @@ exports.listAgentRoster = asyncHandler(async (req, res) => {
     .lean();
   const dedicated = dedicatedCountrySet(profiles);
   const uncovered = COUNTRIES.filter((c) => !dedicated.has(c.code)).map(countryPayload);
-  const data = rankAgents(profiles.map((p) => cardFromProfile(p, { uncovered })));
+  const ranked = rankAgents(profiles.map((p) => cardFromProfile(p, { uncovered })));
+  const data = [
+    ...ranked.filter((card) => !card.coversRemaining),
+    ...ranked.filter((card) => card.coversRemaining),
+  ];
   res.status(200).json({ status: "success", results: data.length, data });
 });
 
