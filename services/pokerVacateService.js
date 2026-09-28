@@ -331,7 +331,26 @@ async function finalizeVacateWithBot({ tableId, userId, chips }) {
 }
 
 /**
+ * Prefer the live engine over Mongo `status`: tables often stay "playing"
+ * between hands, and force-cashing Mongo seat.chips mid-hand would refund
+ * chips that are already committed to the pot in RAM.
+ * @returns {boolean|null} true/false when a local engine exists, else null
+ */
+function isLiveHandInProgress(tableId) {
+  try {
+    const snap = getTableGameBridge().getTableGameDebugSnapshot(String(tableId));
+    if (!snap) return null;
+    const round = String(snap.round || "idle");
+    return snap.running === true && round !== "idle";
+  } catch (_) {
+    return null;
+  }
+}
+
+/**
  * Permanent leave: cash out, clear vacate window, reset table if last human.
+ * Never cash out while a live hand or settlement is in progress unless `force`
+ * (admin only) — committed bets must settle into the pot first.
  */
 async function permanentLeavePokerTable({
   tableId,
@@ -339,6 +358,8 @@ async function permanentLeavePokerTable({
   clientIp = null,
   deviceId = null,
   force = false,
+  /** When the owner engine calls leave, pass true/false so stale Mongo status cannot block or unlock incorrectly. */
+  liveHandInProgress = undefined,
 }) {
   const tid = String(tableId);
   const uid = String(userId);
@@ -350,11 +371,15 @@ async function permanentLeavePokerTable({
     await withMongoTransaction(async (session) => {
       const table = await Table.findById(tid).session(session);
       if (!table || table.gameType !== "poker") throw new Error("NOT_POKER");
-      const lastHuman = remainingHumansAfterLeave(table, uid) === 0;
-      // Disconnect / last human: leave now. A polite in-hand leave still waits
-      // for settlement when other humans remain.
-      if (!force && !lastHuman && table.status === "playing") throw new Error("HAND_IN_PROGRESS");
-      if (!force && !lastHuman && table.activeSettlementId) throw new Error("SETTLEMENT_IN_PROGRESS");
+      // Settlement lock always blocks a non-force cash-out (chip race).
+      if (!force && table.activeSettlementId) throw new Error("SETTLEMENT_IN_PROGRESS");
+      // Owner-engine hint beats registry lookup; registry beats stale Mongo status.
+      let liveHand = liveHandInProgress;
+      if (liveHand === undefined) liveHand = isLiveHandInProgress(tid);
+      if (!force && liveHand === true) throw new Error("HAND_IN_PROGRESS");
+      if (!force && liveHand === null && table.status === "playing") {
+        throw new Error("HAND_IN_PROGRESS");
+      }
 
       const vacEntry = findActiveVacatingEntry(table, uid);
       if (vacEntry) {
@@ -548,6 +573,7 @@ module.exports = {
   tryRestoreVacatedSeat,
   finalizeVacateWithBot,
   permanentLeavePokerTable,
+  isLiveHandInProgress,
   isUserRejoinBlocked,
   userCannotRejoinPokerTable,
   remainingHumansAfterLeave,

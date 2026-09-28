@@ -69,7 +69,8 @@ async function releaseSocket(tableId, userId, socketId) {
     multi.sCard(k);
     const result = await multi.exec();
     const remaining = Number(result?.[1]) || 0;
-    if (remaining <= 0) await redisClient.del(k);
+    // Redis removes an empty set itself. DEL after EXEC could erase a socket
+    // that just reconnected between the transaction and the deletion.
     return remaining;
   }
   const set = memSets.get(k);
@@ -79,7 +80,13 @@ async function releaseSocket(tableId, userId, socketId) {
   return set.size;
 }
 
+async function countSockets(tableId, userId) {
+  const k = key(tableId, userId);
+  return redisClient ? Number(await redisClient.sCard(k)) || 0 : memSets.get(k)?.size || 0;
+}
+
 module.exports = {
+  countSockets,
   TTL_SEC,
   POKER_TTL_SEC,
   setRedisClient,

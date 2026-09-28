@@ -355,6 +355,77 @@ test("broadcastState emits per seated socket without reconnect_state", async () 
   assert.ok(socketEvents.includes("table_state"));
   assert.ok(socketEvents.includes("table_state_me"));
   assert.equal(socketEvents.filter((e) => e === "reconnect_state").length, 0);
+  assert.equal(socketEvents.filter((e) => e === "state").length, 0);
+  assert.equal(socketEvents.filter((e) => e === "state:me").length, 0);
+});
+
+test("saveSnapshot Redis blip keeps ownership so the live loop continues", async () => {
+  const g = mkGame();
+  g.isOwner = true;
+  g.running = true;
+  g.stateStore = {
+    isEnabled: () => true,
+    async save() {
+      throw new Error("redis_timeout");
+    },
+  };
+  g.disposeTimers = () => {
+    throw new Error("disposeTimers must not run on soft-fail");
+  };
+  const ok = await g.saveSnapshot();
+  assert.equal(ok, true);
+  assert.equal(g.isOwner, true);
+  assert.equal(g.running, true);
+});
+
+test("lock-busy action reject echoes actionId so the client can unlock", async () => {
+  const g = mkGame();
+  g.running = true;
+  g.round = "flop";
+  g.currentIndex = 0;
+  seatSetup(g, 1);
+  g.seats[0].userId = "u1";
+  g.acquireActionLock = async () => false;
+  const res = await g.handleAction("u1", {
+    action: "check",
+    actionId: "client-lock-1",
+  });
+  assert.equal(res.status, "rejected");
+  assert.equal(res.reason, "INVALID_ACTION");
+  assert.equal(res.actionId, "client-lock-1");
+});
+
+test("adminClearSettlementFreeze with force clears settlement freeze", async () => {
+  const g = mkGame();
+  g.frozen = true;
+  g.frozenReason = "settlement";
+  g.running = false;
+  g.broadcastState = async () => {};
+  g.beginNextHandIfPossible = async () => {};
+  const forced = await g.adminClearSettlementFreeze({ force: true });
+  assert.equal(forced.ok, true);
+  assert.equal(forced.forced, true);
+  assert.equal(g.frozen, false);
+  assert.equal(g.frozenReason, null);
+});
+
+test("adminClearSettlementFreeze without force needs HandHistory or fails", async () => {
+  const HandHistory = require("../models/handHistoryModel");
+  const prev = HandHistory.exists;
+  HandHistory.exists = async () => null;
+  try {
+    const g = mkGame();
+    g.frozen = true;
+    g.frozenReason = "settlement";
+    g.running = false;
+    g.currentHandId = "hand-unsettle-1";
+    g.broadcastState = async () => {};
+    const denied = await g.adminClearSettlementFreeze({ force: false });
+    assert.equal(denied.ok, false);
+    assert.equal(denied.reason, "HAND_NOT_SETTLED");
+  } finally {
+    HandHistory.exists = prev;
+  }
 });
 
 test("duplicate actionId rejected — concurrency guard", async () => {

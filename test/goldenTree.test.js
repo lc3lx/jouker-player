@@ -36,6 +36,19 @@ function emptyMatrix(fill = SYMBOLS.CHERRY) {
   return Array.from({ length: 5 }, () => Array(3).fill(fill));
 }
 
+test("all twenty complete winning shapes return every cell for rendering", () => {
+  for (let lineIndex = 0; lineIndex < PAYLINES.length; lineIndex++) {
+    const shape = PAYLINES[lineIndex];
+    const matrix = emptyMatrix(SYMBOLS.JACKPOT);
+    shape.forEach((row, col) => { matrix[col][row] = SYMBOLS.CHERRY; });
+    const result = calculateWins(matrix, {}, 10000);
+    const win = result.lineWins.find(w => w.lineIndex === lineIndex);
+    assert.ok(win, 'missing line ' + lineIndex);
+    assert.equal(win.count, 5);
+    assert.deepEqual(win.positions, shape.map((row, col) => ({ col, row })));
+  }
+});
+
 function jackpotTriggerRate(strips) {
   let distribution = [1];
 
@@ -103,8 +116,9 @@ function atLeastThreeIndependentCells(cellCount, cellChance) {
   return probability;
 }
 
-test("ten fixed paylines", () => {
-  assert.equal(PAYLINES.length, 10);
+test("twenty unique fixed paylines", () => {
+  assert.equal(PAYLINES.length, 20);
+  assert.equal(new Set(PAYLINES.map(line => line.join(","))).size, 20);
   for (const line of PAYLINES) {
     assert.equal(line.length, 5);
     assert.ok(line.every((row) => row >= 0 && row <= 2));
@@ -161,7 +175,7 @@ test("corner-touch diagonal cherries DO pay", () => {
   assert.equal(cherry.amount, basePayout(SYMBOLS.CHERRY, 3, 10000));
 });
 
-test("bananas not forming one of the 10 paylines do not pay", () => {
+test("new zigzag banana paths pay on lines 12 and 16", () => {
   // Bananas on (0,1), (1,0), (2,1) do not match any of the 10 paylines for 3 matches.
   const matrix = [
     [SYMBOLS.PINEAPPLE, SYMBOLS.BANANA, SYMBOLS.BANANA],
@@ -173,8 +187,8 @@ test("bananas not forming one of the 10 paylines do not pay", () => {
 
   const result = calculateWins(matrix, {}, 10000, { bonusMode: false });
   const bananaWins = result.lineWins.filter((w) => w.symbol === SYMBOLS.BANANA);
-  assert.equal(bananaWins.length, 0);
-  assert.equal(result.totalWin, 0);
+  assert.deepEqual(bananaWins.map(w => w.lineIndex), [11, 15]);
+  assert.equal(result.totalWin, 2 * basePayout(SYMBOLS.BANANA, 3, 10000));
 });
 
 test("horizontal 3 cherries on one row pay", () => {
@@ -382,8 +396,8 @@ test("screenshot oranges — fixed paylines matching matrix pay", () => {
   assert.ok(keys.has("0,0>1,0>2,0"), "top row");
   assert.ok(keys.has("0,1>1,1>2,1"), "middle row");
   assert.ok(keys.has("0,0>1,1>2,2"), "V-shape");
-  assert.equal(result.lineWins.length, 6);
-  assert.equal(result.totalWin, 6 * basePayout(SYMBOLS.ORANGE, 3, bet));
+  assert.equal(result.lineWins.length, 11);
+  assert.equal(result.totalWin, 11 * basePayout(SYMBOLS.ORANGE, 3, bet));
 });
 
 test("orange and cherry use identical match rules on the same shape", () => {
@@ -894,14 +908,12 @@ test("forceTrees plants the triple only on columns 1-3", () => {
   }
 });
 
-test("bonus spins use denser strips but do not inject three trees", () => {
-  // Across many spins some must have zero trees — proves no force-plant.
-  let empty = 0;
+test("every bonus spin guarantees all three tree reels", () => {
   for (let i = 0; i < 400; i += 1) {
-    const { wildMultipliers } = generateSpin({ bonusMode: true });
-    if (Object.keys(wildMultipliers).length === 0) empty += 1;
+    const { matrix, wildMultipliers } = generateSpin({ bonusMode: true });
+    assert.equal(Object.keys(wildMultipliers).length, 3);
+    for (const col of [1, 2, 3]) assert.equal(matrix[col][WILD_ROW], SYMBOLS.WILD);
   }
-  assert.ok(empty >= 20, `expected some empty-tree bonus spins, got ${empty}/400`);
 });
 
 test("bonus spins never plant a tree on columns 0 or 4", () => {
@@ -915,33 +927,19 @@ test("bonus spins never plant a tree on columns 0 or 4", () => {
   }
 });
 
-test("a bonus round rolls its tree count instead of forcing three", () => {
-  const rounds = 4000;
-  const seen = new Map();
-  for (let i = 0; i < rounds; i += 1) {
-    const count = pickForcedTreeCount();
-    seen.set(count, (seen.get(count) || 0) + 1);
-  }
-
-  // Every tier the weights declare must actually occur — a bonus spin can come
-  // up empty, and the full triple must stay the rare one.
-  for (const [count] of BONUS_FORCED_TREE_WEIGHTS) {
-    assert.ok((seen.get(count) || 0) > 0, `tree count ${count} never rolled`);
-  }
-  assert.ok(
-    seen.get(3) / rounds < seen.get(0) / rounds,
-    "three trees must be rarer than an empty spin",
-  );
+test("legacy bonus count callers also receive the guaranteed triple", () => {
+  assert.deepEqual(BONUS_FORCED_TREE_WEIGHTS, [[3, 1]]);
+  for (let i = 0; i < 100; i++) assert.equal(pickForcedTreeCount(), 3);
 });
 
-test("a rolled tree count lands exactly that many trees", () => {
+test("bonus guarantee overrides stale caller tree counts", () => {
   for (let count = 0; count <= 3; count += 1) {
     for (let i = 0; i < 200; i += 1) {
       const { matrix } = generateSpin({ bonusMode: true, forceTreeCount: count });
       const trees = [1, 2, 3].filter(
         (col) => matrix[col][WILD_ROW] === SYMBOLS.WILD,
       ).length;
-      assert.equal(trees, count);
+      assert.equal(trees, 3);
     }
   }
 });
@@ -980,9 +978,9 @@ test("wild placements are staggered across bonus reels", () => {
   );
 });
 
-test("jackpot strips use isolated symbols at Zeus-scale rarity", () => {
+test("jackpot strips use isolated symbols with the v10 rarity budget", () => {
   assert.equal(JACKPOT_REEL_WEIGHT, 1);
-  assert.equal(JACKPOT_WINDOW_ACTIVATION_ODDS, 6);
+  assert.equal(JACKPOT_WINDOW_ACTIVATION_ODDS, 60);
 
   for (const strip of [...MAIN_REEL_STRIPS, ...BONUS_REEL_STRIPS]) {
     assert.equal(
@@ -1012,8 +1010,8 @@ test("jackpot strips use isolated symbols at Zeus-scale rarity", () => {
   );
 
   // Headroom vs Zeus reference after scatter-strip removal / wild-dense bonus.
-  assert.ok(mainRate >= 0.00009 && mainRate <= zeusMainRate * 1.45);
-  assert.ok(bonusRate >= 0.00009 && bonusRate <= zeusBonusRate * 1.45);
+  assert.ok(mainRate > 0 && mainRate < 0.000001 && mainRate <= zeusMainRate * 1.45);
+  assert.ok(bonusRate > 0 && bonusRate < 0.000001 && bonusRate <= zeusBonusRate * 1.45);
 });
 
 test("a degenerate rng cannot line up a jackpot cluster", () => {

@@ -1473,16 +1473,14 @@ exports.leaveTable = asyncHandler(async (req, res, next) => {
 
   // A table seat holds its start-of-hand stack until the pot is settled. A
   // voluntary exit while playing therefore becomes an in-engine fold plus a
-  // deferred, idempotent cash-out.
+  // deferred, idempotent cash-out. lastHuman no longer bypasses: mid-hand
+  // Mongo seat.chips still includes chips committed to the pot.
   const livePoker = table.gameType === "poker"
     ? getTableGameDebugSnapshot(String(id))
     : null;
-  const { remainingHumansAfterLeave } = require("./pokerVacateService");
-  const lastHuman =
-    table.gameType === "poker" && remainingHumansAfterLeave(table, req.user._id) === 0;
-  const pokerHandInProgress = table.gameType === "poker" && !lastHuman && (
-    table.status === "playing" ||
-    (livePoker?.running === true && String(livePoker?.round || "idle") !== "idle")
+  const pokerHandInProgress = table.gameType === "poker" && (
+    (livePoker?.running === true && String(livePoker?.round || "idle") !== "idle") ||
+    (!livePoker && table.status === "playing")
   );
   if (pokerHandInProgress) {
     const handClientIp = String(

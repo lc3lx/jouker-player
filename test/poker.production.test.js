@@ -106,8 +106,8 @@ function createAllocationStore() {
 test("production timings defaults", () => {
   assert.equal(POKER_TIMINGS.TURN_SECONDS, 20);
   assert.equal(POKER_TIMINGS.PREFLOP_DEAL_MS, 2000);
-  assert.equal(POKER_TIMINGS.NEXT_HAND_DELAY_MS, 9000);
-  assert.equal(POKER_TIMINGS.RECONNECT_WINDOW_MS, 90000);
+  assert.equal(POKER_TIMINGS.NEXT_HAND_DELAY_MS, 5000);
+  assert.equal(POKER_TIMINGS.RECONNECT_WINDOW_MS, 30000);
 });
 
 test("WAITING mid-hand joiners are not dealt", () => {

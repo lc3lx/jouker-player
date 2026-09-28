@@ -11,6 +11,8 @@ const {
   buildAdminRealtimeTablePayload,
   getLiveTableGameForAdmin,
   adminForceEndHandTable,
+  adminRetrySettlementTable,
+  adminClearSettlementFreezeTable,
 } = require("../sockets/tableGame");
 
 exports.adminListTables = asyncHandler(async (req, res) => {
@@ -125,6 +127,27 @@ exports.adminForceEndHand = asyncHandler(async (req, res) => {
   }
   const result = await adminForceEndHandTable(String(tableId));
   res.status(200).json({ status: "success", data: result });
+});
+
+exports.adminRetrySettlement = asyncHandler(async (req, res) => {
+  const tableId = req.body?.tableId || req.query?.tableId;
+  if (!tableId) {
+    return res.status(400).json({ status: "error", message: "tableId is required" });
+  }
+  const result = await adminRetrySettlementTable(String(tableId));
+  const status = result?.ok ? 200 : 409;
+  res.status(status).json({ status: result?.ok ? "success" : "error", data: result });
+});
+
+exports.adminClearSettlementFreeze = asyncHandler(async (req, res) => {
+  const tableId = req.body?.tableId || req.query?.tableId;
+  if (!tableId) {
+    return res.status(400).json({ status: "error", message: "tableId is required" });
+  }
+  const force = req.body?.force === true || req.query?.force === "true";
+  const result = await adminClearSettlementFreezeTable(String(tableId), { force });
+  const status = result?.ok ? 200 : 409;
+  res.status(status).json({ status: result?.ok ? "success" : "error", data: result });
 });
 
 exports.adminGetTableLifecycleSettings = asyncHandler(async (req, res) => {

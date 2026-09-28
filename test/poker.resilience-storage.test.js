@@ -53,5 +53,25 @@ test("socket presence is idempotent per socket and retains another active device
   assert.equal(await presence.registerSocket(tableId, "u1", "socket-a"), 1);
   assert.equal(await presence.registerSocket(tableId, "u1", "socket-b"), 2);
   assert.equal(await presence.releaseSocket(tableId, "u1", "socket-a"), 1);
+  assert.equal(await presence.countSockets(tableId, "u1"), 1);
   assert.equal(await presence.releaseSocket(tableId, "u1", "socket-b"), 0);
+  assert.equal(await presence.countSockets(tableId, "u1"), 0);
+});
+
+test("releasing the last Redis socket cannot delete a concurrently reconnected socket", async () => {
+  let deleted = false;
+  presence.setRedisClient({
+    multi() {
+      return { sRem() {}, sCard() {}, async exec() { return [1, 0]; } };
+    },
+    async del() { deleted = true; },
+    async sCard() { return 1; }, // a reconnect just followed EXEC
+  });
+  try {
+    assert.equal(await presence.releaseSocket("table-race", "u1", "old"), 0);
+    assert.equal(deleted, false);
+    assert.equal(await presence.countSockets("table-race", "u1"), 1);
+  } finally {
+    presence.setRedisClient(null);
+  }
 });

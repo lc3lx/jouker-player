@@ -14,7 +14,7 @@ const { SYMBOLS, WILD_REELS } = require("./constants");
 // cluster of jackpot scatters. `spinEngine` then activates those stops only
 // one time in six, which puts the 3+ trigger slightly below Zeus' rate.
 const JACKPOT_REEL_WEIGHT = 1;
-const JACKPOT_WINDOW_ACTIVATION_ODDS = 6;
+const JACKPOT_WINDOW_ACTIVATION_ODDS = 60;
 
 /**
  * Main game: middle-row trees on reels 2–4. The plain (×1) tree is the tier a

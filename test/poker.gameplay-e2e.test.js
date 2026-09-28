@@ -443,19 +443,12 @@ test("CHAOS: player disconnect + turn timeout folds the actor and advances", asy
   // Heads-up: the first actor (SB) owes a call — a disconnect + timeout must fold.
   const owes = g.currentBet - actor.bet;
   g.onPlayerSocketDisconnected(actor.userId);
-  const deadline = Date.now() + 2000;
-  while (
-    Date.now() < deadline &&
-    g.seats.some((s) => String(s.userId) === String(actor.userId))
-  ) {
-    await new Promise((resolve) => setTimeout(resolve, 40));
-  }
-
-  assert.equal(
-    g.seats.some((s) => String(s.userId) === String(actor.userId)),
-    false,
-    "disconnect removes the player immediately"
-  );
+  assert.equal(actor.playerState, "DISCONNECTED");
+  assert.equal(actor.folded, false, "socket drop alone never folds the hand");
+  g.actionDeadline = Date.now() - 1;
+  await g.handleTimeout();
+  assert.ok(g.seats.some((s) => String(s.userId) === String(actor.userId)),
+    "turn timeout keeps the disconnected player's chair during grace");
   if (owes > 0) {
     assert.ok(["idle", "preflop"].includes(g.round));
   }
@@ -589,20 +582,162 @@ test("DURABLE LEAVE: an in-hand leave intent survives until the settled stack is
   assert.equal(await walletLocked(uid), 0, "the final stack is released from the table lock");
 });
 
-test("WIRING: socket drop cashes out immediately with no 30s vacate window", async () => {
-  const { g } = await makeSeatedGame(2, 10000);
+test("WIRING: socket drop retains wallet and chair; grace expiry safely cashes out once", async () => {
+  const { g, buyIn } = await makeSeatedGame(2, 10000);
   const uid = g.seats[0].userId;
 
   g.onPlayerSocketDisconnected(uid);
-  assert.equal(g.seats[0].playerState, "LEAVE_PENDING");
+  assert.equal(g.seats[0].playerState, "DISCONNECTED");
 
   await new Promise((resolve) => setTimeout(resolve, 80));
 
   const table = await Table.findById(g.tableId).lean();
   assert.equal(
     table.seats.some((seat) => String(seat.user) === uid),
-    false,
-    "disconnected player is removed from the table"
+    true,
+    "disconnected player's seat stays in the table"
   );
+  assert.equal(await walletLocked(uid), buyIn);
+  await Table.updateOne({ _id: g.tableId }, { $set: { status: "waiting" } });
+  const expired = Date.now() - 1;
+  g.seats[0].reconnectDeadline = expired;
+  await g.expireRecoveredReconnect(uid, expired);
+  await g.expireRecoveredReconnect(uid, expired);
+  const after = await Wallet.findOne({ user: uid }).lean();
+  assert.equal(after.balance, buyIn, "full idle stack returned exactly once");
+  assert.equal(after.lockedBalance, 0);
   g.disposeTimers();
+});
+
+test("GRACE EXPIRY all-in winner retains the pot and cashes out winnings exactly once", async () => {
+  await resetHouse();
+  process.env.RAKE_PERCENT = "0";
+  const { g, users } = await makeSeatedGame(2, 10000);
+  try {
+    g.running = true;
+    g.round = "flop";
+    g.currentHandId = `${g.tableId}-grace-allin`;
+    for (const s of g.seats) {
+      Object.assign(s, { handStartChips: 10000, chips: 0, invested: 10000,
+        inHand: true, folded: false, allIn: true, bet: 0 });
+    }
+    g.pot = 20000;
+    g.handStartTotal = 20000;
+    g.handJackpotFees = 0;
+    const uid = String(users[0]);
+    g.onPlayerSocketDisconnected(uid);
+    const deadline = Date.now() - 1;
+    g.seats[0].reconnectDeadline = deadline;
+    await g.expireRecoveredReconnect(uid, deadline);
+    assert.equal(g.seats[0].folded, false);
+    assert.equal(await walletLocked(uid), 10000, "no premature cash-out");
+    await g.persistAndPrepareNext([], new Map([[0, 20000]]), [0],
+      { reason: "showdown" }, { manageLifecycle: false });
+    const { permanentLeavePokerTable } = require("../services/pokerVacateService");
+    await permanentLeavePokerTable({ tableId: g.tableId, userId: uid, liveHandInProgress: false });
+    await permanentLeavePokerTable({ tableId: g.tableId, userId: uid, liveHandInProgress: false });
+    const wallet = await Wallet.findOne({ user: uid }).lean();
+    assert.equal(wallet.balance, 20000);
+    assert.equal(wallet.lockedBalance, 0);
+  } finally {
+    g.disposeTimers();
+    process.env.RAKE_PERCENT = "0.05";
+  }
+});
+
+test("GRACE EXPIRY mid-hand: committed bet stays in pot; wallet gets settled stack", async () => {
+  await resetHouse();
+  const { g, buyIn } = await makeSeatedGame(3, 10000);
+
+  g.running = true;
+  await g.startHand();
+  assert.equal(g.running, true);
+  assert.notEqual(g.round, "idle");
+
+  const leaverIdx = g.seats.findIndex((s) => !s.isBot && s.invested > 0);
+  assert.ok(leaverIdx >= 0, "need a seated human with blinds in the pot");
+  const uid = String(g.seats[leaverIdx].userId);
+  const invested = g.seats[leaverIdx].invested;
+  const uncommitted = g.seats[leaverIdx].chips;
+  assert.ok(invested > 0, "leaver has blinds/bet in the pot");
+  assert.equal(invested + uncommitted, buyIn, "stack split = buy-in");
+
+  const potBefore = g.pot;
+  const balBefore = (await Wallet.findOne({ user: uid }).lean()).balance;
+  assert.equal(balBefore, 0);
+
+  g.onPlayerSocketDisconnected(uid);
+  const expiry = Date.now() - 1;
+  g.seats[leaverIdx].reconnectDeadline = expiry;
+  await g.expireRecoveredReconnect(uid, expiry);
+
+  // Still mid-hand with 2+ players left: no immediate full buy-in refund.
+  const balAfterAbandon = (await Wallet.findOne({ user: uid }).lean()).balance;
+  assert.equal(
+    balAfterAbandon,
+    0,
+    "mid-hand disconnect must not cash out while the hand is live"
+  );
+  assert.equal(g.seats[leaverIdx].folded, true, "disconnect folds immediately");
+  assert.equal(g.seats[leaverIdx].playerState, "LEAVE_PENDING");
+  assert.equal(g.pot, potBefore, "committed chips remain in the pot");
+  assert.equal(
+    g.seats[leaverIdx].chips,
+    uncommitted,
+    "uncommitted stack stays on the engine seat until settlement"
+  );
+
+  const blocked = await require("../services/pokerVacateService").permanentLeavePokerTable({
+    tableId: g.tableId,
+    userId: uid,
+    liveHandInProgress: true,
+  });
+  assert.deepEqual(blocked, { left: false, reason: "HAND_IN_PROGRESS" });
+
+  // Finish the current hand (do not startHand — that would reset the pot).
+  for (let step = 0; step < 500; step++) {
+    if (!g.running || g.round === "idle") break;
+    if (!["preflop", "flop", "turn", "river"].includes(g.round)) {
+      await new Promise((r) => setImmediate(r));
+      continue;
+    }
+    const idx = g.currentIndex;
+    const seat = g.seats[idx];
+    if (!seat || !seat.inHand || seat.folded || seat.allIn) {
+      await new Promise((r) => setImmediate(r));
+      continue;
+    }
+    if (String(seat.userId) === uid) {
+      await new Promise((r) => setImmediate(r));
+      continue;
+    }
+    const spec = g.computeTurnActionSpec(idx);
+    if (!spec) break;
+    const move = spec.canCheck ? { action: "check" } : { action: "call" };
+    await g.handleAction(seat.userId, { ...move, actionId: `fin-${step}-${idx}` });
+  }
+  g.disposeTimers();
+  assert.equal(g.round, "idle", "hand finished after disconnect fold");
+
+  // Settlement updates Mongo chips; complete the leave (deferred may race).
+  let left = await require("../services/pokerVacateService").permanentLeavePokerTable({
+    tableId: g.tableId,
+    userId: uid,
+    liveHandInProgress: false,
+  });
+  if (!left.left && left.reason === "NOT_SEATED") {
+    // Deferred leave already completed after settlement.
+    left = { left: true, cashedOut: (await Wallet.findOne({ user: uid }).lean()).balance };
+  }
+  assert.equal(left.left, true);
+  assert.ok(
+    left.cashedOut <= uncommitted,
+    `cashedOut ${left.cashedOut} must not exceed uncommitted ${uncommitted} (bet forfeited)`
+  );
+  assert.ok(left.cashedOut < buyIn, "full buy-in must not be refunded after mid-hand leave");
+
+  const w = await Wallet.findOne({ user: uid }).lean();
+  assert.equal(w.lockedBalance, 0);
+  assert.equal(w.balance, left.cashedOut);
+  assert.ok(w.balance < buyIn, "forfeited bet never returns to the wallet");
 });

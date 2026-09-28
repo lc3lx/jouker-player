@@ -2,7 +2,7 @@
  * Golden Tree — core game constants.
  * Matrix: 5 reels (columns) × 3 rows.
  *
- * Win rule: 10 fixed paylines evaluated left-to-right from column 0.
+ * Win rule: 20 fixed paylines evaluated left-to-right from column 0.
  * Each payline defines row indices per column. Wilds substitute.
  * Seven symbol requires only 2 consecutive matches; all others need 3.
  */
@@ -22,7 +22,7 @@ const MAX_WIN_MULTIPLIER = 10000;
 const REFERENCE_BET = 1;
 const TARGET_RTP = 0.9649;
 
-/** Progressive jackpot: 1 in JACKPOT_ODDS on paid main spins only. */
+/** Legacy rollJackpot helper only; live spins use the match-3 scratch game. */
 const JACKPOT_ODDS = 1000;
 /** Jackpot award = bet × JACKPOT_MULTIPLIER (then capped by MAX_WIN_MULTIPLIER). */
 const JACKPOT_MULTIPLIER = 1000;
@@ -34,8 +34,8 @@ const GAMBLE_MAX_WIN_MULTIPLIER = 35;
 
 const FREE_SPINS_PER_BONUS = 5;
 
-/** 10 fixed paylines, left-to-right evaluation from col 0. */
-const WIN_RULES_VERSION = "fixed-10-paylines-seven2-longest-only-v9";
+/** 20 fixed paylines, left-to-right evaluation from col 0. */
+const WIN_RULES_VERSION = "fixed-20-paylines-guaranteed-triple-v10";
 
 /**
  * @deprecated Removed — seven+tree adjacent pairs no longer pay.
@@ -78,7 +78,7 @@ const WILD_REELS = new Set([1, 2, 3]);
 const WILD_ROW = 1;
 
 /**
- * 10 fixed paylines — each entry is [rowAtCol0 … rowAtCol4].
+ * 20 fixed paylines — each entry is [rowAtCol0 … rowAtCol4].
  * Row 0 = top, row 1 = middle, row 2 = bottom.
  */
 const PAYLINES = Object.freeze([
@@ -92,6 +92,16 @@ const PAYLINES = Object.freeze([
   [1, 0, 0, 0, 1], // Line 8: U-shape top
   [0, 1, 1, 1, 0], // Line 9: Flat bump down
   [2, 1, 1, 1, 2], // Line 10: Flat bump up
+  [1, 2, 2, 2, 1], // Line 11
+  [1, 0, 1, 2, 1], // Line 12
+  [1, 2, 1, 0, 1], // Line 13
+  [0, 1, 0, 1, 0], // Line 14
+  [2, 1, 2, 1, 2], // Line 15
+  [1, 0, 1, 0, 1], // Line 16
+  [1, 2, 1, 2, 1], // Line 17
+  [0, 1, 2, 2, 2], // Line 18
+  [2, 1, 0, 0, 0], // Line 19
+  [0, 0, 0, 1, 2], // Line 20
 ]);
 
 /**
@@ -100,15 +110,15 @@ const PAYLINES = Object.freeze([
  * Seven has a payout at index 2 (2-match rule).
  */
 const PAYTABLE = Object.freeze({
-  [SYMBOLS.SEVEN]: [0, 0, 1.4, 4, 18, 150],
-  [SYMBOLS.GRAPES]: [0, 0, 0, 3.5, 9, 32],
-  [SYMBOLS.WATERMELON]: [0, 0, 0, 3.5, 9, 32],
-  [SYMBOLS.BELL]: [0, 0, 0, 2, 5.5, 20],
-  [SYMBOLS.BANANA]: [0, 0, 0, 1.5, 4, 11],
-  [SYMBOLS.CHERRY]: [0, 0, 0, 1.5, 4, 11],
-  [SYMBOLS.ORANGE]: [0, 0, 0, 1.5, 4, 11],
-  [SYMBOLS.PINEAPPLE]: [0, 0, 0, 1.5, 4, 11],
-  [SYMBOLS.PLUM]: [0, 0, 0, 1.5, 4, 11],
+  [SYMBOLS.SEVEN]: [0, 0, 0.756, 2.16, 9.72, 81],
+  [SYMBOLS.GRAPES]: [0, 0, 0, 1.89, 4.86, 17.28],
+  [SYMBOLS.WATERMELON]: [0, 0, 0, 1.89, 4.86, 17.28],
+  [SYMBOLS.BELL]: [0, 0, 0, 1.08, 2.97, 10.8],
+  [SYMBOLS.BANANA]: [0, 0, 0, 0.81, 2.16, 5.94],
+  [SYMBOLS.CHERRY]: [0, 0, 0, 0.81, 2.16, 5.94],
+  [SYMBOLS.ORANGE]: [0, 0, 0, 0.81, 2.16, 5.94],
+  [SYMBOLS.PINEAPPLE]: [0, 0, 0, 0.81, 2.16, 5.94],
+  [SYMBOLS.PLUM]: [0, 0, 0, 0.81, 2.16, 5.94],
 });
 
 /**
@@ -125,30 +135,26 @@ const MAIN_WILD_MULTIPLIER_WEIGHTS = Object.freeze([
   [5, 2],
 ]);
 const BONUS_WILD_MULTIPLIER_WEIGHTS = Object.freeze([
-  [1, 50],
-  [2, 30],
-  [3, 15],
-  [5, 5],
+  [1, 60],
+  [2, 28],
+  [3, 10],
+  [5, 2],
 ]);
 
 /** Tree with no multiplier — substitutes, but never boosts the line. */
 const PLAIN_WILD_MULTIPLIER = 1;
 
 /**
- * Free spins after the opening one roll their tree count, so a bonus round is
- * a run of luck rather than three guaranteed trees every spin.
- * Pairs are [treeCount, weight]; the opening purchased spin bypasses this.
+ * Every free spin guarantees three trees. Kept for older server callers that
+ * still request a count before generating the bonus matrix.
  */
 const BONUS_FORCED_TREE_WEIGHTS = Object.freeze([
-  [3, 5],
-  [2, 15],
-  [1, 35],
-  [0, 45],
+  [3, 1],
 ]);
 
 /**
  * Public buy-bonus identifier retained for API compatibility with existing
- * clients. Buy bonus forces 3 trees on columns 1-3 during the initial spin.
+ * clients. Buy bonus forces 3 trees on columns 1-3 during every free spin.
  */
 const BUY_BONUS_TYPE = "Triple";
 /**
@@ -156,7 +162,7 @@ const BUY_BONUS_TYPE = "Triple";
  * at TARGET_RTP like every other bet. Re-derive with `node tool/goldenTreeRtp.js`
  * after any change to the paytable, reel strips, or tree/multiplier weights.
  */
-const BUY_BONUS_COST = 316;
+const BUY_BONUS_COST = 1000;
 
 function minMatchCount(symbol) {
   if (symbol === SYMBOLS.SEVEN) return SEVEN_MIN_CONSECUTIVE;

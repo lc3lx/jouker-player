@@ -23,4 +23,7 @@ module.exports = {
   removeLiveHumanSeat: (tableId, userId) => call("removeLiveHumanSeat", tableId, userId),
   requestLivePokerLeave: (tableId, userId) => call("requestLivePokerLeave", tableId, userId),
   adminForceEndHandTable: (tableId) => call("adminForceEndHandTable", tableId),
+  adminRetrySettlementTable: (tableId) => call("adminRetrySettlementTable", tableId),
+  adminClearSettlementFreezeTable: (tableId, opts) =>
+    call("adminClearSettlementFreezeTable", tableId, opts),
 };

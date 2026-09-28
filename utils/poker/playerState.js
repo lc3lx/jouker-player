@@ -26,7 +26,7 @@ function canParticipateInNextHand(seat) {
   if (!isHumanSeat(seat)) return false;
   if (toSafeInt(seat.chips, 0) <= 0) return false;
   const st = seat.playerState || PLAYER_STATE.SEATED;
-  if (st === PLAYER_STATE.SITTING_OUT || st === PLAYER_STATE.LEAVE_PENDING) return false;
+  if ([PLAYER_STATE.SITTING_OUT, PLAYER_STATE.LEAVE_PENDING, PLAYER_STATE.DISCONNECTED].includes(st)) return false;
   if (st === PLAYER_STATE.WAITING) return false;
   return true;
 }
@@ -35,7 +35,7 @@ function canBeDealtIntoHand(seat) {
   if (!seat || toSafeInt(seat.chips, 0) <= 0) return false;
   if (seat.isBot) return true;
   const st = seat.playerState || PLAYER_STATE.SEATED;
-  if (st === PLAYER_STATE.SITTING_OUT || st === PLAYER_STATE.LEAVE_PENDING) return false;
+  if ([PLAYER_STATE.SITTING_OUT, PLAYER_STATE.LEAVE_PENDING, PLAYER_STATE.DISCONNECTED].includes(st)) return false;
   if (st === PLAYER_STATE.WAITING) return false;
   return true;
 }
@@ -50,6 +50,7 @@ function promoteWaitingToSeated(seats) {
 
 function markActiveHandParticipants(seats) {
   for (const s of seats) {
+    if ([PLAYER_STATE.DISCONNECTED, PLAYER_STATE.LEAVE_PENDING].includes(s.playerState)) continue;
     if (s.inHand) {
       s.playerState = PLAYER_STATE.ACTIVE_HAND;
     } else if (

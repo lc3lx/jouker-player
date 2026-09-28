@@ -6,6 +6,8 @@ const {
   adminListTransactions,
   adminRealtimeTables,
   adminForceEndHand,
+  adminRetrySettlement,
+  adminClearSettlementFreeze,
   adminGetTableLifecycleSettings,
   adminUpdateTableLifecycleSettings,
   adminTableLifecycleOverview,
@@ -34,6 +36,8 @@ router.use(authService.protect, authService.allowedTo("admin", "manager"));
 router.get("/tables", adminListTables);
 router.get("/realtime-tables", adminRealtimeTables);
 router.post("/force-end-hand", adminForceEndHand);
+router.post("/retry-settlement", adminRetrySettlement);
+router.post("/clear-settlement-freeze", adminClearSettlementFreeze);
 router.get("/table-lifecycle-overview", adminTableLifecycleOverview);
 router.get("/table-lifecycle-settings", adminGetTableLifecycleSettings);
 router.put("/table-lifecycle-settings", adminUpdateTableLifecycleSettings);

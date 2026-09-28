@@ -13,7 +13,6 @@ const {
 const {
   generateSpin,
   secureRandomInt,
-  pickForcedTreeCount,
 } = require("./spinEngine");
 const { hardenWinResult } = require("./winGuard");
 const roundManager = require("./roundManager");
@@ -125,19 +124,10 @@ async function executeSpin(userId, betAmountInput) {
     throw new ApiError("No bonus spins remaining", 400);
   }
 
-  // Purchased free spins: the opening spin always shows the full triple on
-  // reels 2–4 (0-based 1,2,3) — that is what the purchase paid for. Every later
-  // bonus spin rolls its own tree count, so a round can run hot or cold.
-  // Reels 1 and 5 (cols 0 and 4) never carry a tree.
-  const isFirstPurchasedSpin =
-    isBonusSpin &&
-    bonusSession.freeSpinsRemaining === FREE_SPINS_PER_BONUS;
-
+  // All bonus spins guarantee trees on reels 2–4; multiplier upgrades roll
+  // independently. Main-game tree placement stays random.
   const { matrix, wildMultipliers } = generateSpin({
     bonusMode: isBonusSpin,
-    forceTrees: isFirstPurchasedSpin,
-    forceTreeCount:
-      isBonusSpin && !isFirstPurchasedSpin ? pickForcedTreeCount() : null,
   });
 
   // Backend is the sole win authority (Flutter client is display-only).

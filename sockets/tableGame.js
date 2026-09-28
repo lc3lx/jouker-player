@@ -1208,18 +1208,14 @@ class PokerTable {
       }
       return true;
     } catch (err) {
-      // A Redis blip must NEVER reject into the hot path (broadcastState →
-      // advance) and freeze the live table. The next broadcast re-persists;
-      // crash recovery reconciles from Mongo if this snapshot was skipped.
-      this.isOwner = false;
-      this.running = false;
-      this.starting = false;
-      this.disposeTimers();
+      // Soft-fail: a Redis blip must NOT kill ownership or timers. Keep the
+      // live loop and let the next broadcast re-persist from RAM. Only an
+      // explicit fence reject (!saved) demotes the owner above.
       logger.error("poker_snapshot_save_failed", {
         tableId: this.tableId,
         reason: err?.message || "unknown",
       });
-      return false;
+      return true;
     }
   }
 
@@ -1496,6 +1492,7 @@ class PokerTable {
     let restored = 0;
     for (const s of this.seats) {
       if (!isHumanSeat(s) || toSafeInt(s.chips, 0) > 0) continue;
+      if ([PLAYER_STATE.DISCONNECTED, PLAYER_STATE.LEAVE_PENDING].includes(s.playerState)) continue;
       const uid = s.userId;
       try {
         await withMongoTransaction(async (session) => {
@@ -2462,56 +2459,70 @@ class PokerTable {
     }
   }
 
-  /** Stale DISCONNECTED seats after restart: cash out immediately (no grace). */
+  scheduleReconnectExpiry(userId, deadline) {
+    const uid = String(userId);
+    this.clearReconnectTimer(uid);
+    if (!this.isOwner) return;
+    const timer = setTimeout(() => {
+      if (this.reconnectTimers.get(uid) !== timer) return;
+      this.reconnectTimers.delete(uid);
+      void this.expireRecoveredReconnect(uid, deadline);
+    }, Math.max(deadline - Date.now(), 0));
+    timer.unref?.();
+    this.reconnectTimers.set(uid, timer);
+  }
+
+  /** Ownership recovery keeps the original deadline, not a fresh grace period. */
   rescheduleReconnectTimersAfterRestore() {
     if (!this.isOwner) return;
     for (const seat of this.seats) {
       if (!seat?.isBot && seat.playerState === PLAYER_STATE.DISCONNECTED) {
-        void this.abandonHumanSeat(String(seat.userId));
+        seat.reconnectDeadline = Number(seat.reconnectDeadline) ||
+          ((Number(seat.disconnectedAt) || Date.now()) + POKER_TIMINGS.RECONNECT_WINDOW_MS);
+        this.scheduleReconnectExpiry(seat.userId, seat.reconnectDeadline);
       }
     }
   }
 
-  async expireRecoveredReconnect(userId) {
+  async expireRecoveredReconnect(userId, deadline) {
     const uid = String(userId);
-    this.reconnectTimers.delete(uid);
-    const lockAcquired = await this.acquireActionLock();
-    if (!lockAcquired) return;
-    try {
-      const i = this.findSeatIndexByUser(uid);
-      if (i < 0) return;
-      const seat = this.seats[i];
-      if (seat.playerState !== PLAYER_STATE.DISCONNECTED) return;
-
-      seat.playerState = PLAYER_STATE.SITTING_OUT;
-      seat.disconnectedAt = null;
-      seat.reconnectDeadline = null;
-      if (seat.inHand && this.running && !seat.folded && !seat.allIn) {
-        this.applyFold(i);
-        this.recordSeatAction(i, "disconnect_fold");
-        this.appendHandAction({ type: "disconnect_fold", seatIndex: i, playerId: seat.userId });
-        await this.broadcastState();
-        if (this.currentIndex === i || this.aliveCount() <= 1) await this.advance();
-      } else {
-        await this.broadcastState();
-      }
-      // Keep the human seat + bots. Only the leave button cashes out / resets.
-    } catch (err) {
-      logger.warn("poker_recovered_reconnect_expiry_failed", {
-        tableId: this.tableId,
-        userId: uid,
-        reason: err?.message || "unknown",
-      });
-    } finally {
-      await this.releaseActionLock();
+    if (!this.isOwner) return;
+    const seat = this.seats[this.findSeatIndexByUser(uid)];
+    if (!seat || seat.playerState !== PLAYER_STATE.DISCONNECTED ||
+        seat.reconnectDeadline !== deadline) return;
+    if (Date.now() < deadline) {
+      this.scheduleReconnectExpiry(uid, deadline);
+      return;
     }
+    // Synchronous intent prevents a late reconnect from reviving an expired
+    // seat. The existing leave pipeline locks the hand, retries busy locks and
+    // waits for settlement before returning chips (including all-in winnings).
+    await this.leavePlayerPermanently(uid);
+  }
+
+  async leavePlayerPermanently(userId) {
+    if (!this.isOwner) return;
+    const uid = String(userId);
+    const seat = this.seats[this.findSeatIndexByUser(uid)];
+    if (!seat || seat.isBot || seat.playerState === PLAYER_STATE.LEAVE_PENDING) return;
+    this.clearReconnectTimer(uid);
+    seat.playerState = PLAYER_STATE.LEAVE_PENDING;
+    seat.disconnectedAt = null;
+    seat.reconnectDeadline = null;
+    this.abandoningUserIds.add(uid);
+    await this.abandonHumanSeat(uid);
   }
 
   onPlayerSocketConnected(userId) {
     const idx = this.findSeatIndexByUser(userId);
-    if (idx < 0) return;
+    if (idx < 0) return false;
     const seat = this.seats[idx];
-    if (seat.playerState === PLAYER_STATE.LEAVE_PENDING) return;
+    if (seat.playerState === PLAYER_STATE.LEAVE_PENDING) return false;
+    if (seat.playerState === PLAYER_STATE.DISCONNECTED &&
+        seat.reconnectDeadline != null && seat.reconnectDeadline <= Date.now()) {
+      void this.expireRecoveredReconnect(userId, seat.reconnectDeadline);
+      return false;
+    }
     this.clearReconnectTimer(userId);
     seat.disconnectedAt = null;
     seat.reconnectDeadline = null;
@@ -2522,6 +2533,7 @@ class PokerTable {
       seat.playerState = PLAYER_STATE.SEATED;
     }
     void this.resyncTurnAfterReconnect(userId);
+    return true;
   }
 
   async healSeatsMissingSockets(_exceptUserId = null) {
@@ -2560,51 +2572,72 @@ class PokerTable {
   }
 
   onPlayerSocketDisconnected(userId) {
+    if (!this.isOwner) return;
     const idx = this.findSeatIndexByUser(userId);
     if (idx < 0) return;
     const seat = this.seats[idx];
     if (seat.isBot) return;
     if (seat.playerState === PLAYER_STATE.LEAVE_PENDING) return;
-    this.clearReconnectTimer(userId);
-    seat.disconnectedAt = null;
-    seat.reconnectDeadline = null;
-    seat.playerState = PLAYER_STATE.LEAVE_PENDING;
-    this.abandoningUserIds.add(String(userId));
-    // #region agent log
-    _dbg7("C", "tableGame.js:onPlayerSocketDisconnected", "abandon_now", {
-      tableId: String(this.tableId),
-      inHand: !!seat.inHand,
-      humans: this.humanSeatCount(),
-    });
-    // #endregion
-    void this.abandonHumanSeat(userId);
+    if (seat.playerState !== PLAYER_STATE.DISCONNECTED) {
+      seat.disconnectedAt = Date.now();
+      seat.reconnectDeadline = seat.disconnectedAt + POKER_TIMINGS.RECONNECT_WINDOW_MS;
+      seat.playerState = PLAYER_STATE.DISCONNECTED;
+    }
+    this.scheduleReconnectExpiry(userId, seat.reconnectDeadline);
   }
 
   /**
-   * App close / socket drop is a permanent leave: cash out (or defer until
-   * settlement) and block rejoin for this table session.
+   * Explicit exit / expired reconnect grace: fold now (bet stays in pot),
+   * cash out only after the hand is idle so Mongo seat.chips no longer includes
+   * chips committed to the pot.
    */
   async abandonHumanSeat(userId) {
     const uid = String(userId);
+    if (!this._abandonFoldRetries) this._abandonFoldRetries = new Map();
+
     const lockAcquired = await this.acquireActionLock();
+    if (!lockAcquired) {
+      // Do not touch Mongo cash-out without the fold applied.
+      try {
+        const { markPendingPermanentLeave, scheduleDeferredPermanentLeave } = require("../services/pokerVacateService");
+        await markPendingPermanentLeave({ tableId: this.tableId, userId: uid });
+        scheduleDeferredPermanentLeave({ tableId: this.tableId, userId: uid });
+      } catch (err) {
+        logger.warn("poker_abandon_pending_mark_failed", {
+          tableId: this.tableId,
+          userId: uid,
+          reason: err?.message || "unknown",
+        });
+      }
+      const retries = this._abandonFoldRetries.get(uid) || 0;
+      if (retries < 20) {
+        this._abandonFoldRetries.set(uid, retries + 1);
+        const t = setTimeout(() => void this.abandonHumanSeat(uid), 250);
+        if (typeof t.unref === "function") t.unref();
+      }
+      return;
+    }
+
     try {
-      if (lockAcquired) {
-        const i = this.findSeatIndexByUser(uid);
-        if (i >= 0) {
-          const s = this.seats[i];
-          if (s && !s.isBot && s.inHand && this.running && !s.folded && !s.allIn) {
-            this.applyFold(i);
-            this.recordSeatAction(i, "disconnect_fold");
-            this.appendHandAction({ type: "disconnect_fold", seatIndex: i, playerId: s.userId });
-            if (this.currentIndex === i || this.aliveCount() <= 1) {
-              await this.advance();
-            }
+      const i = this.findSeatIndexByUser(uid);
+      if (i >= 0) {
+        const s = this.seats[i];
+        if (s && !s.isBot && s.inHand && this.running && !s.folded && !s.allIn) {
+          this.applyFold(i);
+          this.recordSeatAction(i, "disconnect_fold");
+          this.appendHandAction({ type: "disconnect_fold", seatIndex: i, playerId: s.userId });
+          if (this.currentIndex === i || this.aliveCount() <= 1) {
+            await this.advance();
           }
         }
+        if (s) s.playerState = PLAYER_STATE.LEAVE_PENDING;
       }
     } finally {
-      if (lockAcquired) await this.releaseActionLock();
+      await this.releaseActionLock();
     }
+
+    this._abandonFoldRetries.delete(uid);
+
     try {
       const {
         markPendingPermanentLeave,
@@ -2614,10 +2647,15 @@ class PokerTable {
       await markPendingPermanentLeave({ tableId: this.tableId, userId: uid });
       const currentSeat = this.seats[this.findSeatIndexByUser(uid)];
       if (currentSeat) currentSeat.playerState = PLAYER_STATE.LEAVE_PENDING;
+      const midHand = this.running === true && String(this.round || "idle") !== "idle";
+      // Never force mid-hand: Mongo seat.chips still holds the pre-pot stack.
+      // Pass liveHandInProgress from this owner engine so stale status:"playing"
+      // between hands cannot block an idle cash-out.
       const res = await permanentLeavePokerTable({
         tableId: this.tableId,
         userId: uid,
-        force: true,
+        force: false,
+        liveHandInProgress: midHand,
       });
       if (
         !res.left &&
@@ -2630,7 +2668,6 @@ class PokerTable {
         if (gone >= 0) {
           this.seats.splice(gone, 1);
           this.reindexSeatsByPosition();
-          // A chair just opened; an invited guest may be standing here waiting.
           void this.notifySeatOpened();
         }
         if (this.seatedHumanCount() >= 1) {
@@ -3348,7 +3385,7 @@ class PokerTable {
         }
       }
 
-      if (this.activeSeatCount() < POKER_MIN_PLAYERS) {
+      if (this.seats.filter(canBeDealtIntoHand).length < POKER_MIN_PLAYERS) {
         this.running = false;
         this.clearActionScheduling();
         await this.syncMongoTableStatus();
@@ -4743,6 +4780,27 @@ class PokerTable {
 
   async persistAndPrepareNext(community, payoutBySeat, winnerIdxs, meta = {}, opts = {}) {
     const manageLifecycle = opts.manageLifecycle !== false;
+    // Keep a retry payload so admin can re-run settlement after a DB blip.
+    // RAM stacks stay pre-settlement until the transaction commits.
+    this._pendingSettlementRetry = {
+      community: Array.isArray(community) ? [...community] : [],
+      payoutBySeat: payoutBySeat instanceof Map ? new Map(payoutBySeat) : new Map(),
+      winnerIdxs: Array.isArray(winnerIdxs) ? [...winnerIdxs] : winnerIdxs,
+      meta: {
+        ...meta,
+        uncalledReturns:
+          meta.uncalledReturns instanceof Map
+            ? new Map(meta.uncalledReturns)
+            : meta.uncalledReturns,
+        showdownRanks:
+          meta.showdownRanks instanceof Map
+            ? new Map(meta.showdownRanks)
+            : meta.showdownRanks,
+        potDistribution: Array.isArray(meta.potDistribution)
+          ? meta.potDistribution.map((p) => ({ ...p }))
+          : meta.potDistribution,
+      },
+    };
     // Every payout/rank/summary below is keyed by seat INDEX into the array this
     // hand was dealt from. Settlement spans several awaits, and a table reset
     // (last human leaves) replaces `this.seats` wholesale — indexing the live
@@ -5343,6 +5401,12 @@ class PokerTable {
       return;
     }
 
+    // Successful commit (including admin retry after a prior freeze).
+    this.frozen = false;
+    this.frozenReason = null;
+    this.tableStatusOverride = null;
+    this._pendingSettlementRetry = null;
+
     // This intent is durable in Mongo, so a restart cannot silently cancel a
     // voluntary mid-hand cash-out. Re-arm it once this hand has committed.
     void require("../services/pokerVacateService")
@@ -5510,10 +5574,10 @@ class PokerTable {
         const isSeated = this.seats.some((s) => String(s.userId) === String(uid));
         if (isSeated) {
           const me = this.getPublicState(uid);
+          // One public + one private frame. Legacy `state` / `state:me` aliases
+          // doubled client _applyState and full-table rebuilds every action.
           sock.emit("table_state", pub);
-          sock.emit("state", pub);
           sock.emit("table_state_me", me);
-          sock.emit("state:me", me);
           void require("../services/presenceService")
             .markPlaying(uid, { gameType: "poker", tableId: this.tableId })
             .catch(() => {});
@@ -5523,7 +5587,6 @@ class PokerTable {
           if (delayedFrame) {
             deliveredDelayed = true;
             sock.emit("table_state", delayedFrame);
-            sock.emit("state", delayedFrame);
           }
           void require("../services/presenceService")
             .markWatching(uid, { gameType: "poker", tableId: this.tableId })
@@ -5657,11 +5720,87 @@ class PokerTable {
         if (!uid) continue;
         if (this.seats.some((s) => String(s.userId) === String(uid))) continue;
         sock.emit("table_state", delayed);
-        sock.emit("state", delayed);
       }
     } catch (_) {
       /* transient fetch failure — next tick retries */
     }
+  }
+
+  /**
+   * Admin: re-run the last failed settlement commit (idempotent via HandHistory).
+   * Does not clear freeze if the retry still fails.
+   */
+  async adminRetrySettlement() {
+    if (!this.frozen || this.frozenReason !== "settlement") {
+      return { ok: false, reason: "NOT_SETTLEMENT_FROZEN" };
+    }
+    const pending = this._pendingSettlementRetry;
+    if (!pending) {
+      return { ok: false, reason: "NO_PENDING_PAYLOAD" };
+    }
+    const lockAcquired = await this.acquireActionLock();
+    if (!lockAcquired) return { ok: false, reason: "LOCK_BUSY" };
+    try {
+      await this.persistAndPrepareNext(
+        pending.community,
+        pending.payoutBySeat,
+        pending.winnerIdxs,
+        pending.meta || {}
+      );
+      if (this.frozen && this.frozenReason === "settlement") {
+        return { ok: false, reason: "RETRY_FAILED_STILL_FROZEN", handId: this.currentHandId };
+      }
+      return { ok: true, handId: this.currentHandId };
+    } finally {
+      await this.releaseActionLock();
+    }
+  }
+
+  /**
+   * Admin: clear a settlement freeze after ledger reconcile.
+   * Without force, only allowed when HandHistory already exists for the hand
+   * (settlement landed elsewhere). Never auto-clears from chip probe alone.
+   */
+  async adminClearSettlementFreeze({ force = false } = {}) {
+    if (!this.frozen) {
+      return { ok: true, skipped: true, reason: "not_frozen" };
+    }
+    if (this.frozenReason === "settlement" && !force) {
+      const HandHistory = require("../models/handHistoryModel");
+      const settled = await HandHistory.exists({
+        handId: this.currentHandId,
+        table: this.tableId,
+      });
+      if (!settled) {
+        return {
+          ok: false,
+          reason: "HAND_NOT_SETTLED",
+          hint: "retry settlement first, or pass force:true after manual ledger reconcile",
+        };
+      }
+    }
+    if (this.frozenReason !== "settlement" && !force) {
+      const cleared = this._tryUnfreezeFromChipProbe("admin_clear");
+      if (!cleared) {
+        return { ok: false, reason: "PROBE_FAILED", frozenReason: this.frozenReason };
+      }
+      await this.broadcastState();
+      return { ok: true, path: "chip_probe" };
+    }
+
+    this.frozen = false;
+    this.frozenReason = null;
+    this.tableStatusOverride = null;
+    this._pendingSettlementRetry = null;
+    this.logSuspicious("admin_clear_settlement_freeze", {
+      force: !!force,
+      handId: this.currentHandId,
+    });
+    await this.broadcastState();
+    if (!this.running && !this.starting) {
+      void this.beginNextHandIfPossible();
+    }
+    return { ok: true, forced: !!force };
   }
 
   /**
@@ -5729,27 +5868,36 @@ class PokerTable {
   async handleAction(userId, payload) {
     // H-3 safety net: a follower must NEVER mutate its (non-authoritative) copy.
     // Socket handlers forward to the owner; this guards against any misroute.
+    const rawActionId =
+      typeof payload?.actionId === "string" && payload.actionId.trim().length > 0
+        ? payload.actionId.trim().slice(0, 128)
+        : null;
+    const reject = (reason) =>
+      rawActionId
+        ? { status: "rejected", reason, actionId: rawActionId }
+        : { status: "rejected", reason };
+
     if (!this.isOwner) {
-      return { status: "rejected", reason: "NOT_OWNER" };
+      return reject("NOT_OWNER");
     }
     const lockAcquired = await this.acquireActionLock();
     if (!lockAcquired) {
       this.logSuspicious("duplicate_action_while_locked", { userId, payload });
-      return { status: "rejected", reason: "INVALID_ACTION" };
+      return reject("INVALID_ACTION");
     }
 
     try {
       if (this.frozen) {
-        return { status: "rejected", reason: "TABLE_FROZEN" };
+        return reject("TABLE_FROZEN");
       }
       if (!this.running) {
         this.logSuspicious("action_while_not_running", { userId, payload, round: this.round });
-        return { status: "rejected", reason: "INVALID_ACTION" };
+        return reject("INVALID_ACTION");
       }
 
       if (!["preflop", "flop", "turn", "river"].includes(this.round)) {
         this.logSuspicious("action_in_illegal_round", { userId, payload, round: this.round });
-        return { status: "rejected", reason: "INVALID_ACTION" };
+        return reject("INVALID_ACTION");
       }
 
       const idx = this.findSeatIndexByUser(userId);
@@ -5759,28 +5907,27 @@ class PokerTable {
           actorSeatIndex: idx,
           turnSeatIndex: this.currentIndex,
         });
-        return { status: "rejected", reason: "NOT_YOUR_TURN" };
+        return reject("NOT_YOUR_TURN");
       }
       const actorSeat = this.seats[idx];
       if (
         !actorSeat?.inHand ||
         actorSeat.folded ||
         actorSeat.playerState === PLAYER_STATE.WAITING ||
+        actorSeat.playerState === PLAYER_STATE.DISCONNECTED ||
+        actorSeat.playerState === PLAYER_STATE.LEAVE_PENDING ||
         actorSeat.playerState === PLAYER_STATE.SITTING_OUT
       ) {
-        return { status: "rejected", reason: "NOT_IN_HAND" };
+        return reject("NOT_IN_HAND");
       }
       if (this.seats[idx]?.isBot) {
         this.logSuspicious("human_action_on_bot_seat", { userId, idx });
-        return { status: "rejected", reason: "INVALID_ACTION" };
+        return reject("INVALID_ACTION");
       }
 
-      const { action, amount, actionId } = payload || {};
+      const { action, amount } = payload || {};
       let normalizedAction = String(action || "").toLowerCase();
-      const normalizedActionId =
-        typeof actionId === "string" && actionId.trim().length > 0
-          ? actionId.trim().slice(0, 128)
-          : null;
+      const normalizedActionId = rawActionId;
 
       if (!normalizedActionId) {
         this.logSuspicious("missing_action_id", { userId });
@@ -5799,7 +5946,7 @@ class PokerTable {
           normalizedAction,
           allowed: spec?.allowed || [],
         });
-        return { status: "rejected", reason: "INVALID_ACTION" };
+        return reject("INVALID_ACTION");
       }
 
       let raiseExtra = null;
@@ -5807,11 +5954,11 @@ class PokerTable {
         const parsed = Number(amount);
         if (!Number.isFinite(parsed) || Math.trunc(parsed) !== parsed) {
           this.logSuspicious("raise_non_integer_amount", { userId, amount });
-          return { status: "rejected", reason: "INVALID_ACTION" };
+          return reject("INVALID_ACTION");
         }
         const v = toSafeInt(parsed, 0);
-        const actorSeat = this.seats[idx];
-        const isAllInRaise = actorSeat.chips <= spec.callAmount + v;
+        const raiseSeat = this.seats[idx];
+        const isAllInRaise = raiseSeat.chips <= spec.callAmount + v;
         if (v > spec.maxRaise || (v < spec.minRaise && !isAllInRaise)) {
           this.logSuspicious("raise_amount_out_of_bounds", {
             userId,
@@ -5819,9 +5966,9 @@ class PokerTable {
             minRaise: spec.minRaise,
             maxRaise: spec.maxRaise,
           });
-          return { status: "rejected", reason: "INVALID_ACTION" };
+          return reject("INVALID_ACTION");
         }
-        const totalAfter = toSafeInt(actorSeat.bet, 0) + spec.callAmount + v;
+        const totalAfter = toSafeInt(raiseSeat.bet, 0) + spec.callAmount + v;
         const tableMin = Math.max(1, toSafeInt(this.minimumBet, this.bigBlind));
         if (!isAllInRaise && totalAfter < tableMin) {
           this.logSuspicious("raise_below_table_minimum", {
@@ -5829,7 +5976,7 @@ class PokerTable {
             totalAfter,
             tableMin,
           });
-          return { status: "rejected", reason: "INVALID_ACTION" };
+          return reject("INVALID_ACTION");
         }
         raiseExtra = v;
       }
@@ -5838,7 +5985,7 @@ class PokerTable {
       if (!claimedActionId) {
         this.logSuspicious("duplicate_action_id", { userId, actionId: normalizedActionId });
         // Reject so clients clear in-flight UI; no broadcast occurs for duplicates.
-        return { status: "rejected", reason: "DUPLICATE_ACTION" };
+        return reject("DUPLICATE_ACTION");
       }
 
       if (normalizedAction === "fold") {
@@ -5852,7 +5999,7 @@ class PokerTable {
       } else if (normalizedAction === "check") {
         if (spec.callAmount !== 0 || !spec.canCheck) {
           this.logSuspicious("check_when_not_free", { userId, callAmount: spec.callAmount });
-          return { status: "rejected", reason: "INVALID_ACTION" };
+          return reject("INVALID_ACTION");
         }
         this.recordSeatAction(idx, "check", 0);
         this.appendHandAction({
@@ -5888,7 +6035,7 @@ class PokerTable {
           lastRaiseAmount: this.lastRaiseAmount,
         });
       } else {
-        return { status: "rejected", reason: "INVALID_ACTION" };
+        return reject("INVALID_ACTION");
       }
 
       this.markVoluntaryAction(idx);
@@ -5901,7 +6048,7 @@ class PokerTable {
         actionId: normalizedActionId,
       });
       await this.pacedAdvanceAfterAction();
-      return { status: "accepted" };
+      return { status: "accepted", actionId: normalizedActionId };
     } finally {
       await this.releaseActionLock();
     }
@@ -6280,7 +6427,10 @@ function initTableGame(io, options = {}) {
         break;
       }
       case "connect": {
-        game.onPlayerSocketConnected(cmd.userId);
+        if (!game.onPlayerSocketConnected(cmd.userId)) {
+          if (sid) nsp.to(sid).emit("table_event", { type: "reconnect_expired", tableId: String(cmd.tableId) });
+          break;
+        }
         await game.resyncTurnAfterReconnect(cmd.userId);
         const idx = game.findSeatIndexByUser(cmd.userId);
         if (idx >= 0 && cmd.payload && cmd.payload.clientSeed) {
@@ -6296,15 +6446,19 @@ function initTableGame(io, options = {}) {
           const p = game.getPublicState(null);
           const m = game.getPublicState(cmd.userId);
           nsp.to(sid).emit("table_state", p);
-          nsp.to(sid).emit("state", p);
           nsp.to(sid).emit("table_state_me", m);
           nsp.to(sid).emit("reconnect_state", m);
-          nsp.to(sid).emit("state:me", m);
         }
         break;
       }
       case "disconnect": {
+        if (await socketPresenceService.countSockets(cmd.tableId, cmd.userId) > 0) break;
         game.onPlayerSocketDisconnected(cmd.userId);
+        await game.broadcastState();
+        break;
+      }
+      case "app_exit": {
+        await game.leavePlayerPermanently(cmd.userId);
         break;
       }
       case "leave_pending": {
@@ -6328,7 +6482,6 @@ function initTableGame(io, options = {}) {
         if (sid) {
           const m = game.getPublicState(cmd.userId);
           nsp.to(sid).emit("table_state_me", m);
-          nsp.to(sid).emit("state:me", m);
           nsp.to(sid).emit("reconnect_state", m);
         }
         await game.broadcastState();
@@ -6356,11 +6509,9 @@ function initTableGame(io, options = {}) {
           );
           if (delayed) {
             nsp.to(sid).emit("table_state", delayed);
-            nsp.to(sid).emit("state", delayed);
           } else {
             const waiting = game.buildSpectatorWaitingState();
             nsp.to(sid).emit("table_state", waiting);
-            nsp.to(sid).emit("state", waiting);
           }
         }
         break;
@@ -6595,7 +6746,10 @@ function initTableGame(io, options = {}) {
             payload: { clientSeed: typeof clientSeed === "string" ? clientSeed : null },
           },
           async (game) => {
-            game.onPlayerSocketConnected(socket.userId);
+            if (!game.onPlayerSocketConnected(socket.userId)) {
+              socket.emit("table_event", { type: "reconnect_expired", tableId: String(tableId) });
+              return;
+            }
             await game.resyncTurnAfterReconnect(socket.userId);
             const idx = game.findSeatIndexByUser(socket.userId);
             if (idx >= 0 && typeof clientSeed === "string" && clientSeed.trim()) {
@@ -6641,10 +6795,8 @@ function initTableGame(io, options = {}) {
             const p = game.getPublicState(null);
             const m = game.getPublicState(socket.userId);
             socket.emit("table_state", p);
-            socket.emit("state", p);
             socket.emit("table_state_me", m);
             socket.emit("reconnect_state", m);
-            socket.emit("state:me", m);
           }
         );
 
@@ -6733,7 +6885,6 @@ function initTableGame(io, options = {}) {
         const delayed = spectatorDelay.getLatestDelayedState(String(tableId));
         if (delayed) {
           socket.emit("table_state", delayed);
-          socket.emit("state", delayed);
         } else {
           // A neutral roster is safe to show while the first delayed frame is
           // still maturing. It contains no live hand information.
@@ -6742,7 +6893,6 @@ function initTableGame(io, options = {}) {
             { type: "watch", tableId: String(tableId), userId: socket.userId, socketId: socket.id },
             async (game) => {
               socket.emit("table_state", game.buildSpectatorWaitingState());
-              socket.emit("state", game.buildSpectatorWaitingState());
               game.spectatorUserIds.add(String(socket.userId));
               game.startSpectatorDrain();
             }
@@ -6772,6 +6922,18 @@ function initTableGame(io, options = {}) {
     }
 
     socket.on("watch_table", handleWatchTable);
+
+    // Explicit lifecycle signal only: a transport disconnect is never an exit.
+    socket.on("poker_app_exit", async ({ tableId } = {}) => {
+      if (!tableId || !socket.userId) return;
+      try {
+        await ownerRunOrForward(String(tableId), {
+          type: "app_exit", tableId: String(tableId), userId: socket.userId,
+        }, (game) => game.leavePlayerPermanently(socket.userId));
+      } catch (err) {
+        logger.warn("poker_app_exit_failed", { tableId: String(tableId), reason: err?.message });
+      }
+    });
 
     socket.on("leave_table", async ({ tableId }) => {
       if (!tableId) return;
@@ -6850,7 +7012,6 @@ function initTableGame(io, options = {}) {
             await game.resyncTurnAfterReconnect(socket.userId);
             const priv = game.getPublicState(socket.userId);
             socket.emit("table_state_me", priv);
-            socket.emit("state:me", priv);
             socket.emit("reconnect_state", priv);
             await game.broadcastState();
           }
@@ -7167,7 +7328,6 @@ async function resetLivePokerTableWhenEmpty(tableId) {
       waitForPlayersDeadline: null,
     };
     activeRegistry.nsp.to(room).emit("table_state", emptyPayload);
-    activeRegistry.nsp.to(room).emit("state", emptyPayload);
   }
 
   if (deferred) return false;
@@ -7290,6 +7450,9 @@ function getTableGameDebugSnapshot(tableId) {
     tableId: game.tableId,
     round: game.round,
     running: game.running,
+    frozen: game.frozen === true,
+    frozenReason: game.frozenReason || null,
+    hasPendingSettlementRetry: !!game._pendingSettlementRetry,
     seated: game.seats.length,
     pot: game.pot,
     currentBet: game.currentBet,
@@ -7336,6 +7499,24 @@ async function adminForceEndHandTable(tableId) {
   return game.adminForceEndHand();
 }
 
+async function adminRetrySettlementTable(tableId) {
+  const game = await getLiveTableGameForAdmin(tableId);
+  if (!game) return { ok: false, reason: "TABLE_NOT_IN_MEMORY" };
+  if (typeof game.adminRetrySettlement !== "function") {
+    return { ok: false, reason: "UNSUPPORTED" };
+  }
+  return game.adminRetrySettlement();
+}
+
+async function adminClearSettlementFreezeTable(tableId, { force = false } = {}) {
+  const game = await getLiveTableGameForAdmin(tableId);
+  if (!game) return { ok: false, reason: "TABLE_NOT_IN_MEMORY" };
+  if (typeof game.adminClearSettlementFreeze !== "function") {
+    return { ok: false, reason: "UNSUPPORTED" };
+  }
+  return game.adminClearSettlementFreeze({ force });
+}
+
 /**
  * H-3 graceful shutdown: release every ownership lease and stop the command bus
  * so surviving instances re-home this node's tables immediately (instead of
@@ -7374,6 +7555,8 @@ module.exports = {
   applyLivePokerBlinds,
   listActivePokerTableIds,
   adminForceEndHandTable,
+  adminRetrySettlementTable,
+  adminClearSettlementFreezeTable,
   refreshCosmeticsForUserOnTables,
   refreshVipForUserOnTables,
   /** @internal unit tests — hole visibility contract */

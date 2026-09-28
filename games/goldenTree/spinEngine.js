@@ -181,7 +181,7 @@ function placeForcedTrees(matrix, count, rng = secureRandomInt) {
   }
 }
 
-/** Roll how many trees a non-opening bonus spin gets (0–3). */
+/** Legacy callers receive the same guaranteed triple as every bonus spin. */
 function pickForcedTreeCount(rng = secureRandomInt) {
   return weightedPick(BONUS_FORCED_TREE_WEIGHTS, rng);
 }
@@ -198,9 +198,8 @@ function assignWildMultipliers(matrix, multiplierWeights, rng = secureRandomInt)
 
 /**
  * Generate a 5×3 outcome matrix.
- * [forceTrees] plants the full triple on columns 1, 2, 3 (buy bonus opening
- * spin). [forceTreeCount] instead plants exactly that many trees on random wild
- * reels — the luck roll for the rest of a bonus round.
+ * Every bonus spin plants the full triple on columns 1, 2, 3.
+ * Explicit force options remain supported for base-game test fixtures.
  * @returns {{ matrix: string[][], wildMultipliers: Record<number, number>, stopIndices: number[] }}
  */
 function generateSpin({
@@ -230,8 +229,9 @@ function generateSpin({
 
   sanitizeWildPlacements(matrix);
 
-  // Buy bonus opening spin: the full triple. Later bonus spins: a rolled count.
-  if (forceTrees) {
+  // Every bonus spin guarantees the three trees. Only their multiplier tier
+  // is random; callers cannot accidentally weaken the guarantee.
+  if (bonusMode || forceTrees) {
     forceTreesOnMiddleReels(matrix);
   } else if (Number.isInteger(forceTreeCount)) {
     placeForcedTrees(matrix, forceTreeCount, rng);

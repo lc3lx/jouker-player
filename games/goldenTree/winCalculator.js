@@ -230,7 +230,7 @@ function normalizeLandscapeMatrix(matrix) {
 }
 
 /**
- * Fixed 10-payline evaluation. Each payline is evaluated left-to-right.
+ * Fixed 20-payline evaluation. Each payline is evaluated left-to-right.
  * Seven requires only 2 consecutive; all others need 3.
  * Backend is sole payout authority.
  */
