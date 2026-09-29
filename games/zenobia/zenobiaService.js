@@ -167,6 +167,7 @@ async function executeSpin(userId, betAmountInput) {
       try {
         jackpotGame = await zenobiaJackpot.createRoundForSpin({
           spinId: round.roundId,
+          betAmount,
           userId: userKey,
         });
       } catch (err) {

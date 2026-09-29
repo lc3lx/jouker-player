@@ -26,17 +26,17 @@ const MODE =
 // Re-use the same storage layer — no separate DB connection.
 const jackpotService = require("./jackpotService");
 
-async function _loadRound(roundId) {
+async function _loadRound(roundId, session) {
   // Access internal stub directly in test mode for speed
   if (MODE !== "mongo") {
     return jackpotService._getStubRounds().get(roundId) ?? null;
   }
   const PoseidonJackpotRound = require("../../../models/poseidonJackpotRoundModel");
-  const doc = await PoseidonJackpotRound.findOne({ roundId });
+  const doc = await PoseidonJackpotRound.findOne({ roundId }).session(session || null);
   return doc ? doc.toObject() : null;
 }
 
-async function _markSettled(roundId, settlementId) {
+async function _markSettled(roundId, settlementId, session) {
   if (MODE !== "mongo") {
     const rounds = jackpotService._getStubRounds();
     const r = rounds.get(roundId);
@@ -53,7 +53,8 @@ async function _markSettled(roundId, settlementId) {
   const PoseidonJackpotRound = require("../../../models/poseidonJackpotRoundModel");
   await PoseidonJackpotRound.findOneAndUpdate(
     { roundId },
-    { $set: { status: JACKPOT_STATUS.SETTLED, settlementId, settledAt: new Date() } }
+    { $set: { status: JACKPOT_STATUS.SETTLED, settlementId, settledAt: new Date() } },
+    { session }
   );
 }
 
@@ -67,7 +68,21 @@ async function _markSettled(roundId, settlementId) {
  * @returns {Promise<{settled:boolean, alreadySettled?:boolean, prizeAmount:number, balance:number}>}
  */
 async function settleJackpotRound(roundId, userId) {
-  const round = await _loadRound(roundId);
+  const wallet = require("../poseidonWalletAdapter");
+  return wallet.withUserLock(userId, async () => {
+    if (MODE !== "mongo") return settleWithinTransaction(roundId, userId);
+    const { withMongoTransaction } = require("../../../services/walletLedgerService");
+    const result = await withMongoTransaction(async (session) => {
+      // Never commit the prize and round marker separately.
+      if (!session) throw new Error("JACKPOT_REQUIRES_MONGO_TRANSACTION");
+      return settleWithinTransaction(roundId, userId, session);
+    });
+    return { ...result, balance: await wallet.getBalance(userId) };
+  });
+}
+
+async function settleWithinTransaction(roundId, userId, session) {
+  const round = await _loadRound(roundId, session);
 
   // ── validation ────────────────────────────────────────────────────────────
   if (!round) {
@@ -85,8 +100,8 @@ async function settleJackpotRound(roundId, userId) {
 
   // ── idempotency guard ─────────────────────────────────────────────────────
   if (round.status === JACKPOT_STATUS.SETTLED) {
-    const wallet = require("../poseidonWalletAdapter");
-    const balance = await wallet.getBalance(userId);
+    const wallet = round.game === "zenobia" ? require("../../zenobia/zenobiaWalletAdapter") : require("../poseidonWalletAdapter");
+    const balance = session ? 0 : await wallet.getBalance(userId);
     return {
       settled: true,
       alreadySettled: true,
@@ -122,18 +137,20 @@ async function settleJackpotRound(roundId, userId) {
       round.game === "zenobia"
         ? require("../../zenobia/zenobiaWalletAdapter")
         : wallet;
-    const result = await walletMod.creditBalance(userId, prizeAmount, {
-      source,
-      roundId,
-      settlementId,
-      prizeType: round.prizeType,
-    });
-    balanceAfter = result.balance;
+    const meta = { source, roundId, settlementId, prizeType: round.prizeType };
+    if (session) {
+      const { ledgerDeposit } = require("../../../services/walletLedgerService");
+      await ledgerDeposit({ session, userId, amount: prizeAmount, ledgerType: "game_win", meta });
+      balanceAfter = 0; // Read committed balance after the transaction.
+    } else {
+      const result = await walletMod.creditBalance(userId, prizeAmount, meta);
+      balanceAfter = result.balance;
+    }
   } else {
     balanceAfter = await wallet.getBalance(userId);
   }
 
-  await _markSettled(roundId, settlementId);
+  await _markSettled(roundId, settlementId, session);
 
   return {
     settled: true,

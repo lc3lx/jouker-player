@@ -208,6 +208,7 @@ async function executeSpin(userId, betAmountInput) {
     try {
       jackpotGame = await goldenTreeJackpot.createRoundForSpin({
         spinId: round.roundId,
+        betAmount,
         userId: userKey,
       });
     } catch (_) {

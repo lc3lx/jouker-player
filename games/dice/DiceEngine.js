@@ -65,6 +65,9 @@ const BONUS_MULTIPLIER_WEIGHTS = [62, 16, 10, 5.5, 3, 1.8, .9, .45, .2];
 const SUPPRESSED_MULTIPLIER_WEIGHTS = [88, 9, 2.2, .5, .15, .05, .015, .005, .002];
 const MULTIPLIER_GATES = [.48, .35, .33, .32, .35, .4, .4, .35, .4];
 const BIG_MULTIPLIER_THRESHOLD = 20;
+// Same visibility rule as Poseidon: plaques show often, but most plaque
+// screens are dealt below a win so the art stays on screen without paying.
+const PLAQUE_WIN_KEEP = 0.34;
 const APPLIED_MULTIPLIER_CAP_BASE = Number.POSITIVE_INFINITY;
 const APPLIED_MULTIPLIER_CAP_BONUS = Number.POSITIVE_INFINITY;
 const MAX_TUMBLES = 40;
@@ -96,7 +99,7 @@ function headCells(grid) {
   return cells;
 }
 function pickSymbol(rng, isFreeSpin, bigAlready, superBonus = false) {
-  const plaqueWeight = isFreeSpin ? 0.55 : 0.44;
+  const plaqueWeight = isFreeSpin ? 3.5 : 2.8;
   const headWeight = isFreeSpin ? HEAD_WEIGHT_BONUS : HEAD_WEIGHT_BASE;
   const regular = isFreeSpin ? FREESPIN_WEIGHTS : BASE_WEIGHTS;
   const choice = weightedIndex(rng, [...regular, plaqueWeight, JACKPOT_WEIGHT, headWeight]);
@@ -137,9 +140,46 @@ function findPayAnywhereWins(grid, stake) {
 }
 function multiplierCells(grid) { const cells = []; for (let c = 0; c < COLS; c++) for (let r = 0; r < ROWS; r++) { const value = multiplierValue(grid[c][r]); if (value) cells.push({ col: c, row: r, value }); } return cells; }
 function collapseGrid(grid, removed, rng, volatility, doubleChance, isFreeSpin, superBonus = false) {
-  const next = []; let hasBig = multiplierCells(grid).some((m) => m.value >= BIG_MULTIPLIER_THRESHOLD);
-  for (let c = 0; c < COLS; c++) { const survivors = []; for (let r = 0; r < ROWS; r++) if (!removed.has(`${c},${r}`)) survivors.push(grid[c][r]); const incoming = []; while (incoming.length + survivors.length < ROWS) { const s = pickSymbol(rng, isFreeSpin, hasBig, superBonus); if (multiplierValue(s) >= BIG_MULTIPLIER_THRESHOLD) hasBig = true; incoming.push(s); } next[c] = [...incoming, ...survivors]; }
-  return next;
+  const next = []; const incomingCounts = []; let hasBig = multiplierCells(grid).some((m) => m.value >= BIG_MULTIPLIER_THRESHOLD);
+  for (let c = 0; c < COLS; c++) { const survivors = []; for (let r = 0; r < ROWS; r++) if (!removed.has(`${c},${r}`)) survivors.push(grid[c][r]); const incoming = []; while (incoming.length + survivors.length < ROWS) { const s = pickSymbol(rng, isFreeSpin, hasBig, superBonus); if (multiplierValue(s) >= BIG_MULTIPLIER_THRESHOLD) hasBig = true; incoming.push(s); } incomingCounts[c] = incoming.length; next[c] = [...incoming, ...survivors]; }
+  return { grid: next, incomingCounts };
+}
+function softenPlaqueWins(grid, mutableRows, rng) {
+  if (!multiplierCells(grid).length) return;
+  if (rng() < PLAQUE_WIN_KEEP) return;
+  for (let guard = 0; guard < 8; guard += 1) {
+    const { wins } = findPayAnywhereWins(grid, 1);
+    if (!wins.length) return;
+    const counts = new Array(REGULAR_SYMBOLS).fill(0);
+    for (let c = 0; c < COLS; c += 1) for (let r = 0; r < ROWS; r += 1) {
+      const symbol = grid[c][r];
+      if (symbol >= 0 && symbol < REGULAR_SYMBOLS) counts[symbol] += 1;
+    }
+    let progressed = false;
+    for (const win of wins) {
+      let extra = counts[win.symbol] - (MIN_MATCH - 1);
+      if (extra <= 0) continue;
+      for (let c = 0; c < COLS && extra > 0; c += 1) {
+        const limit = mutableRows[c] || 0;
+        for (let r = 0; r < limit && extra > 0; r += 1) {
+          if (grid[c][r] !== win.symbol) continue;
+          let replacement = -1;
+          let bestN = Infinity;
+          for (let symbol = 0; symbol < REGULAR_SYMBOLS; symbol += 1) {
+            if (symbol === win.symbol || counts[symbol] >= MIN_MATCH - 1) continue;
+            if (counts[symbol] < bestN) { bestN = counts[symbol]; replacement = symbol; }
+          }
+          if (replacement < 0) return;
+          counts[win.symbol] -= 1;
+          counts[replacement] += 1;
+          grid[c][r] = replacement;
+          extra -= 1;
+          progressed = true;
+        }
+      }
+    }
+    if (!progressed) return;
+  }
 }
 function appliedMultiplierFor(sum, isBonus) { return sum > 0 ? sum : 1; }
 function resolvePayoutMultiplier({ baseWin = 0, plaqueSum = 0, carried = 0, isFreeSpin = false } = {}) {
@@ -159,7 +199,9 @@ function runTumbles(initialGrid, rng, options) {
     const beforeGrid = cloneGrid(grid), { wins, winningCells: stepKeys } = findPayAnywhereWins(grid, options.stake);
     if (!wins.length) break;
     const stepWin = roundMoney(wins.reduce((sum, w) => sum + w.win, 0)); baseWin = roundMoney(baseWin + stepWin);
-    const afterGrid = collapseGrid(grid, stepKeys, rng, options.volatility, options.doubleChance, options.isFreeSpin, options.superBonus);
+    const collapsed = collapseGrid(grid, stepKeys, rng, options.volatility, options.doubleChance, options.isFreeSpin, options.superBonus);
+    softenPlaqueWins(collapsed.grid, collapsed.incomingCounts, rng);
+    const afterGrid = collapsed.grid;
     stepKeys.forEach((key) => winningCells.add(key)); lineWins.push(...wins);
     cascadeSteps.push({ phase: "tumble", index, grid: beforeGrid, afterGrid: cloneGrid(afterGrid), win: stepWin, wins, cells: [...stepKeys].map((key) => { const [col, row] = key.split(",").map(Number); return { col, row }; }), multiplierHits: multiplierCells(afterGrid), multiplierTotal: multiplierCells(afterGrid).reduce((sum, m) => sum + m.value, 0) });
     grid = afterGrid;
@@ -179,6 +221,7 @@ function calculateWins(grid, stake, freeSpinMultiplier = 0) { const { wins, winn
 function spin(baseBet, options = {}) {
   const rng = createSeededRng(options.serverSeed, options.clientSeed, options.nonce), isFreeSpin = !!options.isFreeSpin, superBonus = !!(isFreeSpin && options.superBonus), stake = roundMoney(baseBet);
   const initialGrid = generateGrid(rng, options.volatility, false, isFreeSpin, superBonus);
+  softenPlaqueWins(initialGrid, Array(COLS).fill(ROWS), rng);
   const tumble = runTumbles(initialGrid, rng, { stake, volatility: normalizeVolatility(options.volatility), doubleChance: false, isFreeSpin, superBonus, freeSpinMultiplier: options.freeSpinMultiplier });
   const scatterCount = headCells(tumble.finalGrid).length, winCap = roundMoney(MAX_WIN_MULTIPLIER * stake);
   const totalWin = Math.min(tumble.multipliedWin, winCap);

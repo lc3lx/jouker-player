@@ -125,8 +125,9 @@ const PAYTABLE = Object.freeze({
  * Tree multiplier tiers as [multiplier, weight] pairs.
  *
  * Multiplier 1 is the plain tree: it still substitutes as a wild but carries no
- * badge and no payout boost, and it is the tier a player sees most often. ×2 is
- * uncommon, ×3 rare, ×5 the jackpot of the tier ladder.
+ * badge and no payout boost, and it is the tier a player sees most often.
+ * Base game: ×2 uncommon, ×3 rare, ×5 the rarest.
+ * Bought bonus: ×2, ×3 and ×5 are all very rare (97% / 2.2% / 0.6% / 0.2%).
  */
 const MAIN_WILD_MULTIPLIER_WEIGHTS = Object.freeze([
   [1, 62],
@@ -135,9 +136,9 @@ const MAIN_WILD_MULTIPLIER_WEIGHTS = Object.freeze([
   [5, 2],
 ]);
 const BONUS_WILD_MULTIPLIER_WEIGHTS = Object.freeze([
-  [1, 60],
-  [2, 28],
-  [3, 10],
+  [1, 970],
+  [2, 22],
+  [3, 6],
   [5, 2],
 ]);
 

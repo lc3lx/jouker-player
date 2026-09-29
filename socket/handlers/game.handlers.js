@@ -1410,6 +1410,7 @@ function registerGameHandlers(nsp, jwtVerify) {
         if (outcome.jackpotTriggered) {
           try {
             jackpotGame = await kingArthJackpot.createRoundForSpin({
+              betAmount: bet,
               spinId: String(play._id),
               userId,
             });

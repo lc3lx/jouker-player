@@ -38,6 +38,10 @@ const poseidonJackpotRoundSchema = new mongoose.Schema(
     /** Server-determined prize type: "no_win" | "super10m" | "mega50m" | "grand100m". */
     prizeType: { type: String, required: true },
 
+    /** Optional on legacy rounds; new rounds snapshot their validated base bet. */
+    betAmount: { type: Number, min: 0 },
+    payoutVersion: { type: Number },
+
     /** Prize amount in integer coins (0 for no_win). */
     prizeAmount: { type: Number, required: true, min: 0, default: 0 },
 

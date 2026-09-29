@@ -10,14 +10,19 @@ const crypto = require("crypto");
 const {
   REEL_COUNT,
   ROW_COUNT,
+  MIN_MATCH,
   BASE_WEIGHTS,
   BONUS_WEIGHTS,
+  PLAQUE_WIN_KEEP,
+  PAYING_SYMBOLS,
   MULTIPLIER_VALUES,
   BASE_MULTIPLIER_WEIGHTS,
   BONUS_MULTIPLIER_WEIGHTS,
   SUPPRESSED_MULTIPLIER_WEIGHTS,
   BIG_MULTIPLIER_THRESHOLD,
   SUPER_MULTIPLIER_MIN,
+  isMultiplier,
+  isScatter,
   multiplierValue,
 } = require("./constants");
 const { findWins, collectMultipliers, collectScatters } = require("./winCalculator");
@@ -112,6 +117,80 @@ function drawCell(pick, rng, { bonus = false, bigAlready = false, superBonus = f
     : symbol;
 }
 
+function matrixHasMultiplier(matrix) {
+  for (const col of matrix) {
+    for (const cell of col) {
+      if (isMultiplier(cell)) return true;
+    }
+  }
+  return false;
+}
+
+function payingCounts(matrix) {
+  const counts = new Map();
+  for (const col of matrix) {
+    for (const cell of col) {
+      if (isMultiplier(cell) || isScatter(cell) || cell === "jackpot") continue;
+      counts.set(cell, (counts.get(cell) || 0) + 1);
+    }
+  }
+  return counts;
+}
+
+/** Paying symbol that can take one more copy without reaching a win. */
+function safeReplacement(counts, avoid) {
+  let best = null;
+  let bestN = Infinity;
+  for (const symbol of PAYING_SYMBOLS) {
+    if (symbol === avoid) continue;
+    const n = counts.get(symbol) || 0;
+    if (n >= MIN_MATCH - 1) continue;
+    if (n < bestN) {
+      best = symbol;
+      bestN = n;
+    }
+  }
+  return best;
+}
+
+/**
+ * Plaques stay on screen. When one is visible, most would-be wins are broken
+ * by swapping newly dealt paying symbols down below MIN_MATCH. Survivor cells
+ * from a tumble are left alone so refill lists still rebuild the column.
+ * [mutableRows] is how many top cells of each column may change.
+ */
+function softenPlaqueWins(matrix, mutableRows, rng, refills = null) {
+  if (!matrixHasMultiplier(matrix)) return;
+  if (rng() < PLAQUE_WIN_KEEP) return;
+
+  for (let guard = 0; guard < 8; guard += 1) {
+    const wins = findWins(matrix);
+    if (wins.length === 0) return;
+    const counts = payingCounts(matrix);
+    let progressed = false;
+
+    for (const win of wins) {
+      let extra = (counts.get(win.symbol) || 0) - (MIN_MATCH - 1);
+      if (extra <= 0) continue;
+      for (let col = 0; col < REEL_COUNT && extra > 0; col += 1) {
+        const limit = mutableRows[col] || 0;
+        for (let row = 0; row < limit && extra > 0; row += 1) {
+          if (matrix[col][row] !== win.symbol) continue;
+          const replacement = safeReplacement(counts, win.symbol);
+          if (!replacement) return;
+          counts.set(win.symbol, (counts.get(win.symbol) || 1) - 1);
+          counts.set(replacement, (counts.get(replacement) || 0) + 1);
+          matrix[col][row] = replacement;
+          if (refills && refills[col]) refills[col][row] = replacement;
+          extra -= 1;
+          progressed = true;
+        }
+      }
+    }
+    if (!progressed) return;
+  }
+}
+
 function generateGrid(pick, rng, { bonus = false, superBonus = false } = {}) {
   const matrix = [];
   let bigAlready = 0;
@@ -190,6 +269,7 @@ function resolveSpin({ bonusMode = false, superBonus = false, rng = secureRandom
   const drawOpts = { bonus: bonusMode, superBonus: !!superBonus && bonusMode };
 
   let matrix = generateGrid(pick, rng, drawOpts);
+  softenPlaqueWins(matrix, Array(REEL_COUNT).fill(ROW_COUNT), rng);
   const initialMatrix = matrix.map((col) => [...col]);
 
   const steps = [];
@@ -202,6 +282,12 @@ function resolveSpin({ bonusMode = false, superBonus = false, rng = secureRandom
     baseWin += stepWin;
     const removedPositions = wins.flatMap((w) => w.positions);
     const result = tumble(matrix, removedPositions, pick, rng, drawOpts);
+    softenPlaqueWins(
+      result.matrix,
+      result.refills.map((col) => col.length),
+      rng,
+      result.refills,
+    );
     matrix = result.matrix;
 
     steps.push({

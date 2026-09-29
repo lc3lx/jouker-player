@@ -65,11 +65,11 @@ beforeEach(() => {
 
 describe("buildMatchThreeLayout", () => {
   test("returns exactly 9 cards", () => {
-    assert.equal(buildMatchThreeLayout().length, JACKPOT_CARD_COUNT);
+    assert.equal(buildMatchThreeLayout(100_000).length, JACKPOT_CARD_COUNT);
   });
 
   test("has exactly 3 of each prize tier", () => {
-    const cards = buildMatchThreeLayout();
+    const cards = buildMatchThreeLayout(100_000);
     const counts = { super10m: 0, mega50m: 0, grand100m: 0 };
     for (const c of cards) counts[c.prize]++;
     assert.equal(counts.super10m, 3);
@@ -78,14 +78,14 @@ describe("buildMatchThreeLayout", () => {
   });
 
   test("indices are 0..8", () => {
-    const indices = buildMatchThreeLayout().map((c) => c.index).sort((a, b) => a - b);
+    const indices = buildMatchThreeLayout(100_000).map((c) => c.index).sort((a, b) => a - b);
     assert.deepEqual(indices, [0, 1, 2, 3, 4, 5, 6, 7, 8]);
   });
 });
 
 describe("resolveFirstTriple", () => {
   test("returns null until 3 of same type revealed", () => {
-    const cards = buildMatchThreeLayout();
+    const cards = buildMatchThreeLayout(100_000);
     const first = cards.find((c) => c.prize === "super10m");
     const second = cards.find((c) => c.prize === "super10m" && c.index !== first.index);
     assert.equal(resolveFirstTriple(cards, [first.index]), null);
@@ -93,7 +93,7 @@ describe("resolveFirstTriple", () => {
   });
 
   test("returns prize when 3rd match revealed", () => {
-    const cards = buildMatchThreeLayout();
+    const cards = buildMatchThreeLayout(100_000);
     const supers = cards.filter((c) => c.prize === "super10m").map((c) => c.index);
     const result = resolveFirstTriple(cards, supers);
     assert.equal(result.type, "super10m");
@@ -103,7 +103,7 @@ describe("resolveFirstTriple", () => {
 
 describe("createJackpotRound", () => {
   test("creates round with hidden cards", async () => {
-    const data = await createJackpotRound({ spinId: "spin-1", userId: "user-jp-1" });
+    const data = await createJackpotRound({ betAmount: 100_000, spinId: "spin-1", userId: "user-jp-1" });
     assert.ok(data.roundId);
     assert.equal(data.spinId, "spin-1");
     assert.equal(data.prizeType, null);
@@ -115,7 +115,7 @@ describe("createJackpotRound", () => {
 
 describe("revealJackpotCard", () => {
   test("reveals one card and returns its face", async () => {
-    const created = await createJackpotRound({ spinId: "s1", userId: "u1" });
+    const created = await createJackpotRound({ betAmount: 100_000, spinId: "s1", userId: "u1" });
     const res = await revealJackpotCard(created.roundId, "u1", 0);
     assert.equal(res.card.index, 0);
     assert.ok(["super10m", "mega50m", "grand100m"].includes(res.card.prize));
@@ -123,7 +123,7 @@ describe("revealJackpotCard", () => {
   });
 
   test("game ends when 3 of same type are revealed", async () => {
-    const created = await createJackpotRound({ spinId: "s1", userId: "u2" });
+    const created = await createJackpotRound({ betAmount: 100_000, spinId: "s1", userId: "u2" });
     const stored = _getStubRounds().get(created.roundId);
     const targets = stored.cards
       .filter((c) => c.prize === "mega50m")
@@ -150,7 +150,7 @@ describe("settleJackpotRound", () => {
   }
 
   test("credits wallet after triple match", async () => {
-    const created = await createJackpotRound({ spinId: "s-grand", userId: "user-s1" });
+    const created = await createJackpotRound({ betAmount: 100_000, spinId: "s-grand", userId: "user-s1" });
     wallet.seedStubBalance("user-s1", 1_000_000);
     const before = await wallet.getBalance("user-s1");
 
@@ -163,7 +163,7 @@ describe("settleJackpotRound", () => {
   });
 
   test("rejects settle before triple match", async () => {
-    const created = await createJackpotRound({ spinId: "s-early", userId: "user-s2" });
+    const created = await createJackpotRound({ betAmount: 100_000, spinId: "s-early", userId: "user-s2" });
     await revealJackpotCard(created.roundId, "user-s2", 0);
     await assert.rejects(
       () => settleJackpotRound(created.roundId, "user-s2"),
@@ -172,7 +172,7 @@ describe("settleJackpotRound", () => {
   });
 
   test("idempotency — calling twice credits only once", async () => {
-    const created = await createJackpotRound({ spinId: "s-idem", userId: "user-s3" });
+    const created = await createJackpotRound({ betAmount: 100_000, spinId: "s-idem", userId: "user-s3" });
     wallet.seedStubBalance("user-s3", 500_000);
     await revealTriple(created.roundId, "user-s3", "super10m");
 

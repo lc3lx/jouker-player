@@ -187,12 +187,19 @@ const BASE_WEIGHTS = Object.freeze([
   [SYMBOLS.FISH, 7.5],
   [SYMBOLS.CROWN, 5.5],
   [SYMBOLS.PEARL, 5],
-  ["mult", 0.44],
+  ["mult", 2.8],
   [SCATTER, HEAD_WEIGHT_BASE],
   ["jackpot", 0.25],
 ]);
 
-/** Free spins: plaques rain more often; high faces stay rare for RTP. */
+/**
+ * When a plaque is already on screen, only this share of otherwise-winning
+ * boards is allowed to pay. The rest are dealt below the match minimum so the
+ * player still sees the multiplier art, but those spins win less often.
+ */
+const PLAQUE_WIN_KEEP = 0.34;
+
+/** Free spins: plaques show even more often; high faces stay rare for RTP. */
 const BONUS_WEIGHTS = Object.freeze([
   [SYMBOLS.S, 10],
   [SYMBOLS.N, 10],
@@ -203,7 +210,7 @@ const BONUS_WEIGHTS = Object.freeze([
   [SYMBOLS.FISH, 7.5],
   [SYMBOLS.CROWN, 5.5],
   [SYMBOLS.PEARL, 5],
-  ["mult", 0.55],
+  ["mult", 3.5],
   [SCATTER, HEAD_WEIGHT_BONUS],
   ["jackpot", 0.25],
 ]);
@@ -284,6 +291,7 @@ module.exports = {
   PAYTABLE,
   BASE_WEIGHTS,
   BONUS_WEIGHTS,
+  PLAQUE_WIN_KEEP,
   WIN_TIERS,
   MIN_MATCH,
   isScatter,

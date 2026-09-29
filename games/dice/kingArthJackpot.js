@@ -12,9 +12,10 @@ function isJackpotTriggered(finalGrid) {
   return DiceEngine.countJackpotSymbols(finalGrid) >= (JACKPOT_MIN_SYMBOLS || 3);
 }
 
-async function createRoundForSpin({ spinId, userId }) {
+async function createRoundForSpin({ spinId, userId, betAmount }) {
   return jackpotService.createJackpotRound({
     spinId,
+    betAmount,
     userId,
     game: "king-arth",
   });

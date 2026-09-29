@@ -103,9 +103,9 @@ function isJackpotTriggered(finalMatrix) {
   return countJackpotSymbols(finalMatrix) >= JACKPOT_MIN_SYMBOLS;
 }
 
-async function createJackpotRound({ spinId, userId, game = "poseidon" }) {
+async function createJackpotRound({ spinId, userId, betAmount, game = "poseidon" }) {
   const roundId = crypto.randomUUID();
-  const cards = buildMatchThreeLayout();
+  const cards = buildMatchThreeLayout(betAmount);
 
   const now = Date.now();
   const allowedGames = new Set(["poseidon", "king-arth", "golden-tree", "zenobia"]);
@@ -115,6 +115,8 @@ async function createJackpotRound({ spinId, userId, game = "poseidon" }) {
     spinId,
     userId: String(userId),
     game: gameKey,
+    betAmount,
+    payoutVersion: 2,
     prizeType: "pending",
     prizeAmount: 0,
     cards,
@@ -228,6 +230,9 @@ function _toGameData(round) {
   return {
     roundId: round.roundId,
     spinId: round.spinId,
+    betAmount: round.betAmount ?? null,
+    payoutVersion: round.payoutVersion ?? 1,
+    tierAmounts: Object.fromEntries(round.cards.filter(c => c.prize !== "no_win").map(c => [c.prize, c.amount])),
     prizeType: round.prizeType === "pending" ? null : round.prizeType,
     prizeAmount: round.prizeAmount ?? 0,
     cards: round.cards.map((c) => {

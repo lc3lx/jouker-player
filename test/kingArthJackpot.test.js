@@ -72,7 +72,7 @@ describe("kingArthJackpot trigger + round", () => {
   });
 
   test("create/reveal/settle match-3 flow", async () => {
-    const game = await kingArthJackpot.createRoundForSpin({
+    const game = await kingArthJackpot.createRoundForSpin({ betAmount: 100_000,
       spinId: "spin-1",
       userId: "user-1",
     });

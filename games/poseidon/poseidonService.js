@@ -183,6 +183,7 @@ async function executeSpin(userId, betAmountInput) {
       try {
         jackpotGame = await jackpotService.createJackpotRound({
           spinId: round.roundId,
+          betAmount,
           userId: userKey,
         });
       } catch (err) {

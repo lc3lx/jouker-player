@@ -7,9 +7,9 @@ const { JACKPOT_PRIZES, JACKPOT_CARD_COUNT } = require("./jackpotConstants");
 
 /** The three real jackpot tiers shown inside the 9 grid slots. */
 const MATCH_PRIZE_TYPES = Object.freeze([
-  { type: "super10m",  amount: 10_000_000 },
-  { type: "mega50m",   amount: 50_000_000 },
-  { type: "grand100m", amount: 100_000_000 },
+  { type: "super10m",  multiplier: 100 },
+  { type: "mega50m",   multiplier: 500 },
+  { type: "grand100m", multiplier: 1000 },
 ]);
 
 function defaultRng() {
@@ -42,15 +42,19 @@ function pickWeightedPrize(prizes = JACKPOT_PRIZES, rng = defaultRng) {
 }
 
 /**
- * Build a 3×3 grid with exactly 3 of each prize type (10M / 50M / 100M),
+ * Build a 3×3 grid with exactly 3 of each prize type (100x / 500x / 1000x the triggering bet),
  * shuffled server-side. The player reveals cards until the first triple
  * appears — that type is the win.
  */
-function buildMatchThreeLayout() {
+function buildMatchThreeLayout(betAmount) {
+  if (!Number.isFinite(betAmount) || betAmount <= 0 ||
+      !Number.isSafeInteger(Math.round(betAmount * 1000))) {
+    throw new Error("Invalid jackpot betAmount");
+  }
   const pool = [];
   for (const tier of MATCH_PRIZE_TYPES) {
     for (let i = 0; i < 3; i++) {
-      pool.push({ prize: tier.type, amount: tier.amount });
+      pool.push({ prize: tier.type, amount: Math.round(betAmount * tier.multiplier) });
     }
   }
 
@@ -87,7 +91,7 @@ function resolveFirstTriple(cards, revealedCards) {
 
 /** @deprecated use buildMatchThreeLayout */
 function buildCardLayout(selectedPrize, rng = defaultRng) {
-  return buildMatchThreeLayout();
+  return buildMatchThreeLayout(100_000);
 }
 
 module.exports = {
