@@ -81,12 +81,15 @@ async function executeSpin(userId, betAmountInput) {
     // Losing spins ignore plaques for payout (they still count for the free-spins
     // trigger below). Overall win is still hard-capped by MAX_WIN_MULTIPLIER.
     const carried = isFreeSpin ? Number(bonusSession.bonusMultiplier || 0) : 0;
-    const { applied: appliedMultiplier, nextCarried } = resolvePayoutMultiplier({
+    const freshPlaques = Math.max(0, Number(spin.multiplierSum) || 0);
+    let { applied: appliedMultiplier, nextCarried } = resolvePayoutMultiplier({
       baseWin: spin.baseWin,
-      plaqueSum: spin.multiplierSum,
+      plaqueSum: freshPlaques,
       carried,
       isFreeSpin,
     });
+    // A bought/free-spin bank never multiplies a win that has no new plaque.
+    if (!(freshPlaques > 0)) appliedMultiplier = 1;
     if (isFreeSpin) {
       roundManager.setBonusMultiplier(userKey, nextCarried);
     }
