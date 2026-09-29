@@ -7,7 +7,7 @@ const ApiError = require("./apiError");
  * Transparent sprites keep their alpha. Tight bounds let the client align the
  * actual rail with its seat layout instead of aligning an invisible canvas.
  */
-async function normalizeTableArtwork(buffer) {
+async function normalizeTableArtwork(buffer, { requireTransparentExterior = false } = {}) {
   const { data, info } = await sharp(buffer, { limitInputPixels: 40_000_000 })
     .rotate().resize(2048, 1024, { fit: "inside", withoutEnlargement: true })
     .toColourspace("srgb").ensureAlpha().raw().toBuffer({ resolveWithObject: true });
@@ -28,6 +28,9 @@ async function normalizeTableArtwork(buffer) {
     return hi <= 16 ? "black" : lo >= 240 ? "white" : "other";
   };
   const opaqueTones = new Set(corners.map(tone).filter((v) => v !== "clear"));
+  if (requireTransparentExterior && opaqueTones.has("other") && corners.every(i => tone(i) !== "clear")) {
+    throw new ApiError("خلفية صورة الطاولة معقّدة. ارفع الطاولة وحدها بخلفية شفافة أو سوداء أو بيضاء سادة لتتم معالجتها بدون تشويه.", 400);
+  }
   const matte = opaqueTones.size === 1 && !opaqueTones.has("other") ? [...opaqueTones][0] : null;
   const visit = (i) => {
     if (visited[i]) return;

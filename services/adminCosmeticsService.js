@@ -184,7 +184,7 @@ exports.resizeCosmeticPreview = asyncHandler(async (req, res, next) => {
   const filename = `cosmetic-${uuidv4()}-${Date.now()}.${isTable ? "png" : "jpeg"}`;
   let image = sharp(req.file.buffer).rotate();
   if (isTable) {
-    const clean = await require("../utils/normalizeTableArtwork").normalizeTableArtwork(req.file.buffer);
+    const clean = await require("../utils/normalizeTableArtwork").normalizeTableArtwork(req.file.buffer, { requireTransparentExterior: true });
     await fs.promises.writeFile(path.join(uploadsDir, filename), clean);
   } else {
     image = image.resize(512, 512, { fit: "inside", withoutEnlargement: true }).jpeg({ quality: 90 });
