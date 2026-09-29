@@ -645,9 +645,10 @@ class TrixGame extends BaseGameEngine {
     }));
     // Also resolves the table-wide felt now. This game used to get profile
     // skins only, so a table theme a player owned could not reach it.
-    const { byUserId: map, activeTableTheme } =
-      await resolveCardGameCosmeticsForSeats(seatsForResolve);
+    const { byUserId: map, activeTableTheme, activeTableAsset } =
+      await resolveCardGameCosmeticsForSeats(seatsForResolve, "trix");
     this.activeTableTheme = activeTableTheme || null;
+    this.activeTableAsset = activeTableAsset || null;
     for (const p of this.players) {
       if (p.isBot || !p.userId) {
         p.cosmetics = emptyCosmetics();
@@ -1145,6 +1146,7 @@ class TrixGame extends BaseGameEngine {
       // applyCosmeticsToPlayers from seated VIP first, then the lowest-seated
       // player's equipped theme. Same key space as poker.
       activeTableTheme: this.activeTableTheme || null,
+      activeTableAsset: this.activeTableAsset || null,
       // "solo" (يهودية) or "partnership" (شركة) — the client pairs facing
       // seats and shows one combined total per team when partnership.
       gameMode: this.gameMode,

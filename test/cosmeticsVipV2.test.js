@@ -74,6 +74,25 @@ test.after(async () => {
 
 // ── data model: de-enum + defaults + status mirror ───────────────────────────
 
+test("rectangular table image survives cache and reaches only its selected games", async () => {
+  const uid = new mongoose.Types.ObjectId();
+  const row = await Cosmetic.create({ type: "table_theme", name: "Emerald test",
+    assetKey: "rect_emerald_test", price: 0, games: ["trix", "tarneeb41"],
+    previewImage: "emerald_test.png" });
+  await ownRow(uid, row._id);
+  await cosmeticsService.equipCosmetic(uid, String(row._id));
+  const resolver = require("../services/playerPublicCosmeticsService");
+  const seats = [{ userId: String(uid), seatIndex: 0 }];
+  for (const game of ["trix", "tarneeb41", "trix"]) {
+    const result = await resolver.resolveCardGameCosmeticsForSeats(seats, game);
+    assert.equal(result.activeTableTheme, "rect_emerald_test");
+    assert.equal(result.activeTableAsset, "/uploads/cosmetics/emerald_test.png");
+  }
+  const poker = await resolver.resolvePublicCosmeticsForPokerSeats(seats);
+  assert.equal(poker.activeTableTheme, null);
+  assert.equal(poker.activeTableAsset, null);
+});
+
 test("new eastern table is added to existing catalogs without resetting an admin price", async () => {
   await Cosmetic.create({ type: "table_theme", name: "Existing", assetKey: "existing_before_east", price: 10 });
   let catalog = await cosmeticsService.listCatalog();
@@ -83,6 +102,20 @@ test("new eastern table is added to existing catalogs without resetting an admin
   catalog = await cosmeticsService.listCatalog();
   assert.equal(catalog.find((row) => row.assetKey === "arabesque_palace").price, 31_000_000);
   assert.equal(await Cosmetic.countDocuments({ assetKey: "arabesque_palace" }), 1);
+});
+
+test("Dubai and Damascus are added once with requested prices and retain admin changes", async () => {
+  const catalog = await cosmeticsService.listCatalog();
+  for (const [key, price] of [["dubai_nights", 30_000_000], ["damascus_mosaic", 20_000_000]]) {
+    const row = catalog.find((item) => item.assetKey === key);
+    assert.equal(row.price, price);
+    assert.deepEqual(row.games, ["trix", "tarneeb41"]);
+    assert.equal(row.previewImageUrl, `/assets/tables/${key}.png`);
+    await Cosmetic.updateOne({ _id: row.id }, { $set: { price: price + 1 } });
+    const refreshed = await cosmeticsService.listCatalog();
+    assert.equal(refreshed.find((item) => item.assetKey === key).price, price + 1);
+    assert.equal(await Cosmetic.countDocuments({ assetKey: key }), 1);
+  }
 });
 
 test("admin table upload, price update and equipped image reach the table without a client asset key", async () => {

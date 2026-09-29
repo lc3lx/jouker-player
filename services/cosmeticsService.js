@@ -209,8 +209,8 @@ async function ensureDefaultCatalog() {
   }
 
   // Add the new table to existing catalogs without overwriting admin prices.
-  const easternTable = DEFAULT_CATALOG.find((row) => row.assetKey === "arabesque_palace");
-  if (easternTable) {
+  const newTableKeys = ["arabesque_palace", "dubai_nights", "damascus_mosaic"];
+  for (const easternTable of DEFAULT_CATALOG.filter((row) => newTableKeys.includes(row.assetKey))) {
     await Cosmetic.updateOne(
       { type: "table_theme", assetKey: easternTable.assetKey },
       { $setOnInsert: easternTable }, { upsert: true }
@@ -315,12 +315,14 @@ function payloadFromRowAndIdMap(row, idTo) {
   // Data-driven: resolve every equipped slot to its asset key.
   const bySlot = {};
   const assetBySlot = {};
+  const gamesBySlot = {};
   for (const [slot, cid] of entriesOf(row.equippedBySlot)) {
     if (!cid) continue;
     const c = idTo.get(String(cid));
     if (c) {
       bySlot[slot] = c.assetKey;
       assetBySlot[slot] = resolveAssetUrl(c.previewImage);
+      gamesBySlot[slot] = c.games;
     }
   }
   // Legacy fallback for rows created before the equippedBySlot migration.
@@ -335,6 +337,7 @@ function payloadFromRowAndIdMap(row, idTo) {
       if (c) {
         bySlot[slot] = c.assetKey;
         assetBySlot[slot] = resolveAssetUrl(c.previewImage);
+        gamesBySlot[slot] = c.games;
       }
     }
   }
@@ -342,7 +345,7 @@ function payloadFromRowAndIdMap(row, idTo) {
   const cardSkin = bySlot.card_back || null;
   const avatarFrame = bySlot.avatar_frame || null;
   // `skin` is the public alias for equipped avatar_frame (country skins).
-  return { tableTheme, tableAsset: assetBySlot.table_theme || null, cardSkin, avatarFrame, skin: avatarFrame, bySlot };
+  return { tableTheme, tableAsset: assetBySlot.table_theme || null, tableGames: gamesBySlot.table_theme || [], cardSkin, avatarFrame, skin: avatarFrame, bySlot };
 }
 
 /**
@@ -420,6 +423,7 @@ async function dropUnentitledVipEquips(payloads) {
     payloads.set(uid, {
       tableTheme: bySlot.table_theme || null,
       tableAsset: bySlot.table_theme === p.tableTheme ? p.tableAsset || null : null,
+      tableGames: p.tableGames || [],
       cardSkin: bySlot.card_back || null,
       avatarFrame,
       skin: avatarFrame,
@@ -448,6 +452,7 @@ async function resolveEquippedPayloadForUsers(userIds) {
       out.set(uid, {
         tableTheme: p.tableTheme ?? null,
         tableAsset: p.tableAsset ?? null,
+        tableGames: p.tableGames || [],
         cardSkin: p.cardSkin ?? null,
         avatarFrame: p.avatarFrame ?? null,
         skin: p.skin ?? p.avatarFrame ?? null,
@@ -485,7 +490,7 @@ async function resolveEquippedPayloadForUsers(userIds) {
           _id: { $in: [...cosmeticIds].map((x) => toObjectId(x)).filter(Boolean) },
           isActive: true,
         })
-          .select("assetKey type previewImage")
+          .select("assetKey type previewImage games")
           .lean()
       : [];
   const idTo = new Map(cDocs.map((c) => [String(c._id), c]));

@@ -221,6 +221,20 @@ module.exports = [
     featuredOrder: 3,
     games: ["poker"],
   },
+  {
+    type: "table_theme", name: "طاولة ليالي دبي", nameAr: "طاولة ليالي دبي",
+    description: "مخمل كحلي وحواف ذهبية مستوحاة من أفق دبي",
+    assetKey: "dubai_nights", previewImage: "/assets/tables/dubai_nights.png",
+    price: 30_000_000, rarity: "legendary", isActive: true,
+    featured: true, featuredOrder: 4, games: ["trix", "tarneeb41"],
+  },
+  {
+    type: "table_theme", name: "طاولة ياسمين دمشق", nameAr: "طاولة ياسمين دمشق",
+    description: "مخمل خمري وخشب مطعّم بالصدف والموزاييك والياسمين الدمشقي",
+    assetKey: "damascus_mosaic", previewImage: "/assets/tables/damascus_mosaic.png",
+    price: 20_000_000, rarity: "legendary", isActive: true,
+    featured: true, featuredOrder: 5, games: ["trix", "tarneeb41"],
+  },
   // VIP-themed avatar frames, composed onto the 1080×1080 canvas every frame
   // uses, with their opening centred on the avatar hole — see
   // ProfileAvatarFrameLayout ("We scale the PNG so the hole matches the photo").

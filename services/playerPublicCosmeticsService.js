@@ -1,4 +1,5 @@
 "use strict";
+const { equippedTableForGame } = require("../utils/tableArtworkGames");
 
 /**
  * Public seat cosmetics — server is the single source of truth.
@@ -8,7 +9,7 @@
  *  - Per seat: profile skin + owner card backs only.
  *
  * Trix / Tarneeb:
- *  - Profile skin (+ vipLevel badge) only — no table or card cosmetics.
+ *  - Profile skin per seat and a shared, game-compatible table image/theme.
  */
 const cosmeticsService = require("./cosmeticsService");
 const vipService = require("./vipService");
@@ -121,8 +122,7 @@ async function resolvePublicCosmeticsForPokerSeats(seats) {
     // `s.seatIndex` when the caller supplies one, else position in the array.
     seatedForTable.push({
       vipLevel: vipMap.get(uid) || null,
-      equippedTableTheme: equippedMap.get(uid)?.tableTheme || null,
-      equippedTableAsset: equippedMap.get(uid)?.tableAsset || null,
+      ...equippedTableForGame(equippedMap.get(uid), "poker"),
       seatIndex: Number.isFinite(s.seatIndex) ? s.seatIndex : index,
     });
   }
@@ -172,11 +172,11 @@ async function resolveProfileOnlyCosmeticsForSeats(seats) {
  *
  * @returns {Promise<{ byUserId: Map<string, object>, activeTableTheme: string|null }>}
  */
-async function resolveCardGameCosmeticsForSeats(seats) {
+async function resolveCardGameCosmeticsForSeats(seats, game = "trix") {
   const humanIds = humanIdsFromSeats(seats);
   const byUserId = new Map();
   if (humanIds.length === 0) {
-    return { byUserId, activeTableTheme: null };
+    return { byUserId, activeTableTheme: null, activeTableAsset: null };
   }
 
   const [equippedMap, vipMap] = await Promise.all([
@@ -190,7 +190,7 @@ async function resolveCardGameCosmeticsForSeats(seats) {
     const uid = String(s.userId);
     seatedForTable.push({
       vipLevel: vipMap.get(uid) || null,
-      equippedTableTheme: equippedMap.get(uid)?.tableTheme || null,
+      ...equippedTableForGame(equippedMap.get(uid), game),
       seatIndex: Number.isFinite(s.seatIndex) ? s.seatIndex : index,
     });
   }
@@ -204,8 +204,9 @@ async function resolveCardGameCosmeticsForSeats(seats) {
     });
   }
 
-  const { activeTableTheme } = resolveActiveTableCosmetics(seatedForTable);
-  return { byUserId, activeTableTheme };
+  const { activeTableTheme, activeTableAsset } = resolveActiveTableCosmetics(seatedForTable);
+  const hasEquippedArt = seatedForTable.some((seat) => seat.equippedTableTheme === activeTableTheme && seat.equippedTableAsset);
+  return { byUserId, activeTableTheme, activeTableAsset: hasEquippedArt ? activeTableAsset : null };
 }
 
 /** Backward-compatible alias for poker resolvers. */
