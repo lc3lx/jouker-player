@@ -2,7 +2,7 @@
  * King Earth slot engine.
  *
  * The presentation keeps its legacy `dice_*` socket contract, while the game
- * maths follows Poseidon: 6x5 scatter pays, 7+ symbols win, winning symbols
+ * maths follows Poseidon: 6x5 scatter pays, 8+ symbols win, winning symbols
  * tumble, and multiplier plaques remain in place until the sequence ends.
  */
 const { createSeededRng } = require("./seededRng");
@@ -36,8 +36,6 @@ const MAX_WIN_MULTIPLIER = 5000;
 const BET_MIN = 10000;
 const BET_MAX = 1000000000;
 const MIN_MATCH = 8;
-/** Bought free spins connect from 7 symbols so a 10-spin purchase wins several times. */
-const BONUS_MIN_MATCH = 7;
 
 // Kept as aliases because the socket/client response historically calls the
 // head-scatter counter `scatterCount`. Multiplier plaques no longer open bonus.
@@ -101,7 +99,8 @@ function headCells(grid) {
   return cells;
 }
 function pickSymbol(rng, isFreeSpin, bigAlready, superBonus = false) {
-  const plaqueWeight = isFreeSpin ? 0.28 : 2.8;
+  // Same plaque visibility as Poseidon: base 2.8, free spins 3.5.
+  const plaqueWeight = isFreeSpin ? 3.5 : 2.8;
   const headWeight = isFreeSpin ? HEAD_WEIGHT_BONUS : HEAD_WEIGHT_BASE;
   const regular = isFreeSpin ? FREESPIN_WEIGHTS : BASE_WEIGHTS;
   const choice = weightedIndex(rng, [...regular, plaqueWeight, JACKPOT_WEIGHT, headWeight]);
@@ -128,21 +127,18 @@ function generateGrid(rng, volatility, doubleChance = false, isFreeSpin = false,
   for (let c = 0; c < COLS; c++) { grid[c] = []; for (let r = 0; r < ROWS; r++) { const s = pickSymbol(rng, isFreeSpin, hasBig, superBonus); if (multiplierValue(s) >= BIG_MULTIPLIER_THRESHOLD) hasBig = true; grid[c][r] = s; } }
   return grid;
 }
-function symbolMultiplier(symbol, count, minMatch = MIN_MATCH) {
+function symbolMultiplier(symbol, count) {
   const bands = PAYTABLE[symbol] || [];
   if (count >= 12) return bands[2] || 0;
   if (count >= 10) return bands[1] || 0;
   if (count >= MIN_MATCH) return bands[0] || 0;
-  // Bonus-only 7-match: a smaller hit so bought spins connect often
-  // without paying the full 8-match price.
-  if (count >= minMatch) return Math.round((bands[0] || 0) * 0.55 * 100) / 100;
   return 0;
 }
-function findPayAnywhereWins(grid, stake, minMatch = MIN_MATCH) {
+function findPayAnywhereWins(grid, stake) {
   const wins = [], winningCells = new Set();
   for (let symbol = 0; symbol < REGULAR_SYMBOLS; symbol++) {
     const cells = []; for (let c = 0; c < COLS; c++) for (let r = 0; r < ROWS; r++) if (grid[c][r] === symbol) cells.push({ col: c, row: r });
-    const multiplier = symbolMultiplier(symbol, cells.length, minMatch); if (!multiplier) continue;
+    const multiplier = symbolMultiplier(symbol, cells.length); if (!multiplier) continue;
     cells.forEach((cell) => winningCells.add(`${cell.col},${cell.row}`));
     wins.push({ type: "pay_anywhere", symbol, count: cells.length, multiplier, win: roundMoney(stake * multiplier), cells });
   }
@@ -209,8 +205,7 @@ function classifyWinType(total, stake) { const r = total / Math.max(stake, 1); r
 function runTumbles(initialGrid, rng, options) {
   let grid = cloneGrid(initialGrid), baseWin = 0; const lineWins = [], winningCells = new Set(), cascadeSteps = [];
   for (let index = 0; index < MAX_TUMBLES; index++) {
-    const minMatch = options.isFreeSpin ? BONUS_MIN_MATCH : MIN_MATCH;
-    const beforeGrid = cloneGrid(grid), { wins, winningCells: stepKeys } = findPayAnywhereWins(grid, options.stake, minMatch);
+    const beforeGrid = cloneGrid(grid), { wins, winningCells: stepKeys } = findPayAnywhereWins(grid, options.stake);
     if (!wins.length) break;
     const stepWin = roundMoney(wins.reduce((sum, w) => sum + w.win, 0)); baseWin = roundMoney(baseWin + stepWin);
     const collapsed = collapseGrid(grid, stepKeys, rng, options.volatility, options.doubleChance, options.isFreeSpin, options.superBonus);
