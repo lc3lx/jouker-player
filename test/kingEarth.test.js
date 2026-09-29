@@ -139,7 +139,7 @@ test("bonus payout multiplier banks only on winning free spins", () => {
       carried: 15,
       isFreeSpin: true,
     }),
-    { applied: 15, nextCarried: 15, plaques: 0 },
+    { applied: 1, nextCarried: 15, plaques: 0 },
   );
   assert.deepEqual(
     engine.resolvePayoutMultiplier({

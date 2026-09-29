@@ -9,11 +9,12 @@ const {
   unequipCosmetic,
   autoEquipAfterBuy,
 } = require("../services/cosmeticsService");
-function refreshCosmeticsForUserOnTables(userId) {
+async function refreshCosmeticsForUserOnTables(userId) {
   // Lazy require — tableGame is a huge graph; a top-level require here can
   // leave this module half-exported and crash cosmeticsRoute on boot.
   const tableGame = require("../sockets/tableGame");
-  return tableGame.refreshCosmeticsForUserOnTables(userId);
+  await tableGame.refreshCosmeticsForUserOnTables(userId);
+  await require('../services/cardTableCosmeticsRefresh').refreshCardTableCosmeticsForUser(userId);
 }
 
 exports.getCatalog = async (req, res, next) => {

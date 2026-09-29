@@ -77,7 +77,7 @@ async function executeSpin(userId, betAmountInput) {
 
     // --- win math (bet multiples) ---
     // Base: this spin's plaques multiply a winning sequence. Bonus: plaques from
-    // winning spins bank into a session total that multiplies later wins.
+    // winning spins bank into a session total; later wins require a fresh plaque.
     // Losing spins ignore plaques for payout (they still count for the free-spins
     // trigger below). Overall win is still hard-capped by MAX_WIN_MULTIPLIER.
     const carried = isFreeSpin ? Number(bonusSession.bonusMultiplier || 0) : 0;

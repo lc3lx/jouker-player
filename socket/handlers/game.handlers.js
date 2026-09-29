@@ -412,7 +412,7 @@ async function handleTarneeb41AfterMove(nsp, ctx, result) {
   if (!ctx?.game || ctx.type !== "tarneeb41") return;
   const { tableId, game } = ctx;
 
-  if (result?.duplicate) {
+  if (result?.duplicate || result?.cosmeticsChanged) {
     broadcastTarneeb41TableState(nsp, tableId);
     return;
   }

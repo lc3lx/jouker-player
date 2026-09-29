@@ -7,7 +7,7 @@
  * plaques (x2 → x1000) stay on screen for the whole tumbling sequence; when
  * the sequence ends with a win, their sum multiplies it. Base game is
  * per-spin. During free spins, plaques from winning spins bank into a
- * session total that multiplies later wins (a losing spin does not add).
+ * session total activated only by fresh plaques on a win (losing spins do not add).
  * The character-head scatter is the free-spins trigger: 4+ heads in the base
  * game award 5 free spins; during free spins 3+ heads add 5 more. Multiplier
  * plaques only multiply wins — they never open the bonus.
@@ -116,7 +116,7 @@ function appliedMultiplierFor(sum, isBonus = false) {
  * Plaques only bank on a winning spin.
  * Base: this spin's plaques multiply the win.
  * Bonus: banked total + this spin's plaques (if win) multiplies the win, and
- * that new total carries to later winning free spins.
+ * that total carries forward, but activates only on wins with fresh plaques.
  */
 function resolvePayoutMultiplier({
   baseWin = 0,
@@ -128,8 +128,9 @@ function resolvePayoutMultiplier({
   const plaques = win ? Math.max(0, Number(plaqueSum) || 0) : 0;
   const prev = Math.max(0, Number(carried) || 0);
   const nextCarried = isFreeSpin ? prev + plaques : 0;
+  // The bank is retained, but a win needs a NEW plaque to activate it.
   const pool = isFreeSpin ? nextCarried : plaques;
-  const applied = win && pool > 0 ? pool : 1;
+  const applied = win && plaques > 0 && pool > 0 ? pool : 1;
   return { applied, nextCarried, plaques };
 }
 

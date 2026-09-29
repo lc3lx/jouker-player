@@ -260,8 +260,9 @@ function resolvePayoutMultiplier({
   const plaques = won ? Math.max(0, Number(plaqueSum) || 0) : 0;
   const prev = Math.max(0, Number(carried) || 0);
   const nextCarried = isFreeSpin ? prev + plaques : 0;
+  // The bank is retained, but a win needs a NEW plaque to activate it.
   const pool = isFreeSpin ? nextCarried : plaques;
-  const applied = won && pool > 0 ? appliedMultiplierFor(pool) : 1;
+  const applied = won && plaques > 0 && pool > 0 ? appliedMultiplierFor(pool) : 1;
   return { applied, nextCarried, plaques };
 }
 

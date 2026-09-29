@@ -74,6 +74,18 @@ test.after(async () => {
 
 // ── data model: de-enum + defaults + status mirror ───────────────────────────
 
+test("profile inventory includes unequipped owned tables and legacy equipped frames", async () => {
+  const uid = new mongoose.Types.ObjectId();
+  const frame = await Cosmetic.create({ type: "avatar_frame", name: "Gallery frame", assetKey: "gallery_frame", price: 1 });
+  const table = await Cosmetic.create({ type: "table_theme", name: "Gallery table", assetKey: "gallery_table", price: 2, previewImage: "/assets/tables/dubai_nights.png" });
+  await UserCosmetics.create({ user: uid, ownedItems: [frame._id, table._id], equipped: { avatarFrame: frame._id } });
+  const result = await cosmeticsService.getProfileCosmetics(uid);
+  assert.equal(result.ownedCount, 2);
+  const items = Object.values(result.ownedByCategory).flat();
+  assert.ok(items.some((item) => item.assetKey === "gallery_table" && item.previewImageUrl === "/assets/tables/dubai_nights.png"));
+  assert.equal(result.equippedDetailed.avatar_frame.assetKey, "gallery_frame");
+});
+
 test("rectangular table image survives cache and reaches only its selected games", async () => {
   const uid = new mongoose.Types.ObjectId();
   const row = await Cosmetic.create({ type: "table_theme", name: "Emerald test",

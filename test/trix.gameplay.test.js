@@ -32,6 +32,21 @@ function selectGame(game, gameType) {
   assert.equal(r.success, true, r.reason);
 }
 
+test("Trix grid publishes the actor of a played card, never the other hands", async () => {
+  const game = await mkGame();
+  try {
+    selectGame(game, "Trix");
+    const state = game.gameState;
+    const index = state.turnPlayerIndex;
+    state.players[index].hand = [{ rank: "J", suit: "Hearts", value: 11 }, { rank: "Q", suit: "Hearts", value: 12 }];
+    const result = GameManager.playCard(state, index, { rank: "J", suit: "Hearts" });
+    assert.equal(result.success, true);
+    const snapshot = game.getGameState((index + 1) % 4);
+    assert.deepEqual(snapshot.roundPlayedCards.at(-1), { rank: "J", suit: "Hearts", playerIndex: index });
+    assert.deepEqual(snapshot.hands[index], [null]);
+  } finally { game.destroy(); }
+});
+
 test("Diamonds — penalizes diamond cards taken", async () => {
   const game = await mkGame();
   selectGame(game, "Diamonds");

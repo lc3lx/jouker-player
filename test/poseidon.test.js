@@ -339,7 +339,7 @@ test("resolvePayoutMultiplier banks plaques only on winning free spins", () => {
       carried: 15,
       isFreeSpin: true,
     }),
-    { applied: 15, nextCarried: 15, plaques: 0 },
+    { applied: 1, nextCarried: 15, plaques: 0 },
   );
   assert.deepEqual(
     resolvePayoutMultiplier({
@@ -389,15 +389,17 @@ test("bought bonus accumulates winning plaques across free spins", async () => {
     assert.equal(b.bonusMultiplier, 15);
     assert.equal(b.totalWin, roundMoney(10000 * 15));
     const c = await poseidonService.executeSpin("user-bank", 10000);
-    assert.equal(c.appliedMultiplier, 15);
-    assert.equal(c.totalWin, roundMoney(10000 * 15));
+    assert.equal(c.appliedMultiplier, 1);
+    assert.equal(c.totalWin, 10000);
+    assert.equal(c.bonusMultiplier, 15);
     const d = await poseidonService.executeSpin("user-bank", 10000);
     assert.equal(d.totalWin, 0);
     assert.equal(d.appliedMultiplier, 1);
     assert.equal(d.bonusMultiplier, 15);
     const e = await poseidonService.executeSpin("user-bank", 10000);
-    assert.equal(e.appliedMultiplier, 15);
-    assert.equal(e.totalWin, roundMoney(10000 * 15));
+    assert.equal(e.appliedMultiplier, 1);
+    assert.equal(e.totalWin, 10000);
+    assert.equal(e.bonusMultiplier, 15);
   } finally {
     engine.resolveSpin = original;
   }

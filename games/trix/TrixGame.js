@@ -1187,6 +1187,7 @@ class TrixGame extends BaseGameEngine {
       roundPlayedCards: (this.gameState.roundPlayedCards || []).map((c) => ({
         rank: c.rank,
         suit: c.suit,
+        playerIndex: c.playerIndex,
       })),
       tricksTakenThisRound:
         forPlayerIndex >= 0 && forPlayerIndex < this.gameState.players.length

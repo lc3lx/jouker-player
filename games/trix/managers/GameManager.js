@@ -49,6 +49,7 @@ class GameManager {
 
     const card = player.hand[cardIndex];
     player.hand.splice(cardIndex, 1);
+    (gameState.roundPlayedCards ||= []).push({ rank: card.rank, suit: card.suit, playerIndex });
 
     if (gameState.currentGameType === 'Trix') {
       const suitStats = gameState.trixTable[card.suit];
@@ -70,7 +71,6 @@ class GameManager {
         gameState.leadingSuit = card.suit;
       }
       gameState.tableCards.push({ playerIndex, card });
-      gameState.roundPlayedCards.push({ rank: card.rank, suit: card.suit });
     }
 
     return { success: true };

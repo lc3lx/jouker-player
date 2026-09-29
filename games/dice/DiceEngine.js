@@ -147,8 +147,9 @@ function resolvePayoutMultiplier({ baseWin = 0, plaqueSum = 0, carried = 0, isFr
   const plaques = win ? Math.max(0, Number(plaqueSum) || 0) : 0;
   const prev = Math.max(0, Number(carried) || 0);
   const nextCarried = isFreeSpin ? prev + plaques : 0;
+  // The bank is retained, but a win needs a NEW plaque to activate it.
   const pool = isFreeSpin ? nextCarried : plaques;
-  const applied = win && pool > 0 ? pool : 1;
+  const applied = win && plaques > 0 && pool > 0 ? pool : 1;
   return { applied, nextCarried, plaques };
 }
 function classifyWinType(total, stake) { const r = total / Math.max(stake, 1); return r >= 50 ? "mega" : r >= 12 ? "big" : "normal"; }

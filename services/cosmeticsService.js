@@ -613,6 +613,12 @@ async function getProfileCosmetics(userId) {
     if (d) equippedDetailed[slot] = publicCosmeticDisplay(d);
   }
 
+  for (const [slot, field] of Object.entries(LEGACY_SLOT_FIELD)) {
+    if (equippedDetailed[slot] || !legacy[field]) continue;
+    const d = byId.get(String(legacy[field]));
+    if (d) equippedDetailed[slot] = publicCosmeticDisplay(d);
+  }
+
   return { ownedByCategory, equippedDetailed, ownedCount: ownedIds.length };
 }
 
