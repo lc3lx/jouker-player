@@ -43,6 +43,7 @@ exports.adminCreateAgentValidator = [
   check("displayName").optional().isString().isLength({ max: 80 }),
   check("paymentMethods").optional().isArray(),
   check("workingHours").optional().isString().isLength({ max: 120 }),
+  check("whatsapp").optional({ nullable: true }).isString().isLength({ max: 20 }),
   validatorMiddleware,
 ];
 

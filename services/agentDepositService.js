@@ -470,6 +470,7 @@ function cardFromProfile(profile, { uncovered = [] } = {}) {
     online: isAgentOnline(profile.user?._id),
     paymentMethods: profile.deposit?.paymentMethods || [],
     workingHours: profile.deposit?.workingHours || "",
+    whatsapp: String(profile.deposit?.whatsapp || "").replace(/[^\d]/g, ""),
     rating: profile.deposit?.rating ?? 5,
     ratingCount: profile.deposit?.ratingCount || 0,
     avgResponseMinutes: profile.deposit?.avgResponseMinutes || 0,
@@ -1749,6 +1750,7 @@ exports.adminListAgents = asyncHandler(async (req, res) => {
         }),
         paymentMethods: p.deposit?.paymentMethods || [],
         workingHours: p.deposit?.workingHours || "",
+        whatsapp: String(p.deposit?.whatsapp || "").replace(/[^\d]/g, ""),
         depositEnabled: !!p.deposit?.enabled,
         online: isAgentOnline(p.user?._id),
         stats: p.deposit?.stats || {},
@@ -1769,6 +1771,7 @@ exports.adminCreateAgent = asyncHandler(async (req, res) => {
     countries = [],
     paymentMethods = [],
     workingHours = "",
+    whatsapp,
   } = req.body || {};
 
   const user = await findRegisteredUser({
@@ -1798,7 +1801,7 @@ exports.adminCreateAgent = asyncHandler(async (req, res) => {
     });
   }
   profile.status = "approved";
-  profile.deposit = {
+  const nextDeposit = {
     ...(profile.deposit?.toObject?.() || profile.deposit || {}),
     enabled: true,
     displayName: sanitizeBody(displayName).slice(0, 80) || user.name || "وكيل",
@@ -1806,6 +1809,10 @@ exports.adminCreateAgent = asyncHandler(async (req, res) => {
     paymentMethods: paymentMethods.map((m) => sanitizeBody(m).slice(0, 60)).filter(Boolean),
     workingHours: sanitizeBody(workingHours).slice(0, 120),
   };
+  if (Object.prototype.hasOwnProperty.call(req.body || {}, "whatsapp")) {
+    nextDeposit.whatsapp = cleanWhatsapp(whatsapp);
+  }
+  profile.deposit = nextDeposit;
   await profile.save();
 
   logEvent({
@@ -1821,6 +1828,25 @@ exports.adminCreateAgent = asyncHandler(async (req, res) => {
     status: "success",
     data: { agentProfileId: String(profile._id), userId: String(user._id) },
   });
+});
+
+function cleanWhatsapp(raw) {
+  let digits = String(raw || "").replace(/[^\d]/g, "");
+  if (digits.startsWith("00")) digits = digits.slice(2);
+  if (!digits) return "";
+  if (digits.length < 8 || digits.length > 15) {
+    throw new ApiError("رقم الواتساب غير صالح", 400);
+  }
+  return digits;
+}
+
+exports.adminSetAgentWhatsapp = asyncHandler(async (req, res) => {
+  const whatsapp = cleanWhatsapp(req.body?.whatsapp);
+  const profile = await AgentProfile.findById(req.params.agentProfileId);
+  if (!profile) throw new ApiError("الوكيل غير موجود", 404);
+  profile.deposit.whatsapp = whatsapp;
+  await profile.save();
+  res.status(200).json({ status: "success", data: { whatsapp } });
 });
 
 exports.adminSetAgentStatus = asyncHandler(async (req, res) => {

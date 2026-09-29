@@ -104,7 +104,10 @@ async function sendPushToUser(userId, { title, body = "", data = {} } = {}) {
       tokens,
       notification: { title, body },
       data: stringData,
-      android: { priority: "high" },
+        android: {
+          priority: "high",
+          notification: { channelId: "play_alerts", sound: "default" },
+        },
       apns: { payload: { aps: { sound: "default" } } },
     });
 

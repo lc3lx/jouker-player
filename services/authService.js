@@ -16,6 +16,53 @@ const playerIdService = require("./playerIdService");
 const { publish } = require("../domain/events/domainEventBus");
 const Events = require("../domain/events/eventTypes");
 
+/** One admin gift, once, only for accounts created inside this month. */
+const SIGNUP_GIFT_COINS = 10_000_000;
+const SIGNUP_GIFT_FROM = Date.parse("2026-09-29T00:00:00+01:00");
+const SIGNUP_GIFT_UNTIL = Date.parse("2026-10-29T23:59:59.999+01:00");
+
+async function grantSignupAdminGift(userId) {
+  const now = Date.now();
+  if (now < SIGNUP_GIFT_FROM || now > SIGNUP_GIFT_UNTIL) return;
+
+  const claimed = await User.findOneAndUpdate(
+    { _id: userId, signupGiftGranted: { $ne: true } },
+    { $set: { signupGiftGranted: true } }
+  );
+  if (!claimed) return;
+
+  try {
+    const { ledgerDeposit } = require("./walletLedgerService");
+    await ledgerDeposit({
+      userId,
+      amount: SIGNUP_GIFT_COINS,
+      ledgerType: "admin_grant",
+      meta: {
+        channel: "signup_gift",
+        reason: "هدية الإدارة للتسجيل الجديد",
+        once: true,
+      },
+    });
+  } catch (err) {
+    await User.updateOne({ _id: userId }, { $set: { signupGiftGranted: false } });
+    throw err;
+  }
+
+  try {
+    const { createNotification } = require("./notificationService");
+    await createNotification({
+      userId,
+      category: "bonus",
+      title: "هدية من الإدارة",
+      subtitle: "تمت إضافة 10,000,000 كوينز إلى رصيدك",
+      sourceType: "signup_gift",
+      sourceId: String(userId),
+    });
+  } catch (_) {
+    /* coins are already on the wallet */
+  }
+}
+
 // @desc    Signup
 // @route   GET /api/v1/auth/signup
 // @access  Public
@@ -90,6 +137,12 @@ exports.signup = asyncHandler(async (req, res, next) => {
 
   // 3- Update user with wallet reference
   await User.findByIdAndUpdate(user._id, { wallet: wallet._id });
+
+  try {
+    await grantSignupAdminGift(user._id);
+  } catch (err) {
+    console.error("signup gift failed", err?.message || err);
+  }
 
   if (referredBy && inviteRaw) {
     await referralInviteService.linkReferralOnSignup(user._id, inviteRaw, clientSignals);

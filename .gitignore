@@ -10,6 +10,9 @@ node_modules/
 # Uploads (images, etc.)
 uploads/
 
+# Firebase Admin private key
+secrets/
+
 # Logs
 npm-debug.log
 yarn-error.log

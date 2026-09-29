@@ -37,6 +37,7 @@ const {
   adminListAgents,
   adminCreateAgent,
   adminSetAgentStatus,
+  adminSetAgentWhatsapp,
   adminAssignCountries,
   adminRechargeAgentWallet,
   adminWithdrawAgentBalance,
@@ -129,6 +130,7 @@ router.use("/admin", authService.allowedTo("admin", "manager"));
 router.get("/admin/agents", adminListAgents);
 router.post("/admin/agents", adminCreateAgentValidator, adminCreateAgent);
 router.put("/admin/agents/:agentProfileId/status", adminSetAgentStatus);
+router.put("/admin/agents/:agentProfileId/whatsapp", adminSetAgentWhatsapp);
 router.put("/admin/agents/:agentProfileId/countries", adminAssignCountries);
 router.post(
   "/admin/agents/:agentProfileId/wallet/recharge",

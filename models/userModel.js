@@ -137,6 +137,8 @@ const userSchema = new mongoose.Schema(
     /** Poker retention / stats (authoritative increments on hand settlement). */
     pokerHandsPlayed: { type: Number, default: 0, min: 0 },
     pokerHandsWon: { type: Number, default: 0, min: 0 },
+    /** One-time admin welcome gift (signup window only). */
+    signupGiftGranted: { type: Boolean, default: false },
     lastDailyBonusAt: { type: Date },
     /** Consecutive UTC days daily bonus claimed (streak). */
     dailyBonusStreak: { type: Number, default: 0, min: 0 },
