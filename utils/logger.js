@@ -10,6 +10,9 @@ function log(level, event, fields = {}) {
 }
 
 const logger = {
+  debug(event, fields = {}) {
+    log("debug", event, fields);
+  },
   info(event, fields = {}) {
     log("info", event, fields);
   },
