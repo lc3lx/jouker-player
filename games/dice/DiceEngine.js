@@ -59,7 +59,10 @@ const BASE_WEIGHTS = [
   10.73943662, 10.73943662, 10.73943662, 10.73943662,
   9.66549296, 9.66549296, 8.05457746, 5.90669014,
 ];
-const FREESPIN_WEIGHTS = [...BASE_WEIGHTS];
+const FREESPIN_WEIGHTS = [
+  12.4, 12.4, 12.4, 12.4,
+  8.6, 7.8, 6.4, 4.8,
+];
 const BASE_MULTIPLIER_WEIGHTS = [82, 11, 4.2, 1.6, .7, .3, .12, .05, .02];
 const BONUS_MULTIPLIER_WEIGHTS = [62, 16, 10, 5.5, 3, 1.8, .9, .45, .2];
 const SUPPRESSED_MULTIPLIER_WEIGHTS = [88, 9, 2.2, .5, .15, .05, .015, .005, .002];
@@ -67,7 +70,10 @@ const MULTIPLIER_GATES = [.48, .35, .33, .32, .35, .4, .4, .35, .4];
 const BIG_MULTIPLIER_THRESHOLD = 20;
 // Same visibility rule as Poseidon: plaques show often, but most plaque
 // screens are dealt below a win so the art stays on screen without paying.
-const PLAQUE_WIN_KEEP = 0.34;
+const PLAQUE_WIN_KEEP = 0.5;
+const FREESPIN_PAY_SCALE = 1;
+const BONUS_BANK_CAP = 10;
+const SUPER_BONUS_BANK_CAP = 48;
 const APPLIED_MULTIPLIER_CAP_BASE = Number.POSITIVE_INFINITY;
 const APPLIED_MULTIPLIER_CAP_BONUS = Number.POSITIVE_INFINITY;
 const MAX_TUMBLES = 40;
@@ -100,7 +106,7 @@ function headCells(grid) {
 }
 function pickSymbol(rng, isFreeSpin, bigAlready, superBonus = false) {
   // Same plaque visibility as Poseidon: base 2.8, free spins 3.5.
-  const plaqueWeight = isFreeSpin ? 3.5 : 2.8;
+  const plaqueWeight = isFreeSpin ? 4.4 : 2.8;
   const headWeight = isFreeSpin ? HEAD_WEIGHT_BONUS : HEAD_WEIGHT_BASE;
   const regular = isFreeSpin ? FREESPIN_WEIGHTS : BASE_WEIGHTS;
   const choice = weightedIndex(rng, [...regular, plaqueWeight, JACKPOT_WEIGHT, headWeight]);
@@ -134,13 +140,13 @@ function symbolMultiplier(symbol, count) {
   if (count >= MIN_MATCH) return bands[0] || 0;
   return 0;
 }
-function findPayAnywhereWins(grid, stake) {
+function findPayAnywhereWins(grid, stake, payScale = 1) {
   const wins = [], winningCells = new Set();
   for (let symbol = 0; symbol < REGULAR_SYMBOLS; symbol++) {
     const cells = []; for (let c = 0; c < COLS; c++) for (let r = 0; r < ROWS; r++) if (grid[c][r] === symbol) cells.push({ col: c, row: r });
     const multiplier = symbolMultiplier(symbol, cells.length); if (!multiplier) continue;
     cells.forEach((cell) => winningCells.add(`${cell.col},${cell.row}`));
-    wins.push({ type: "pay_anywhere", symbol, count: cells.length, multiplier, win: roundMoney(stake * multiplier), cells });
+    wins.push({ type: "pay_anywhere", symbol, count: cells.length, multiplier, win: roundMoney(stake * multiplier * payScale), cells });
   }
   return { wins, winningCells };
 }
@@ -191,11 +197,12 @@ function softenPlaqueWins(grid, mutableRows, rng, isFreeSpin = false) {
   }
 }
 function appliedMultiplierFor(sum, isBonus) { return sum > 0 ? sum : 1; }
-function resolvePayoutMultiplier({ baseWin = 0, plaqueSum = 0, carried = 0, isFreeSpin = false } = {}) {
+function resolvePayoutMultiplier({ baseWin = 0, plaqueSum = 0, carried = 0, isFreeSpin = false, bankCap = Infinity } = {}) {
   const win = Number(baseWin) > 0;
   const plaques = win ? Math.max(0, Number(plaqueSum) || 0) : 0;
   const prev = Math.max(0, Number(carried) || 0);
-  const nextCarried = isFreeSpin ? prev + plaques : 0;
+  const cap = Number.isFinite(bankCap) ? bankCap : Infinity;
+  const nextCarried = isFreeSpin ? Math.min(cap, prev + plaques) : 0;
   // The bank is retained, but a win needs a NEW plaque to activate it.
   const pool = isFreeSpin ? nextCarried : plaques;
   const applied = win && plaques > 0 && pool > 0 ? pool : 1;
@@ -205,7 +212,7 @@ function classifyWinType(total, stake) { const r = total / Math.max(stake, 1); r
 function runTumbles(initialGrid, rng, options) {
   let grid = cloneGrid(initialGrid), baseWin = 0; const lineWins = [], winningCells = new Set(), cascadeSteps = [];
   for (let index = 0; index < MAX_TUMBLES; index++) {
-    const beforeGrid = cloneGrid(grid), { wins, winningCells: stepKeys } = findPayAnywhereWins(grid, options.stake);
+    const beforeGrid = cloneGrid(grid), { wins, winningCells: stepKeys } = findPayAnywhereWins(grid, options.stake, options.isFreeSpin ? FREESPIN_PAY_SCALE : 1);
     if (!wins.length) break;
     const stepWin = roundMoney(wins.reduce((sum, w) => sum + w.win, 0)); baseWin = roundMoney(baseWin + stepWin);
     const collapsed = collapseGrid(grid, stepKeys, rng, options.volatility, options.doubleChance, options.isFreeSpin, options.superBonus);
@@ -223,6 +230,7 @@ function runTumbles(initialGrid, rng, options) {
     plaqueSum: collected,
     carried: options.isFreeSpin ? Number(options.freeSpinMultiplier) || 0 : 0,
     isFreeSpin: !!options.isFreeSpin,
+    bankCap: options.superBonus ? SUPER_BONUS_BANK_CAP : BONUS_BANK_CAP,
   });
   return { finalGrid: grid, baseWin, collectedMultiplier: collected, appliedMultiplier: resolved.applied, nextFreeSpinMultiplier: resolved.nextCarried, multipliedWin: roundMoney(baseWin * resolved.applied), lineWins, winningCells, cascadeSteps };
 }
@@ -237,4 +245,4 @@ function spin(baseBet, options = {}) {
   const jackpotSymbolCount = countJackpotSymbols(tumble.finalGrid);
   return { grid: initialGrid, initialGrid, finalGrid: tumble.finalGrid, stake, baseBet: stake, doubleChance: false, isFreeSpin, freeSpinPayoutMult: 1, volatility: normalizeVolatility(options.volatility), nearMiss: false, almostBonus: !isFreeSpin && scatterCount === 3, capped: tumble.multipliedWin > winCap, maxWin: winCap, totalWin, baseWin: tumble.baseWin, winningCells: [...tumble.winningCells].map((key) => { const [col, row] = key.split(",").map(Number); return { col, row }; }), lineWins: tumble.lineWins, scatterCount, jackpotSymbolCount, jackpotTriggered: jackpotSymbolCount >= JACKPOT_MIN_SYMBOLS, winType: classifyWinType(totalWin, stake), cascadeSteps: tumble.cascadeSteps, multipliers: { collected: tumble.collectedMultiplier, applied: tumble.appliedMultiplier, freeSpinTotal: tumble.nextFreeSpinMultiplier }, freeSpinsAwarded: !isFreeSpin && scatterCount >= 4 ? FREE_SPINS_AWARD : 0 };
 }
-module.exports = { COLS, ROWS, MIN_MATCH, REGULAR_SYMBOLS, SYMBOL_COUNT, SCATTER, HEAD, HEAD_WEIGHT_BASE, HEAD_WEIGHT_BONUS, MULTIPLIER, JACKPOT, JACKPOT_WEIGHT, JACKPOT_MIN_SYMBOLS, GEM_SYMBOLS, FREE_SPINS_AWARD, FREE_SPINS_BOUGHT, RETRIGGER_AWARD, RETRIGGER_MIN_SCATTER, BUY_COST_MULT, SUPER_BUY_COST_MULT, SUPER_MULTIPLIER_MIN, MAX_WIN_MULTIPLIER, BET_MIN, BET_MAX, PAYTABLE, MULTIPLIER_VALUES, BASE_WEIGHTS, FREESPIN_WEIGHTS, MULTIPLIER_GATES, BASE_MULTIPLIER_WEIGHTS, BONUS_MULTIPLIER_WEIGHTS, SUPPRESSED_MULTIPLIER_WEIGHTS, BIG_MULTIPLIER_THRESHOLD, APPLIED_MULTIPLIER_CAP_BASE, APPLIED_MULTIPLIER_CAP_BONUS, appliedMultiplierFor, resolvePayoutMultiplier, normalizeVolatility, pickMultiplierValue, symbolMultiplier, isJackpot, isHead, countJackpotSymbols, generateGrid, calculateWins, spin, classifyWinType };
+module.exports = { COLS, ROWS, MIN_MATCH, REGULAR_SYMBOLS, SYMBOL_COUNT, SCATTER, HEAD, HEAD_WEIGHT_BASE, HEAD_WEIGHT_BONUS, MULTIPLIER, JACKPOT, JACKPOT_WEIGHT, JACKPOT_MIN_SYMBOLS, GEM_SYMBOLS, FREE_SPINS_AWARD, FREE_SPINS_BOUGHT, RETRIGGER_AWARD, RETRIGGER_MIN_SCATTER, BUY_COST_MULT, SUPER_BUY_COST_MULT, SUPER_MULTIPLIER_MIN, MAX_WIN_MULTIPLIER, BET_MIN, BET_MAX, PAYTABLE, MULTIPLIER_VALUES, BASE_WEIGHTS, FREESPIN_WEIGHTS, FREESPIN_PAY_SCALE, BONUS_BANK_CAP, SUPER_BONUS_BANK_CAP, MULTIPLIER_GATES, BASE_MULTIPLIER_WEIGHTS, BONUS_MULTIPLIER_WEIGHTS, SUPPRESSED_MULTIPLIER_WEIGHTS, BIG_MULTIPLIER_THRESHOLD, APPLIED_MULTIPLIER_CAP_BASE, APPLIED_MULTIPLIER_CAP_BONUS, appliedMultiplierFor, resolvePayoutMultiplier, normalizeVolatility, pickMultiplierValue, symbolMultiplier, isJackpot, isHead, countJackpotSymbols, generateGrid, calculateWins, spin, classifyWinType };

@@ -123,11 +123,14 @@ function resolvePayoutMultiplier({
   plaqueSum = 0,
   carried = 0,
   isFreeSpin = false,
+  bankCap = Infinity,
 } = {}) {
   const win = Number(baseWin) > 0;
   const plaques = win ? Math.max(0, Number(plaqueSum) || 0) : 0;
   const prev = Math.max(0, Number(carried) || 0);
-  const nextCarried = isFreeSpin ? prev + plaques : 0;
+  const nextCarried = isFreeSpin
+    ? Math.min(Number.isFinite(bankCap) ? bankCap : Infinity, prev + plaques)
+    : 0;
   // The bank is retained, but a win needs a NEW plaque to activate it.
   const pool = isFreeSpin ? nextCarried : plaques;
   const applied = win && plaques > 0 && pool > 0 ? pool : 1;
@@ -178,10 +181,10 @@ const PAYTABLE = Object.freeze({
  * the jackpot sub-module.
  */
 const BASE_WEIGHTS = Object.freeze([
-  [SYMBOLS.S, 10],
-  [SYMBOLS.N, 10],
-  [SYMBOLS.E, 10],
-  [SYMBOLS.A, 10],
+  [SYMBOLS.S, 11],
+  [SYMBOLS.N, 11],
+  [SYMBOLS.E, 11],
+  [SYMBOLS.A, 11],
   [SYMBOLS.STARFISH, 9],
   [SYMBOLS.CORAL, 9],
   [SYMBOLS.FISH, 7.5],
@@ -197,20 +200,20 @@ const BASE_WEIGHTS = Object.freeze([
  * boards is allowed to pay. The rest are dealt below the match minimum so the
  * player still sees the multiplier art, but those spins win less often.
  */
-const PLAQUE_WIN_KEEP = 0.34;
+const PLAQUE_WIN_KEEP = 0.5;
 
 /** Free spins: plaques show even more often; high faces stay rare for RTP. */
 const BONUS_WEIGHTS = Object.freeze([
-  [SYMBOLS.S, 10],
-  [SYMBOLS.N, 10],
-  [SYMBOLS.E, 10],
-  [SYMBOLS.A, 10],
-  [SYMBOLS.STARFISH, 9],
-  [SYMBOLS.CORAL, 9],
-  [SYMBOLS.FISH, 7.5],
-  [SYMBOLS.CROWN, 5.5],
-  [SYMBOLS.PEARL, 5],
-  ["mult", 3.5],
+  [SYMBOLS.S, 13],
+  [SYMBOLS.N, 13],
+  [SYMBOLS.E, 13],
+  [SYMBOLS.A, 13],
+  [SYMBOLS.STARFISH, 8],
+  [SYMBOLS.CORAL, 8],
+  [SYMBOLS.FISH, 6],
+  [SYMBOLS.CROWN, 4.5],
+  [SYMBOLS.PEARL, 4],
+  ["mult", 4],
   [SCATTER, HEAD_WEIGHT_BONUS],
   ["jackpot", 0.25],
 ]);
@@ -240,10 +243,16 @@ function multiplierValue(cell) {
 function payoutFor(symbol, count) {
   const bands = PAYTABLE[symbol];
   if (!bands || count < MIN_MATCH) return 0;
-  if (count >= 12) return bands[2];
-  if (count >= 10) return bands[1];
-  return bands[0];
+  const raw = count >= 12 ? bands[2] : count >= 10 ? bands[1] : bands[0];
+  // Letters land a bit more often now, so each cluster pays slightly less
+  // and the base game stays near a fair return.
+  return Math.round(raw * 0.78 * 1000) / 1000;
 }
+
+/** Bought spins pay a smaller cluster; the plaque bank is the bonus. */
+const BONUS_CLUSTER_SCALE = 0.4;
+const BONUS_BANK_CAP = 20;
+const SUPER_BONUS_BANK_CAP = 40;
 
 function winTierFor(betMultiple) {
   for (const [tier, threshold] of WIN_TIERS) {
@@ -292,6 +301,9 @@ module.exports = {
   BASE_WEIGHTS,
   BONUS_WEIGHTS,
   PLAQUE_WIN_KEEP,
+  BONUS_CLUSTER_SCALE,
+  BONUS_BANK_CAP,
+  SUPER_BONUS_BANK_CAP,
   WIN_TIERS,
   MIN_MATCH,
   isScatter,

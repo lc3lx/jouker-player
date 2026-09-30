@@ -15,6 +15,7 @@ const {
   BUY_BONUS_COST,
   SUPER_BUY_BONUS_COST,
   MAX_WIN_MULTIPLIER,
+  BONUS_BANK_CAP,
   MULTIPLIER_VALUES,
   payoutFor,
   winTierFor,
@@ -599,23 +600,32 @@ test("seeded RTP simulation stays in the tuned band", () => {
   let totalBet = 0;
   let totalWon = 0;
 
-  const winOf = (s, isBonus = false) => {
-    const applied =
-      s.baseWin > 0 && s.multiplierSum > 0
-        ? appliedMultiplierFor(s.multiplierSum, isBonus)
-        : 1;
-    return Math.min(s.baseWin * applied, MAX_WIN_MULTIPLIER);
+  const winOf = (s, carried = 0, isFreeSpin = false) => {
+    const resolved = resolvePayoutMultiplier({
+      baseWin: s.baseWin,
+      plaqueSum: s.multiplierSum,
+      carried,
+      isFreeSpin,
+      bankCap: BONUS_BANK_CAP,
+    });
+    return {
+      win: Math.min(s.baseWin * resolved.applied, MAX_WIN_MULTIPLIER),
+      carried: resolved.nextCarried,
+    };
   };
 
   const playBonus = () => {
     let remaining = FREE_SPINS_NATURAL;
     let won = 0;
+    let carried = 0;
     let guard = 0;
     while (remaining > 0 && guard < 400) {
       guard += 1;
       remaining -= 1;
       const s = resolveSpin({ bonusMode: true, rng });
-      won += winOf(s, true);
+      const step = winOf(s, carried, true);
+      carried = step.carried;
+      won += step.win;
       if (s.scatterCount >= TRIGGER_RETRIGGER_MIN) remaining += 5;
     }
     return won;
@@ -624,7 +634,7 @@ test("seeded RTP simulation stays in the tuned band", () => {
   for (let i = 0; i < spins; i += 1) {
     totalBet += 1;
     const s = resolveSpin({ rng });
-    let win = winOf(s, false);
+    let win = winOf(s).win;
     if ((s.scatterCount || 0) >= TRIGGER_NATURAL_MIN) win += playBonus();
     totalWon += win;
   }

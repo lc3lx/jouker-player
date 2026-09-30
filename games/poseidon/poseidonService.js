@@ -11,6 +11,8 @@ const {
   TRIGGER_NATURAL_MIN,
   TRIGGER_RETRIGGER_MIN,
   resolvePayoutMultiplier,
+  BONUS_BANK_CAP,
+  SUPER_BONUS_BANK_CAP,
   winTierFor,
   roundMoney,
 } = require("./constants");
@@ -87,6 +89,7 @@ async function executeSpin(userId, betAmountInput) {
       plaqueSum: freshPlaques,
       carried,
       isFreeSpin,
+      bankCap: superBonus ? SUPER_BONUS_BANK_CAP : BONUS_BANK_CAP,
     });
     // A bought/free-spin bank never multiplies a win that has no new plaque.
     if (!(freshPlaques > 0)) appliedMultiplier = 1;

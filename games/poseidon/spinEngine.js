@@ -14,6 +14,7 @@ const {
   BASE_WEIGHTS,
   BONUS_WEIGHTS,
   PLAQUE_WIN_KEEP,
+  BONUS_CLUSTER_SCALE,
   PAYING_SYMBOLS,
   MULTIPLIER_VALUES,
   BASE_MULTIPLIER_WEIGHTS,
@@ -159,7 +160,10 @@ function safeReplacement(counts, avoid) {
  * from a tumble are left alone so refill lists still rebuild the column.
  * [mutableRows] is how many top cells of each column may change.
  */
-function softenPlaqueWins(matrix, mutableRows, rng, refills = null) {
+function softenPlaqueWins(matrix, mutableRows, rng, refills = null, bonusMode = false) {
+  // Bought spins must be allowed to pay. Stripping them made a 10-spin
+  // purchase feel empty.
+  if (bonusMode) return;
   if (!matrixHasMultiplier(matrix)) return;
   if (rng() < PLAQUE_WIN_KEEP) return;
 
@@ -269,7 +273,7 @@ function resolveSpin({ bonusMode = false, superBonus = false, rng = secureRandom
   const drawOpts = { bonus: bonusMode, superBonus: !!superBonus && bonusMode };
 
   let matrix = generateGrid(pick, rng, drawOpts);
-  softenPlaqueWins(matrix, Array(REEL_COUNT).fill(ROW_COUNT), rng);
+  softenPlaqueWins(matrix, Array(REEL_COUNT).fill(ROW_COUNT), rng, null, bonusMode);
   const initialMatrix = matrix.map((col) => [...col]);
 
   const steps = [];
@@ -278,7 +282,7 @@ function resolveSpin({ bonusMode = false, superBonus = false, rng = secureRandom
     const wins = findWins(matrix);
     if (wins.length === 0) break;
 
-    const stepWin = wins.reduce((sum, w) => sum + w.payout, 0);
+    const stepWin = wins.reduce((sum, w) => sum + w.payout, 0) * (bonusMode ? BONUS_CLUSTER_SCALE : 1);
     baseWin += stepWin;
     const removedPositions = wins.flatMap((w) => w.positions);
     const result = tumble(matrix, removedPositions, pick, rng, drawOpts);
@@ -287,6 +291,7 @@ function resolveSpin({ bonusMode = false, superBonus = false, rng = secureRandom
       result.refills.map((col) => col.length),
       rng,
       result.refills,
+      bonusMode,
     );
     matrix = result.matrix;
 

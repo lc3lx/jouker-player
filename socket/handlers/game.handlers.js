@@ -1204,6 +1204,9 @@ function registerGameHandlers(nsp, jwtVerify) {
           plaqueSum: freshPlaques,
           carried,
           isFreeSpin,
+          bankCap: isFreeSpin
+            ? (fsBefore.superBonus ? DiceEngine.SUPER_BONUS_BANK_CAP : DiceEngine.BONUS_BANK_CAP)
+            : Infinity,
         });
         // A bought/free-spin bank never multiplies a win that has no new plaque.
         const applied = freshPlaques > 0 ? resolved.applied : 1;
