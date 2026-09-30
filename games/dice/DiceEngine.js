@@ -20,8 +20,8 @@ const JACKPOT_MIN_SYMBOLS = 3;
 // Kept as the bonus counter name. The character head (not multiplier plaques)
 // is the free-spins scatter: 4 in the base game, 3 during free spins.
 const HEAD = JACKPOT + 1; // 18
-const HEAD_WEIGHT_BASE = 2.4;
-const HEAD_WEIGHT_BONUS = 1.6;
+const HEAD_WEIGHT_BASE = 1.0;
+const HEAD_WEIGHT_BONUS = 1.7;
 const SCATTER = HEAD;
 const SYMBOL_COUNT = HEAD + 1;
 const FREE_SPINS_AWARD = 5;
@@ -55,25 +55,33 @@ const PAYTABLE = {
 // Scaled from Poseidon's non-plaque mass.  King Earth has four supplied
 // premium symbols rather than Poseidon's five, so scaling preserves the exact
 // Poseidon probability of a plaque on every base/bonus draw.
+// Letters are heavier so 8-of-a-kind lands often enough to feel like a
+// normal spin, not a rare accident. Premiums stay lighter so the big
+// symbols remain the rare hit.
 const BASE_WEIGHTS = [
-  10.73943662, 10.73943662, 10.73943662, 10.73943662,
-  9.66549296, 9.66549296, 8.05457746, 5.90669014,
+  8, 8, 8, 8,
+  8, 8, 8, 8,
 ];
 const FREESPIN_WEIGHTS = [
-  12.4, 12.4, 12.4, 12.4,
-  8.6, 7.8, 6.4, 4.8,
+  11.0, 11.0, 11.0, 11.0,
+  6.2, 5.4, 4.4, 3.2,
 ];
 const BASE_MULTIPLIER_WEIGHTS = [82, 11, 4.2, 1.6, .7, .3, .12, .05, .02];
 const BONUS_MULTIPLIER_WEIGHTS = [62, 16, 10, 5.5, 3, 1.8, .9, .45, .2];
 const SUPPRESSED_MULTIPLIER_WEIGHTS = [88, 9, 2.2, .5, .15, .05, .015, .005, .002];
 const MULTIPLIER_GATES = [.48, .35, .33, .32, .35, .4, .4, .35, .4];
 const BIG_MULTIPLIER_THRESHOLD = 20;
-// Same visibility rule as Poseidon: plaques show often, but most plaque
-// screens are dealt below a win so the art stays on screen without paying.
-const PLAQUE_WIN_KEEP = 0.5;
+// A plaque on a winning board pays. Stripping those wins put multipliers
+// on screen that did nothing.
+const PLAQUE_WIN_KEEP = 1;
+// Pays the posted paytable. A hidden scale made an 8-letter win of 1.24×
+// arrive as 0.16× before the multiplier (1612 instead of 12400 on a 10,000 bet).
+const BASE_PAY_SCALE = 1;
 const FREESPIN_PAY_SCALE = 1;
-const BONUS_BANK_CAP = 10;
-const SUPER_BONUS_BANK_CAP = 48;
+// The ball and the payout use the full plaque sum. There is no bank ceiling.
+// A single spin is still bounded by MAX_WIN_MULTIPLIER × bet.
+const BONUS_BANK_CAP = Number.POSITIVE_INFINITY;
+const SUPER_BONUS_BANK_CAP = Number.POSITIVE_INFINITY;
 const APPLIED_MULTIPLIER_CAP_BASE = Number.POSITIVE_INFINITY;
 const APPLIED_MULTIPLIER_CAP_BONUS = Number.POSITIVE_INFINITY;
 const MAX_TUMBLES = 40;
@@ -105,8 +113,10 @@ function headCells(grid) {
   return cells;
 }
 function pickSymbol(rng, isFreeSpin, bigAlready, superBonus = false) {
-  // Same plaque visibility as Poseidon: base 2.8, free spins 3.5.
-  const plaqueWeight = isFreeSpin ? 4.4 : 2.8;
+  // Bonus plaques are rarer than the base game so an uncapped bank
+  // does not multiply every posted pay by ×60. Base cell rate stays
+  // aligned with Poseidon (2.8 / 85.45).
+  const plaqueWeight = isFreeSpin ? 0.42 : 0.55;
   const headWeight = isFreeSpin ? HEAD_WEIGHT_BONUS : HEAD_WEIGHT_BASE;
   const regular = isFreeSpin ? FREESPIN_WEIGHTS : BASE_WEIGHTS;
   const choice = weightedIndex(rng, [...regular, plaqueWeight, JACKPOT_WEIGHT, headWeight]);
@@ -212,7 +222,7 @@ function classifyWinType(total, stake) { const r = total / Math.max(stake, 1); r
 function runTumbles(initialGrid, rng, options) {
   let grid = cloneGrid(initialGrid), baseWin = 0; const lineWins = [], winningCells = new Set(), cascadeSteps = [];
   for (let index = 0; index < MAX_TUMBLES; index++) {
-    const beforeGrid = cloneGrid(grid), { wins, winningCells: stepKeys } = findPayAnywhereWins(grid, options.stake, options.isFreeSpin ? FREESPIN_PAY_SCALE : 1);
+    const beforeGrid = cloneGrid(grid), { wins, winningCells: stepKeys } = findPayAnywhereWins(grid, options.stake, options.isFreeSpin ? FREESPIN_PAY_SCALE : BASE_PAY_SCALE);
     if (!wins.length) break;
     const stepWin = roundMoney(wins.reduce((sum, w) => sum + w.win, 0)); baseWin = roundMoney(baseWin + stepWin);
     const collapsed = collapseGrid(grid, stepKeys, rng, options.volatility, options.doubleChance, options.isFreeSpin, options.superBonus);
@@ -245,4 +255,4 @@ function spin(baseBet, options = {}) {
   const jackpotSymbolCount = countJackpotSymbols(tumble.finalGrid);
   return { grid: initialGrid, initialGrid, finalGrid: tumble.finalGrid, stake, baseBet: stake, doubleChance: false, isFreeSpin, freeSpinPayoutMult: 1, volatility: normalizeVolatility(options.volatility), nearMiss: false, almostBonus: !isFreeSpin && scatterCount === 3, capped: tumble.multipliedWin > winCap, maxWin: winCap, totalWin, baseWin: tumble.baseWin, winningCells: [...tumble.winningCells].map((key) => { const [col, row] = key.split(",").map(Number); return { col, row }; }), lineWins: tumble.lineWins, scatterCount, jackpotSymbolCount, jackpotTriggered: jackpotSymbolCount >= JACKPOT_MIN_SYMBOLS, winType: classifyWinType(totalWin, stake), cascadeSteps: tumble.cascadeSteps, multipliers: { collected: tumble.collectedMultiplier, applied: tumble.appliedMultiplier, freeSpinTotal: tumble.nextFreeSpinMultiplier }, freeSpinsAwarded: !isFreeSpin && scatterCount >= 4 ? FREE_SPINS_AWARD : 0 };
 }
-module.exports = { COLS, ROWS, MIN_MATCH, REGULAR_SYMBOLS, SYMBOL_COUNT, SCATTER, HEAD, HEAD_WEIGHT_BASE, HEAD_WEIGHT_BONUS, MULTIPLIER, JACKPOT, JACKPOT_WEIGHT, JACKPOT_MIN_SYMBOLS, GEM_SYMBOLS, FREE_SPINS_AWARD, FREE_SPINS_BOUGHT, RETRIGGER_AWARD, RETRIGGER_MIN_SCATTER, BUY_COST_MULT, SUPER_BUY_COST_MULT, SUPER_MULTIPLIER_MIN, MAX_WIN_MULTIPLIER, BET_MIN, BET_MAX, PAYTABLE, MULTIPLIER_VALUES, BASE_WEIGHTS, FREESPIN_WEIGHTS, FREESPIN_PAY_SCALE, BONUS_BANK_CAP, SUPER_BONUS_BANK_CAP, MULTIPLIER_GATES, BASE_MULTIPLIER_WEIGHTS, BONUS_MULTIPLIER_WEIGHTS, SUPPRESSED_MULTIPLIER_WEIGHTS, BIG_MULTIPLIER_THRESHOLD, APPLIED_MULTIPLIER_CAP_BASE, APPLIED_MULTIPLIER_CAP_BONUS, appliedMultiplierFor, resolvePayoutMultiplier, normalizeVolatility, pickMultiplierValue, symbolMultiplier, isJackpot, isHead, countJackpotSymbols, generateGrid, calculateWins, spin, classifyWinType };
+module.exports = { COLS, ROWS, MIN_MATCH, REGULAR_SYMBOLS, SYMBOL_COUNT, SCATTER, HEAD, HEAD_WEIGHT_BASE, HEAD_WEIGHT_BONUS, MULTIPLIER, JACKPOT, JACKPOT_WEIGHT, JACKPOT_MIN_SYMBOLS, GEM_SYMBOLS, FREE_SPINS_AWARD, FREE_SPINS_BOUGHT, RETRIGGER_AWARD, RETRIGGER_MIN_SCATTER, BUY_COST_MULT, SUPER_BUY_COST_MULT, SUPER_MULTIPLIER_MIN, MAX_WIN_MULTIPLIER, BET_MIN, BET_MAX, PAYTABLE, MULTIPLIER_VALUES, BASE_WEIGHTS, FREESPIN_WEIGHTS, BASE_PAY_SCALE, FREESPIN_PAY_SCALE, BONUS_BANK_CAP, SUPER_BONUS_BANK_CAP, MULTIPLIER_GATES, BASE_MULTIPLIER_WEIGHTS, BONUS_MULTIPLIER_WEIGHTS, SUPPRESSED_MULTIPLIER_WEIGHTS, BIG_MULTIPLIER_THRESHOLD, APPLIED_MULTIPLIER_CAP_BASE, APPLIED_MULTIPLIER_CAP_BONUS, appliedMultiplierFor, resolvePayoutMultiplier, normalizeVolatility, pickMultiplierValue, symbolMultiplier, isJackpot, isHead, countJackpotSymbols, generateGrid, calculateWins, spin, classifyWinType };

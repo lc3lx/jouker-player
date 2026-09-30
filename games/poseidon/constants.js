@@ -249,10 +249,13 @@ function payoutFor(symbol, count) {
   return Math.round(raw * 0.78 * 1000) / 1000;
 }
 
-/** Bought spins pay a smaller cluster; the plaque bank is the bonus. */
-const BONUS_CLUSTER_SCALE = 0.4;
-const BONUS_BANK_CAP = 20;
-const SUPER_BONUS_BANK_CAP = 40;
+/** Bought spins pay a smaller cluster; the plaque bank is the bonus.
+ *  Uncapped plaque sums need a smaller cluster or a ×100 snowballs the buy. */
+const BONUS_CLUSTER_SCALE = 0.11;
+// Full plaque sum. No bank ceiling. The round is still bounded by
+// MAX_WIN_MULTIPLIER × bet.
+const BONUS_BANK_CAP = Number.POSITIVE_INFINITY;
+const SUPER_BONUS_BANK_CAP = Number.POSITIVE_INFINITY;
 
 function winTierFor(betMultiple) {
   for (const [tier, threshold] of WIN_TIERS) {
