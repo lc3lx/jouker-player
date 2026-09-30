@@ -18,6 +18,7 @@ const spinEngine = require("./spinEngine");
 const roundManager = require("./roundManager");
 const zenobiaJackpot = require("./zenobiaJackpot");
 const wallet = require("./zenobiaWalletAdapter");
+const houseEdgeController = require("../utils/houseEdgeController");
 
 
 function mapWalletError(err) {
@@ -71,7 +72,18 @@ async function executeSpin(userId, betAmountInput) {
     }
 
     const superBonus = !!(isFreeSpin && bonusSession.superBonus);
-    const spin = spinEngine.resolveSpin({ bonusMode: isFreeSpin, superBonus });
+    const edgeParams = houseEdgeController.calculateEdge({
+      game: "zenobia",
+      betAmount,
+      betMin: BET_MIN,
+      userId: userKey,
+      isBonusSpin: isFreeSpin,
+    });
+    const spin = spinEngine.resolveSpin({
+      bonusMode: isFreeSpin,
+      superBonus,
+      edgeParams,
+    });
 
     // --- Bonus Box math (bet multiples) ---
     // Base game: the plaques banked this sequence multiply a winning cascade and
@@ -91,9 +103,23 @@ async function executeSpin(userId, betAmountInput) {
       roundManager.setBonusMultiplier(userKey, nextCarried);
     }
 
+    if (edgeParams?.highMultiplierDampening < 1.0 && appliedMultiplier > 1) {
+      appliedMultiplier = Math.max(
+        1,
+        Math.round(1 + (appliedMultiplier - 1) * edgeParams.highMultiplierDampening)
+      );
+    }
+
+    const activeCapMultiplier = Math.min(
+      MAX_WIN_MULTIPLIER,
+      edgeParams.winCapMultiplier || MAX_WIN_MULTIPLIER
+    );
     let totalWinX = spin.baseWin * appliedMultiplier;
-    const winCapped = totalWinX > MAX_WIN_MULTIPLIER;
-    if (winCapped) totalWinX = MAX_WIN_MULTIPLIER;
+    if (edgeParams?.modulateWinMultiple) {
+      totalWinX = edgeParams.modulateWinMultiple(totalWinX);
+    }
+    const winCapped = totalWinX > activeCapMultiplier;
+    if (winCapped) totalWinX = activeCapMultiplier;
 
     const totalWin = roundMoney(totalWinX * betAmount);
 
@@ -184,6 +210,7 @@ async function executeSpin(userId, betAmountInput) {
       game: "zenobia",
       won: Number(totalWin || 0) > 0,
     });
+    houseEdgeController.recordSpin(userKey, "zenobia", isFreeSpin ? 0 : betAmount, totalWin);
 
     const liveSession = roundManager.getBonusSession(userKey);
 

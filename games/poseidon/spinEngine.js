@@ -87,8 +87,12 @@ function pickMultiplierValue(rng, {
   bonus = false,
   bigAlready = false,
   superBonus = false,
+  edgeParams = null,
 } = {}) {
-  const { values, weights } = plaqueTable({ bonus, bigAlready, superBonus });
+  let { values, weights } = plaqueTable({ bonus, bigAlready, superBonus });
+  if (edgeParams?.modulateMultiplierWeights) {
+    weights = edgeParams.modulateMultiplierWeights(values, weights);
+  }
   return pickFromWeights(weights, rng, values);
 }
 
@@ -111,10 +115,10 @@ function countBigInCells(cells) {
 }
 
 /** Draw one cell; "mult" placeholder resolves to a concrete `x<value>`. */
-function drawCell(pick, rng, { bonus = false, bigAlready = false, superBonus = false } = {}) {
+function drawCell(pick, rng, { bonus = false, bigAlready = false, superBonus = false, edgeParams = null } = {}) {
   const symbol = pick();
   return symbol === "mult"
-    ? `x${pickMultiplierValue(rng, { bonus, bigAlready, superBonus })}`
+    ? `x${pickMultiplierValue(rng, { bonus, bigAlready, superBonus, edgeParams })}`
     : symbol;
 }
 
@@ -160,12 +164,13 @@ function safeReplacement(counts, avoid) {
  * from a tumble are left alone so refill lists still rebuild the column.
  * [mutableRows] is how many top cells of each column may change.
  */
-function softenPlaqueWins(matrix, mutableRows, rng, refills = null, bonusMode = false) {
+function softenPlaqueWins(matrix, mutableRows, rng, refills = null, bonusMode = false, edgeParams = null) {
   // Bought spins must be allowed to pay. Stripping them made a 10-spin
   // purchase feel empty.
   if (bonusMode) return;
   if (!matrixHasMultiplier(matrix)) return;
-  if (rng() < PLAQUE_WIN_KEEP) return;
+  const keepProbability = edgeParams?.plaqueWinKeep != null ? edgeParams.plaqueWinKeep : PLAQUE_WIN_KEEP;
+  if (rng() < keepProbability) return;
 
   for (let guard = 0; guard < 8; guard += 1) {
     const wins = findWins(matrix);
@@ -195,7 +200,7 @@ function softenPlaqueWins(matrix, mutableRows, rng, refills = null, bonusMode = 
   }
 }
 
-function generateGrid(pick, rng, { bonus = false, superBonus = false } = {}) {
+function generateGrid(pick, rng, { bonus = false, superBonus = false, edgeParams = null } = {}) {
   const matrix = [];
   let bigAlready = 0;
   for (let col = 0; col < REEL_COUNT; col += 1) {
@@ -205,6 +210,7 @@ function generateGrid(pick, rng, { bonus = false, superBonus = false } = {}) {
         bonus,
         superBonus,
         bigAlready: bigAlready > 0,
+        edgeParams,
       });
       if (multiplierValue(cell) >= BIG_MULTIPLIER_THRESHOLD) bigAlready += 1;
       column.push(cell);
@@ -218,7 +224,7 @@ function generateGrid(pick, rng, { bonus = false, superBonus = false } = {}) {
  * Remove the given positions, slide survivors down, refill from the top.
  * Returns { matrix, refills } where refills[col] lists new symbols top-down.
  */
-function tumble(matrix, removedPositions, pick, rng, { bonus = false, superBonus = false } = {}) {
+function tumble(matrix, removedPositions, pick, rng, { bonus = false, superBonus = false, edgeParams = null } = {}) {
   const removed = new Set(removedPositions.map(([c, r]) => `${c}:${r}`));
   const next = [];
   const refills = [];
@@ -245,6 +251,7 @@ function tumble(matrix, removedPositions, pick, rng, { bonus = false, superBonus
         bonus,
         superBonus,
         bigAlready: bigSoFar > 0,
+        edgeParams,
       });
       if (multiplierValue(cell) >= BIG_MULTIPLIER_THRESHOLD) bigSoFar += 1;
       incoming.push(cell);
@@ -267,13 +274,16 @@ function tumble(matrix, removedPositions, pick, rng, { bonus = false, superBonus
  *   multiplierSum,
  * }
  */
-function resolveSpin({ bonusMode = false, superBonus = false, rng = secureRandom } = {}) {
-  const weights = bonusMode ? BONUS_WEIGHTS : BASE_WEIGHTS;
+function resolveSpin({ bonusMode = false, superBonus = false, rng = secureRandom, edgeParams = null } = {}) {
+  let weights = bonusMode ? BONUS_WEIGHTS : BASE_WEIGHTS;
+  if (edgeParams?.modulateSymbolWeights) {
+    weights = edgeParams.modulateSymbolWeights(weights);
+  }
   const pick = buildPicker(weights, rng);
-  const drawOpts = { bonus: bonusMode, superBonus: !!superBonus && bonusMode };
+  const drawOpts = { bonus: bonusMode, superBonus: !!superBonus && bonusMode, edgeParams };
 
   let matrix = generateGrid(pick, rng, drawOpts);
-  softenPlaqueWins(matrix, Array(REEL_COUNT).fill(ROW_COUNT), rng, null, bonusMode);
+  softenPlaqueWins(matrix, Array(REEL_COUNT).fill(ROW_COUNT), rng, null, bonusMode, edgeParams);
   const initialMatrix = matrix.map((col) => [...col]);
 
   const steps = [];
@@ -292,6 +302,7 @@ function resolveSpin({ bonusMode = false, superBonus = false, rng = secureRandom
       rng,
       result.refills,
       bonusMode,
+      edgeParams
     );
     matrix = result.matrix;
 

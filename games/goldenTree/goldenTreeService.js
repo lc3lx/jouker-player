@@ -19,6 +19,7 @@ const roundManager = require("./roundManager");
 const wallet = require("./goldenTreeWalletAdapter");
 const jackpotMeters = require("./jackpotMeters");
 const goldenTreeJackpot = require("./goldenTreeJackpot");
+const houseEdgeController = require("../utils/houseEdgeController");
 
 function mapWalletError(err) {
   if (
@@ -38,8 +39,8 @@ function validateBet(betAmount) {
   return bet;
 }
 
-function capWin(totalWin, betAmount) {
-  const cap = roundMoney(betAmount * MAX_WIN_MULTIPLIER);
+function capWin(totalWin, betAmount, maxMultiplier = MAX_WIN_MULTIPLIER) {
+  const cap = roundMoney(betAmount * (maxMultiplier || MAX_WIN_MULTIPLIER));
   if (totalWin <= cap) {
     return { totalWin, capped: false, cap };
   }
@@ -124,10 +125,19 @@ async function executeSpin(userId, betAmountInput) {
     throw new ApiError("No bonus spins remaining", 400);
   }
 
+  const edgeParams = houseEdgeController.calculateEdge({
+    game: "golden-tree",
+    betAmount,
+    betMin: BET_MIN,
+    userId: userKey,
+    isBonusSpin,
+  });
+
   // All bonus spins guarantee trees on reels 2–4; multiplier upgrades roll
   // independently. Main-game tree placement stays random.
   const { matrix, wildMultipliers } = generateSpin({
     bonusMode: isBonusSpin,
+    edgeParams,
   });
 
   // Backend is the sole win authority (Flutter client is display-only).
@@ -173,7 +183,17 @@ async function executeSpin(userId, betAmountInput) {
     ? jackpotMeters.snapshot()
     : jackpotMeters.contribute(betAmount);
 
-  const { totalWin, capped, cap } = capWin(payable.totalWin, betAmount);
+  const activeCapMult = Math.min(
+    MAX_WIN_MULTIPLIER,
+    edgeParams?.winCapMultiplier || MAX_WIN_MULTIPLIER
+  );
+  let calculatedWin = payable.totalWin;
+  if (edgeParams?.modulateWinMultiple && betAmount > 0) {
+    const rawMult = calculatedWin / betAmount;
+    const modulatedMult = edgeParams.modulateWinMultiple(rawMult);
+    calculatedWin = roundMoney(modulatedMult * betAmount);
+  }
+  const { totalWin, capped, cap } = capWin(calculatedWin, betAmount, activeCapMult);
 
   let balanceAfter;
   try {
@@ -232,6 +252,7 @@ async function executeSpin(userId, betAmountInput) {
     game: "golden-tree",
     won: Number(round.totalWin || 0) > 0,
   });
+  houseEdgeController.recordSpin(userKey, "golden-tree", isBonusSpin ? 0 : betAmount, totalWin);
 
   return buildSpinResponse(round, balanceAfter, {
     winCapped: capped,

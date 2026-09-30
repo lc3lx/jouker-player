@@ -53,6 +53,7 @@ const giftRoute = require("./giftRoute");
 const clanRoute = require("./clanRoute");
 const arenaTournamentRoute = require("./arenaTournamentRoute");
 const adminArenaTournamentRoute = require("./adminArenaTournamentRoute");
+const adminHouseEdgeRoute = require("./adminHouseEdgeRoute");
 const mountInviteLanding = require("./inviteLandingRoute");
 
 const mountRoutes = (app) => {
@@ -95,6 +96,7 @@ const mountRoutes = (app) => {
   app.use("/api/v1/admin/player-ids", adminPlayerIdRoute);
   app.use("/api/v1/admin/clans", adminClanRoute);
   app.use("/api/v1/admin/bots", adminBotRoute);
+  app.use("/api/v1/admin/house-edge", adminHouseEdgeRoute);
   // Staff / permissions /me — before generic /admin catch-all.
   app.use("/api/v1/admin", adminStaffRoute);
   app.use("/api/v1/admin", adminRoute);

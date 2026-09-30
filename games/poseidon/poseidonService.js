@@ -21,6 +21,7 @@ const roundManager = require("./roundManager");
 const wallet = require("./poseidonWalletAdapter");
 const jackpotService = require("./jackpot/jackpotService");
 const { settleJackpotRound } = require("./jackpot/jackpotSettlement");
+const houseEdgeController = require("../utils/houseEdgeController");
 
 function mapWalletError(err) {
   if (
@@ -75,7 +76,18 @@ async function executeSpin(userId, betAmountInput) {
     }
 
     const superBonus = !!(isFreeSpin && bonusSession.superBonus);
-    const spin = spinEngine.resolveSpin({ bonusMode: isFreeSpin, superBonus });
+    const edgeParams = houseEdgeController.calculateEdge({
+      game: "poseidon",
+      betAmount,
+      betMin: BET_MIN,
+      userId: userKey,
+      isBonusSpin: isFreeSpin,
+    });
+    const spin = spinEngine.resolveSpin({
+      bonusMode: isFreeSpin,
+      superBonus,
+      edgeParams,
+    });
 
     // --- win math (bet multiples) ---
     // Base: this spin's plaques multiply a winning sequence. Bonus: plaques from
@@ -97,9 +109,23 @@ async function executeSpin(userId, betAmountInput) {
       roundManager.setBonusMultiplier(userKey, nextCarried);
     }
 
+    if (edgeParams?.highMultiplierDampening < 1.0 && appliedMultiplier > 1) {
+      appliedMultiplier = Math.max(
+        1,
+        Math.round(1 + (appliedMultiplier - 1) * edgeParams.highMultiplierDampening)
+      );
+    }
+
+    const activeCapMultiplier = Math.min(
+      MAX_WIN_MULTIPLIER,
+      edgeParams.winCapMultiplier || MAX_WIN_MULTIPLIER
+    );
     let totalWinX = spin.baseWin * appliedMultiplier;
-    const winCapped = totalWinX > MAX_WIN_MULTIPLIER;
-    if (winCapped) totalWinX = MAX_WIN_MULTIPLIER;
+    if (edgeParams?.modulateWinMultiple) {
+      totalWinX = edgeParams.modulateWinMultiple(totalWinX);
+    }
+    const winCapped = totalWinX > activeCapMultiplier;
+    if (winCapped) totalWinX = activeCapMultiplier;
 
     const totalWin = roundMoney(totalWinX * betAmount);
 
@@ -177,6 +203,7 @@ async function executeSpin(userId, betAmountInput) {
       game: "poseidon",
       won: Number(totalWin || 0) > 0,
     });
+    houseEdgeController.recordSpin(userKey, "poseidon", isFreeSpin ? 0 : betAmount, totalWin);
 
     const liveSession = roundManager.getBonusSession(userKey);
 

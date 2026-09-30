@@ -33,7 +33,18 @@ const TIER_LABELS_AR = {
 
 /** Visual wheel segments — display only; rewards are server-generated. */
 const WHEEL_DISPLAY_SEGMENTS = [
-  5000, 10000, 15000, 20000, 25000, 50000, 75000, 100000, 150000, 200000, 500000,
+  10000,
+  50000,
+  1000000,
+  25000,
+  -1,
+  75000,
+  10000000,
+  40000,
+  20000,
+  -1,
+  60000,
+  100000,
 ];
 
 function utcDayStr(d) {
@@ -266,10 +277,31 @@ exports.spinLuckyWheel = asyncHandler(async (req, res, next) => {
     }
 
     const nextStreak = resolveStreakOnSpin(wheel, now);
-    const guaranteedMin = guaranteedMinimumForStreak(nextStreak);
-    const rewardTable = buildRewardTable(guaranteedMin, nextStreak);
-    const { reward, rewardTier } = pickWeightedReward(rewardTable);
-    const wheelSegment = nearestWheelSegment(reward);
+    const guaranteedMin = Math.max(10000, guaranteedMinimumForStreak(nextStreak));
+    // User requirement: Win must ALWAYS be between 10k and 100k
+    const candidates = [
+      { reward: 10000, rewardTier: "minimum", weight: 0.22 },
+      { reward: 20000, rewardTier: "minimum", weight: 0.20 },
+      { reward: 25000, rewardTier: "next",    weight: 0.18 },
+      { reward: 40000, rewardTier: "mid",     weight: 0.14 },
+      { reward: 50000, rewardTier: "mid",     weight: 0.12 },
+      { reward: 60000, rewardTier: "high",    weight: 0.08 },
+      { reward: 75000, rewardTier: "high",    weight: 0.04 },
+      { reward: 100000, rewardTier: "rare",   weight: 0.02 },
+    ];
+    const roll = crypto.randomInt(0, 1_000_000) / 1_000_000;
+    let cum = 0;
+    let picked = candidates[0];
+    for (const c of candidates) {
+      cum += c.weight;
+      if (roll < cum) {
+        picked = c;
+        break;
+      }
+    }
+    const reward = picked.reward;
+    const rewardTier = picked.rewardTier;
+    const wheelSegment = reward;
 
     wheel.availableSpins = Math.max(0, (wheel.availableSpins || 0) - 1);
     wheel.lastClaimAt = now;

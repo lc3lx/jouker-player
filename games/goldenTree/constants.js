@@ -136,8 +136,7 @@ const MAIN_WILD_MULTIPLIER_WEIGHTS = Object.freeze([
   [5, 2],
 ]);
 const BONUS_WILD_MULTIPLIER_WEIGHTS = Object.freeze([
-  [1, 970],
-  [2, 22],
+  [2, 10],
   [3, 6],
   [5, 2],
 ]);
@@ -150,7 +149,7 @@ const PLAIN_WILD_MULTIPLIER = 1;
  * still request a count before generating the bonus matrix.
  */
 const BONUS_FORCED_TREE_WEIGHTS = Object.freeze([
-  [3, 1],
+  [1, 1],
 ]);
 
 /**
@@ -163,7 +162,7 @@ const BUY_BONUS_TYPE = "Triple";
  * at TARGET_RTP like every other bet. Re-derive with `node tool/goldenTreeRtp.js`
  * after any change to the paytable, reel strips, or tree/multiplier weights.
  */
-const BUY_BONUS_COST = 1000;
+const BUY_BONUS_COST = 50;
 
 function minMatchCount(symbol) {
   if (symbol === SYMBOLS.SEVEN) return SEVEN_MIN_CONSECUTIVE;

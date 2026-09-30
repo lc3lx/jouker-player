@@ -32,12 +32,13 @@ function pickFromArray(arr, rng = secureRandomInt) {
  */
 function weightedPick(entries, rng = secureRandomInt) {
   let total = 0;
-  for (const [, weight] of entries) total += weight;
-  if (total <= 0) return entries[0][0];
+  for (const [, weight] of entries) total += Math.max(0, Number(weight) || 0);
+  const intTotal = Math.round(total);
+  if (intTotal <= 0) return entries[0][0];
 
-  let roll = rng(total);
+  let roll = rng(intTotal);
   for (const [value, weight] of entries) {
-    roll -= weight;
+    roll -= Number(weight) || 0;
     if (roll < 0) return value;
   }
   return entries[entries.length - 1][0];
@@ -207,11 +208,16 @@ function generateSpin({
   forceTrees = false,
   forceTreeCount = null,
   rng = secureRandomInt,
+  edgeParams = null,
 } = {}) {
   const strips = bonusMode ? BONUS_REEL_STRIPS : MAIN_REEL_STRIPS;
-  const multiplierWeights = bonusMode
+  let multiplierWeights = bonusMode
     ? BONUS_WILD_MULTIPLIER_WEIGHTS
     : MAIN_WILD_MULTIPLIER_WEIGHTS;
+
+  if (edgeParams?.modulateWildMultiplierWeights) {
+    multiplierWeights = edgeParams.modulateWildMultiplierWeights(multiplierWeights);
+  }
 
   const matrix = Array.from({ length: REEL_COUNT }, () =>
     Array.from({ length: ROW_COUNT }, () => SYMBOLS.CHERRY),
@@ -235,6 +241,29 @@ function generateSpin({
     forceTreesOnMiddleReels(matrix);
   } else if (Number.isInteger(forceTreeCount)) {
     placeForcedTrees(matrix, forceTreeCount, rng);
+  } else if (edgeParams) {
+    // Engagement feature:
+    // On small bets or when player is on a cold streak, provide a small boost
+    // to middle tree appearances to maintain excitement.
+    if (edgeParams.hitRateMultiplier > 1.15 && rng(100) < 22) {
+      const candidateReels = [1, 2, 3];
+      const targetCol = candidateReels[rng(candidateReels.length)];
+      matrix[targetCol][WILD_ROW] = SYMBOLS.WILD;
+    } else if (edgeParams.hitRateMultiplier < 0.65) {
+      // On whale bets, prevent natural multiple wild stacks in base game
+      let treeCount = 0;
+      for (const col of WILD_REELS) {
+        if (matrix[col][WILD_ROW] === SYMBOLS.WILD) treeCount += 1;
+      }
+      if (treeCount >= 2 && rng(100) < 70) {
+        for (const col of WILD_REELS) {
+          if (matrix[col][WILD_ROW] === SYMBOLS.WILD) {
+            matrix[col][WILD_ROW] = SYMBOLS.CHERRY;
+            break;
+          }
+        }
+      }
+    }
   }
 
   const wildMultipliers = assignWildMultipliers(matrix, multiplierWeights, rng);

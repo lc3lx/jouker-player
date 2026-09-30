@@ -90,7 +90,10 @@ function plaqueTable({ bonus = false, bigAlready = false, superBonus = false } =
  * board further draws collapse toward the gold end.
  */
 function pickMultiplierValue(rng, opts = {}) {
-  const { values, weights } = plaqueTable(opts);
+  let { values, weights } = plaqueTable(opts);
+  if (opts.edgeParams?.modulateMultiplierWeights) {
+    weights = opts.edgeParams.modulateMultiplierWeights(values, weights);
+  }
   return pickFromWeights(weights, rng, values);
 }
 
@@ -112,13 +115,13 @@ function countBigMultipliers(matrix) {
   return n;
 }
 
-function generateGrid(pick, rng, { bonus = false, superBonus = false } = {}) {
+function generateGrid(pick, rng, { bonus = false, superBonus = false, edgeParams = null } = {}) {
   const matrix = [];
   let big = 0;
   for (let col = 0; col < REEL_COUNT; col += 1) {
     const column = [];
     for (let row = 0; row < ROW_COUNT; row += 1) {
-      const cell = drawCell(pick, rng, { bonus, superBonus, bigAlready: big > 0 });
+      const cell = drawCell(pick, rng, { bonus, superBonus, bigAlready: big > 0, edgeParams });
       if (isBigPlaque(cell)) big += 1;
       column.push(cell);
     }
@@ -131,7 +134,7 @@ function generateGrid(pick, rng, { bonus = false, superBonus = false } = {}) {
  * Clear the given positions, slide survivors down, refill from the top.
  * Returns { matrix, refills } where refills[col] lists new cells top-down.
  */
-function tumble(matrix, removedPositions, pick, rng, { bonus = false, superBonus = false } = {}) {
+function tumble(matrix, removedPositions, pick, rng, { bonus = false, superBonus = false, edgeParams = null } = {}) {
   const removed = new Set(removedPositions.map(([c, r]) => `${c}:${r}`));
   const next = [];
   const refills = [];
@@ -151,7 +154,7 @@ function tumble(matrix, removedPositions, pick, rng, { bonus = false, superBonus
     }
     const incoming = [];
     while (survivors.length + incoming.length < ROW_COUNT) {
-      const cell = drawCell(pick, rng, { bonus, superBonus, bigAlready: big > 0 });
+      const cell = drawCell(pick, rng, { bonus, superBonus, bigAlready: big > 0, edgeParams });
       if (isBigPlaque(cell)) big += 1;
       incoming.push(cell);
     }
@@ -200,10 +203,13 @@ function scattersInRefills(refills) {
  *   scatters, scatterCount,
  * }
  */
-function resolveSpin({ bonusMode = false, superBonus = false, rng = secureRandom } = {}) {
-  const weights = bonusMode ? BONUS_WEIGHTS : BASE_WEIGHTS;
+function resolveSpin({ bonusMode = false, superBonus = false, rng = secureRandom, edgeParams = null } = {}) {
+  let weights = bonusMode ? BONUS_WEIGHTS : BASE_WEIGHTS;
+  if (edgeParams?.modulateSymbolWeights) {
+    weights = edgeParams.modulateSymbolWeights(weights);
+  }
   const pick = buildPicker(weights, rng);
-  const drawOpts = { bonus: bonusMode, superBonus: !!superBonus && bonusMode };
+  const drawOpts = { bonus: bonusMode, superBonus: !!superBonus && bonusMode, edgeParams };
 
   let matrix = generateGrid(pick, rng, drawOpts);
   const initialMatrix = matrix.map((col) => [...col]);

@@ -1047,7 +1047,7 @@ class PokerTable {
   }
 
   healStaleRoundIfNotRunning() {
-    if (this.running || this.round === "idle") return;
+    if (this.running || this._dealingHand || this.frozen || this.round === "idle") return;
     this.logSuspicious("heal_stale_round", { round: this.round });
     this.community = [];
     this.pot = 0;
@@ -1929,6 +1929,7 @@ class PokerTable {
   }
 
   async refreshSeatsFromDb() {
+    if (this.frozen || this._dealingHand) return false;
     const prevByUser = new Map(this.seats.map((s) => [String(s.userId), s]));
     const previousBots = this.seats
       .filter((s) => s.isBot && s.chips > 0)
@@ -1943,13 +1944,15 @@ class PokerTable {
         actedThisStreet: false,
       }));
 
-    const handActive = this.running && this.round && String(this.round) !== "idle";
-
     const table = await Table.findById(this.tableId).populate({
       path: "seats.user",
       select: "name profileImg",
     });
     if (!table) return false;
+    // A DB read can finish after another request has begun dealing. Never
+    // overwrite that hand with the idle snapshot captured before the await.
+    if (this.frozen || this._dealingHand) return false;
+    const handActive = this.isHandActive();
     this.botsEnabled = table.settings?.botsEnabled !== false;
     if (
       table.tableKind === "tournament" ||
@@ -3197,6 +3200,9 @@ class PokerTable {
   }
 
   async bootstrapLobbyStart() {
+    // inHand is still false while fairness/ticket preparation is awaiting I/O.
+    // That is a deal in progress, not a ghost hand to reset and start again.
+    if (this.starting || this._dealingHand) return;
     if (!this.isOwner) {
       // #region agent log
       _dbg7("B", "tableGame.js:bootstrapLobbyStart", "abort", { reason: "not_owner", tableId: String(this.tableId), round: this.round });
@@ -3204,6 +3210,7 @@ class PokerTable {
       return;
     }
     await this.healSeatsMissingSockets();
+    if (this.starting || this._dealingHand) return;
     if (this.frozen && !this.running) {
       this._tryUnfreezeFromChipProbe("bootstrap");
     }
@@ -3637,6 +3644,16 @@ class PokerTable {
   }
 
   async startHand() {
+    if (this._dealingHand || this.frozen) return;
+    this._dealingHand = true;
+    try {
+      await this._dealHandOnce();
+    } finally {
+      this._dealingHand = false;
+    }
+  }
+
+  async _dealHandOnce() {
     if (!this.isOwner) {
       // #region agent log
       _dbg7("G", "tableGame.js:startHand", "abort_not_owner", {
