@@ -16,7 +16,7 @@ router.get("/history", getIslandHistory);
 router.get("/winners", getIslandWinners);
 router.get("/leaderboard", getIslandLeaderboard);
 
-router.post("/join", authService.protect, authService.allowedTo("user"), joinIslandJackpot);
-router.post("/auto-buy", authService.protect, authService.allowedTo("user"), setIslandAutoBuy);
+router.post("/join", authService.protect, joinIslandJackpot);
+router.post("/auto-buy", authService.protect, setIslandAutoBuy);
 
 module.exports = router;

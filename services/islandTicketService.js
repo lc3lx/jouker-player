@@ -28,9 +28,16 @@ async function requireSeat(userId, tableId) {
   })) throw new ApiError('Sit at this poker table first', 403);
 }
 
+function withOptionalSession(query, session) {
+  return session ? query.session(session) : query;
+}
+
+function sessionOptions(session) {
+  return session ? { session } : undefined;
+}
+
 async function charge(userId, tableId, session, idempotencyKey) {
-  if (!session) throw new Error('MONGO_TRANSACTIONS_REQUIRED');
-  const pool = await Pool.findOne({ key: 'default' }).session(session);
+  const pool = await withOptionalSession(Pool.findOne({ key: 'default' }), session);
   if (process.env.ISLAND_JACKPOT_ENABLED === 'false' || !pool?.enabled) {
     throw new ApiError('Island Jackpot is disabled', 403);
   }
@@ -50,12 +57,12 @@ async function charge(userId, tableId, session, idempotencyKey) {
   Object.assign(pool, { armed: computePoolFlags(pool).armed,
     hotJackpot: computePoolFlags(pool).hotJackpot });
   pool.version += 1;
-  await pool.save({ session });
+  await pool.save(sessionOptions(session));
   const [history] = await History.create([{ type: 'join', userId,
-    amount: fee, poolAfter: pool.poolBalance, meta: { txnId, tableId } }], { session });
+    amount: fee, poolAfter: pool.poolBalance, meta: { txnId, tableId } }], sessionOptions(session));
   await Transaction.create([{ txnId, userId, direction: 'debit_entry', amount: fee,
     islandHistoryId: history._id, status: 'completed',
-    idempotencyKey: idempotencyKey || undefined, meta: { tableId } }], { session });
+    idempotencyKey: idempotencyKey || undefined, meta: { tableId } }], sessionOptions(session));
   return { fee, txnId };
 }
 
@@ -65,14 +72,14 @@ async function buyNext(userId, tableId, requestKey) {
   const key = requestKey ? `island:${userId}:${requestKey}` : null;
   let duplicate = false;
   await ledger.withMongoTransaction(async session => {
-    if (!session) throw new Error('MONGO_TRANSACTIONS_REQUIRED');
     duplicate = false;
-    if (key && await Transaction.findOne({ idempotencyKey: key }).select('_id').session(session)) {
+    if (key && await withOptionalSession(Transaction.findOne({ idempotencyKey: key }).select('_id'), session)) {
       duplicate = true;
       return;
     }
+    const updateOptions = { upsert: true, new: true, ...sessionOptions(session) };
     const member = await Member.findOneAndUpdate({ userId },
-      { $setOnInsert: { userId } }, { upsert: true, new: true, session });
+      { $setOnInsert: { userId } }, updateOptions);
     if (member.pendingTableId) {
       if (member.pendingTableId !== String(tableId)) throw new ApiError('Ticket reserved at another table', 409);
       duplicate = true;
@@ -85,7 +92,7 @@ async function buyNext(userId, tableId, requestKey) {
     member.active = true;
     member.lastEntryTxnId = txnId;
     member.totalContributed += fee;
-    await member.save({ session });
+    await member.save(sessionOptions(session));
   });
   await publishPool();
   return { duplicate };
@@ -113,11 +120,10 @@ async function prepareHand({ tableId, handId, userIds, startedAt }) {
   for (const original of members) {
     try {
       await ledger.withMongoTransaction(async session => {
-        if (!session) throw new Error('MONGO_TRANSACTIONS_REQUIRED');
-        if (await Ticket.findOne({ userId: original.userId, handId }).select('_id').session(session)) return;
-        const pool = await Pool.findOne({ key: 'default' }).select('enabled').session(session);
+        if (await withOptionalSession(Ticket.findOne({ userId: original.userId, handId }).select('_id'), session)) return;
+        const pool = await withOptionalSession(Pool.findOne({ key: 'default' }).select('enabled'), session);
         if (!pool?.enabled) return;
-        const member = await Member.findById(original._id).session(session);
+        const member = await withOptionalSession(Member.findById(original._id), session);
         if (!member) return;
         const prepaid = member.pendingTableId === String(tableId) && member.pendingAt <= cutoff;
         const automatic = member.autoBuyTableId === String(tableId) && member.autoBuySince <= cutoff;
@@ -133,8 +139,8 @@ async function prepareHand({ tableId, handId, userIds, startedAt }) {
           member.pendingAt = null;
           member.pendingFee = 0;
         }
-        await Ticket.create([{ userId: member.userId, tableId: String(tableId), handId, amount: fee }], { session });
-        await member.save({ session });
+        await Ticket.create([{ userId: member.userId, tableId: String(tableId), handId, amount: fee }], sessionOptions(session));
+        await member.save(sessionOptions(session));
       });
     } catch (error) {
       if (error.message?.includes('INSUFFICIENT')) {

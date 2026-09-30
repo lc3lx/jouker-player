@@ -38,6 +38,10 @@ const {
 const walletLedgerService = require("./walletLedgerService");
 const auditService = require("./auditService");
 
+function withOptionalSession(query, session) {
+  return session ? query.session(session) : query;
+}
+
 /** Per-user join cooldown (ms) — prevents double-click / replay spam. */
 const JOIN_COOLDOWN_MS = 2500;
 const _joinCooldown = new Map();

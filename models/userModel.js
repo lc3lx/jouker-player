@@ -148,6 +148,9 @@ const userSchema = new mongoose.Schema(
     /** Fraud / trust — payments & high-risk actions blocked when true. */
     trustRestricted: { type: Boolean, default: false },
     suspiciousFlag: { type: Boolean, default: false },
+    googleId: { type: String, sparse: true, index: true },
+    facebookId: { type: String, sparse: true, index: true },
+    authProvider: { type: String, enum: ["local", "google", "facebook"], default: "local" },
     /** Admin moderation: muted players cannot use chat/interactions. */
     muted: { type: Boolean, default: false },
     mutedReason: { type: String, default: null },

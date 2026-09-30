@@ -443,3 +443,113 @@ exports.resetPassword = asyncHandler(async (req, res, next) => {
   const token = createToken(user._id, user.sessionVersion);
   res.status(200).json({ token });
 });
+
+// @desc    Social Login (Google / Facebook)
+// @route   POST /api/v1/auth/social-login
+// @access  Public
+exports.socialLogin = asyncHandler(async (req, res, next) => {
+  const provider = (req.body.provider || "").toLowerCase().trim();
+  const rawEmail = (req.body.email || "").toLowerCase().trim();
+  const rawSocialId = (req.body.socialId || "").trim();
+  const rawName = (req.body.name || "").trim();
+  const rawAvatar = (req.body.avatar || "").trim();
+
+  if (!provider || (provider !== "google" && provider !== "facebook")) {
+    return next(new ApiError("Valid provider (google or facebook) is required", 400));
+  }
+
+  if (!rawEmail && !rawSocialId) {
+    return next(new ApiError("Email or social ID is required", 400));
+  }
+
+  const cleanEmail = rawEmail || `${provider}_${rawSocialId.replace(/[^a-zA-Z0-9]/g, "")}@social.middleeastpoker.com`;
+
+  let user = await User.findOne({
+    $or: [
+      { email: cleanEmail },
+      ...(rawSocialId ? (provider === "google" ? [{ googleId: rawSocialId }] : [{ facebookId: rawSocialId }]) : [])
+    ]
+  });
+
+  if (user) {
+    if (user.active === false) {
+      return next(new ApiError("Account is deactivated", 403));
+    }
+
+    const updates = {};
+    if (rawSocialId) {
+      if (provider === "google" && !user.googleId) updates.googleId = rawSocialId;
+      if (provider === "facebook" && !user.facebookId) updates.facebookId = rawSocialId;
+    }
+    if (rawAvatar && !user.profileImg) {
+      updates.profileImg = rawAvatar;
+    }
+    if (Object.keys(updates).length > 0) {
+      user = await User.findByIdAndUpdate(user._id, updates, { new: true });
+    }
+
+    if (!user.wallet) {
+      const wallet = await Wallet.create({ user: user._id });
+      user = await User.findByIdAndUpdate(user._id, { wallet: wallet._id }, { new: true });
+    }
+
+    publish(Events.PLAYER_SESSION_STARTED, { userId: String(user._id) });
+    const token = createToken(user._id, user.sessionVersion);
+    const safeUser = user.toObject();
+    delete safeUser.password;
+    return res.status(200).json({ data: safeUser, token });
+  }
+
+  // Create new user for first-time social login
+  const generatedPassword = crypto.randomBytes(16).toString("hex") + "A1!";
+  const inviteCode = referralInviteService.generateInviteCode();
+  const displayName = rawName || (provider === "google" ? "Google Player" : "Facebook Player");
+
+  let newUser;
+  for (let attempt = 0; attempt < 5; attempt++) {
+    try {
+      const playerId = await playerIdService.allocateNextOrdinaryId();
+      newUser = await User.create({
+        name: displayName,
+        email: cleanEmail,
+        password: generatedPassword,
+        profileImg: rawAvatar || undefined,
+        googleId: provider === "google" ? (rawSocialId || cleanEmail) : undefined,
+        facebookId: provider === "facebook" ? (rawSocialId || cleanEmail) : undefined,
+        authProvider: provider,
+        playerId,
+        inviteCode: attempt === 0 ? inviteCode : referralInviteService.generateInviteCode(),
+      });
+      break;
+    } catch (err) {
+      const dupField = err?.code === 11000 ? String(err.message) : "";
+      if ((dupField.includes("inviteCode") || dupField.includes("playerId")) && attempt < 4) {
+        continue;
+      }
+      throw err;
+    }
+  }
+
+  if (!newUser) return next(new ApiError("Could not create user account", 500));
+
+  const wallet = await Wallet.create({ user: newUser._id });
+  await User.findByIdAndUpdate(newUser._id, { wallet: wallet._id });
+
+  try {
+    await grantSignupAdminGift(newUser._id);
+  } catch (err) {
+    console.error("signup gift failed", err?.message || err);
+  }
+
+  publish(Events.PLAYER_REGISTERED, {
+    userId: String(newUser._id),
+    referredBy: null,
+  });
+  publish(Events.PLAYER_SESSION_STARTED, { userId: String(newUser._id) });
+
+  const token = createToken(newUser._id, newUser.sessionVersion);
+  const safeUser = newUser.toObject();
+  delete safeUser.password;
+
+  res.status(201).json({ data: safeUser, token });
+});
