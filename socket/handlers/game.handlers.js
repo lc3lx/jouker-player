@@ -1444,6 +1444,7 @@ function registerGameHandlers(nsp, jwtVerify) {
           nearMiss: outcome.nearMiss,
           almostBonus: outcome.almostBonus,
           totalWin: payout,
+          baseWin: outcome.baseWin,
           capped: roundCapReached,
           maxWin: outcome.maxWin,
           winningCells: outcome.winningCells,
