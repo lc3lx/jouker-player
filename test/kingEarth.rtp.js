@@ -2,13 +2,13 @@
  * King Earth — seeded Monte-Carlo RTP harness (manual, not part of `node --test`).
  *
  *   node test/kingEarth.rtp.js [rounds] [bet] [volatility] [mode]
- *   mode = base | ante | buy      (default base)
+ *   mode = base | buy | super      (default base)
  *
  * Replicates the `dice_spin` handler's free-spins session flow so the reported
  * RTP includes the bonus contribution:
- *   - base spin costs `stake`; 4+ scatters open a 15-spin session
+ *   - base spin costs `stake`; 4+ scatters open FREE_SPINS_AWARD spins
  *   - free spins cost 0, carry a persistent multiplier, retrigger +5 on 3+ scatter
- *   - the whole round win is capped at 4000× stake
+ *   - bought sessions use FREE_SPINS_BOUGHT and the cumulative engine cap
  */
 
 const DiceEngine = require("../games/dice/DiceEngine");
@@ -20,10 +20,10 @@ const MODE = process.argv[5] || "base"; // base | ante | buy
 
 const MAX_BANKED_FREE_SPINS = 50;
 
-function runFreeSpins(bet, doubleChance, volatility, seedBase, startMultiplier, roundCapLeft) {
+function runFreeSpins(bet, doubleChance, volatility, seedBase, startMultiplier, roundCapLeft, bought = false, superBonus = false) {
   // returns { win, spins, retriggers } — win is the bonus payout (already capped)
   const stake = Math.round(bet * (doubleChance ? 1.25 : 1) * 100) / 100;
-  let remaining = DiceEngine.FREE_SPINS_AWARD;
+  let remaining = bought ? DiceEngine.FREE_SPINS_BOUGHT : DiceEngine.FREE_SPINS_AWARD;
   let totalMultiplier = startMultiplier;
   let win = 0;
   let spins = 0;
@@ -37,6 +37,7 @@ function runFreeSpins(bet, doubleChance, volatility, seedBase, startMultiplier, 
       nonce: `${spins + 1}`,
       doubleChance,
       isFreeSpin: true,
+      superBonus,
       freeSpinMultiplier: totalMultiplier,
       volatility,
     });
@@ -75,10 +76,10 @@ function simulate() {
     let roundWin = 0;
     let capLeft = roundCap;
 
-    if (MODE === "buy") {
+    if (MODE === "buy" || MODE === "super") {
       // Buy feature: pay 100× total bet, jump straight to free spins.
-      cost = DiceEngine.BUY_COST_MULT * stake;
-      const fs = runFreeSpins(BET, doubleChance, VOL, `buy${i}`, 0, capLeft);
+      cost = (MODE === "super" ? DiceEngine.SUPER_BUY_COST_MULT : DiceEngine.BUY_COST_MULT) * stake;
+      const fs = runFreeSpins(BET, doubleChance, VOL, `buy${i}`, 0, capLeft, true, MODE === "super");
       roundWin += fs.win;
       bonusContribution += fs.win;
       totalFsSpins += fs.spins;
@@ -118,7 +119,7 @@ function simulate() {
   console.log(`King Earth RTP sim — mode=${MODE} vol=${VOL} bet=${BET} rounds=${ROUNDS.toLocaleString()}`);
   console.log(`  RTP                : ${pct(rtp)}`);
   console.log(`  Hit rate           : ${pct(hits / ROUNDS)}`);
-  if (MODE !== "buy") {
+  if (MODE !== "buy" && MODE !== "super") {
     console.log(`  FS trigger rate    : ${pct(triggers / ROUNDS)}  (~1 in ${triggers ? Math.round(ROUNDS / triggers) : "∞"})`);
     console.log(`  Base contribution  : ${pct(baseContribution / totalBet)}`);
     console.log(`  Bonus contribution : ${pct(bonusContribution / totalBet)}`);

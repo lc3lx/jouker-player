@@ -103,22 +103,23 @@ function dieSpin(opts = {}) {
   });
 }
 
-function kingArthBonusRound(spins, superBonus = false) {
+function kingArthBonusRound(spins, superBonus = false, initialWin = 0) {
   let remaining = spins;
   let won = 0;
   let carried = 0;
-  for (let guard = 0; remaining > 0 && guard < 400; guard += 1) {
-    remaining -= 1;
+  const cap = Math.max(0, dice.MAX_WIN_MULTIPLIER * BET - initialWin);
+  for (let guard = 0; remaining > 0 && won < cap && guard < 400; guard += 1) {
     const s = dieSpin({
       isFreeSpin: true,
       superBonus,
       freeSpinMultiplier: carried,
     });
-    won += s.totalWin;
+    won = Math.min(cap, won + s.totalWin);
     carried = s.multipliers.freeSpinTotal;
     if (s.scatterCount >= dice.RETRIGGER_MIN_SCATTER) {
-      remaining += dice.RETRIGGER_AWARD;
+      remaining = Math.min(50, remaining + dice.RETRIGGER_AWARD);
     }
+    remaining -= 1;
   }
   return won;
 }
@@ -132,10 +133,10 @@ function probeKingArth(spins, bonusRounds) {
   for (let i = 0; i < spins; i += 1) {
     const s = dieSpin();
     let win = s.totalWin;
-    if (s.scatterCount) plaqueSpins += 1;
+    if (s.multipliers.collected > 0) plaqueSpins += 1;
     if (s.freeSpinsAwarded) {
       triggers += 1;
-      win += kingArthBonusRound(s.freeSpinsAwarded);
+      win += kingArthBonusRound(s.freeSpinsAwarded, false, win);
     }
     if (win > 0) hits += 1;
     won += win;

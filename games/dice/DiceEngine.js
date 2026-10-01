@@ -29,8 +29,8 @@ const FREE_SPINS_BOUGHT = 10;
 const RETRIGGER_AWARD = 5;
 const RETRIGGER_MIN_SCATTER = 3;
 // Priced off the measured return of a round — re-derive with tool/atlantisRtp.js.
-const BUY_COST_MULT = 50;
-const SUPER_BUY_COST_MULT = 281;
+const BUY_COST_MULT = 154;
+const SUPER_BUY_COST_MULT = 784;
 const SUPER_MULTIPLIER_MIN = 20;
 const MAX_WIN_MULTIPLIER = 5000;
 const BET_MIN = 10000;

@@ -60,8 +60,8 @@ function scratchExpectedReturn(bonusMode) {
   }
   // The shuffled board contains three of each tier, so the first triple is
   // symmetric across tiers (assuming the player completes the scratch round).
-  const meanPrize = MATCH_PRIZE_TYPES.reduce((sum, p) => sum + p.amount, 0) / MATCH_PRIZE_TYPES.length;
-  return distribution.slice(3).reduce((a, b) => a + b, 0) * meanPrize / BET;
+  const meanPrize = MATCH_PRIZE_TYPES.reduce((sum, p) => sum + p.multiplier, 0) / MATCH_PRIZE_TYPES.length;
+  return distribution.slice(3).reduce((a, b) => a + b, 0) * meanPrize;
 }
 
 function treeCount(matrix) {
