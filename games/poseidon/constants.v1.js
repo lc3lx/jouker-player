@@ -1,4 +1,3 @@
-const economy = require("../utils/slotEconomy");
 /**
  * Poseidon – The God of Atlantis — core game constants.
  *
@@ -48,7 +47,7 @@ const RETRIGGER_AWARD = 5;
  */
 const BUY_BONUS_COST = 25;
 /** Super buy bonus — 3× standard cost (UI tier). */
-const SUPER_BUY_BONUS_COST = 250;
+const SUPER_BUY_BONUS_COST = 129;
 
 const SYMBOLS = Object.freeze({
   // low pays (royals — all pay the same)
@@ -72,20 +71,22 @@ const SYMBOLS = Object.freeze({
 const MULTIPLIER_VALUES = Object.freeze([2, 5, 10, 20, 50, 100, 200, 500, 1000]);
 
 /** Base-game plaque value weights — heavily skewed to small faces. */
-const BASE_MULTIPLIER_WEIGHTS = Object.freeze(economy.faceWeights(MULTIPLIER_VALUES, [
+const BASE_MULTIPLIER_WEIGHTS = Object.freeze([
   82, 11, 4.2, 1.6, 0.7, 0.3, 0.12, 0.05, 0.02,
-]));
+]);
 
 /** Buy-bonus / free-spins — still richer, but x500/x1000 stay rare. */
-const BONUS_MULTIPLIER_WEIGHTS = Object.freeze(economy.faceWeights(MULTIPLIER_VALUES, [
+const BONUS_MULTIPLIER_WEIGHTS = Object.freeze([
   62, 16, 10, 5.5, 3, 1.8, 0.9, 0.45, 0.2,
-]));
+]);
 
 /**
- * When a mid/big plaque (x20+) is already on screen, further draws retain
- * the same published probabilities (no stacking suppression).
+ * When a mid/big plaque (x20+) is already on screen, further draws collapse
+ * toward small values so several huge multipliers rarely stack.
  */
-const SUPPRESSED_MULTIPLIER_WEIGHTS = BASE_MULTIPLIER_WEIGHTS;
+const SUPPRESSED_MULTIPLIER_WEIGHTS = Object.freeze([
+  88, 9, 2.2, 0.5, 0.15, 0.05, 0.015, 0.005, 0.002,
+]);
 
 /** @deprecated kept for any external reads — prefer BASE/BONUS_MULTIPLIER_WEIGHTS */
 const MULTIPLIER_GATES = Object.freeze([

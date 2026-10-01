@@ -8,12 +8,12 @@ const {
   MAIN_WILD_MULTIPLIER_WEIGHTS,
   BONUS_WILD_MULTIPLIER_WEIGHTS,
   BONUS_FORCED_TREE_WEIGHTS,
-} = require("./constants");
+} = require("./constants.v1");
 const {
   MAIN_REEL_STRIPS,
   BONUS_REEL_STRIPS,
   JACKPOT_WINDOW_ACTIVATION_ODDS,
-} = require("./reelStrips");
+} = require("./reelStrips.v1");
 
 /**
  * Cryptographically secure RNG — never trust client-side randomness.
@@ -205,14 +205,11 @@ function assignWildMultipliers(matrix, multiplierWeights, rng = secureRandomInt)
  */
 function generateSpin({
   bonusMode = false,
-  economyVersion = 2,
   forceTrees = false,
   forceTreeCount = null,
   rng = secureRandomInt,
   edgeParams = null,
 } = {}) {
-  if (economyVersion === 1) return require("./spinEngine.v1").generateSpin({ bonusMode, forceTrees, forceTreeCount, rng, edgeParams });
-  if (bonusMode) edgeParams = null;
   const strips = bonusMode ? BONUS_REEL_STRIPS : MAIN_REEL_STRIPS;
   let multiplierWeights = bonusMode
     ? BONUS_WILD_MULTIPLIER_WEIGHTS

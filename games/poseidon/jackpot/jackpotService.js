@@ -31,6 +31,13 @@ function _cloneRound(round) {
 }
 
 async function _persistRound(round) {
+  const operation = require("../../utils/slotOperation");
+  const session = operation.currentSession();
+  if (session && MODE === "mongo") {
+    await require("../../../models/poseidonJackpotRoundModel").create([round], { session });
+    operation.afterCommit(() => _stubRounds.set(round.roundId, _cloneRound(round)));
+    return;
+  }
   // Always keep an in-process copy so reveal works even if Mongo is slow/down.
   _stubRounds.set(round.roundId, _cloneRound(round));
 

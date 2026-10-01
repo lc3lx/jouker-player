@@ -71,8 +71,10 @@ test("multiplier landing rates use Poseidon-aligned plaque spawn weights", () =>
   const bonusChance = 0.55 / (regularMass + 0.55);
   assert.ok(Math.abs(baseChance - 0.22 / (regularMass + 0.22)) < 1e-12);
   assert.ok(Math.abs(bonusChance - 0.55 / (regularMass + 0.55)) < 1e-12);
-  assert.deepEqual(engine.BASE_MULTIPLIER_WEIGHTS, [82, 11, 4.2, 1.6, 0.7, 0.3, 0.12, 0.05, 0.02]);
-  assert.deepEqual(engine.BONUS_MULTIPLIER_WEIGHTS, [62, 16, 10, 5.5, 3, 1.8, 0.9, 0.45, 0.2]);
+  for (const weights of [engine.BASE_MULTIPLIER_WEIGHTS, engine.BONUS_MULTIPLIER_WEIGHTS]) {
+    assert.deepEqual(weights.slice(3), [10,5,2,1,0.5,0.1]);
+    assert.ok(Math.abs(weights.reduce((a,b) => a+b,0) - 100) < 1e-10);
+  }
 });
 
 test("natural free spins start with ten spins", async () => {

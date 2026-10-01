@@ -1,4 +1,3 @@
-const economy = require("../utils/slotEconomy");
 /**
  * Poseidon spin engine — generates the drop and resolves the entire tumbling
  * sequence server-side. The client only replays the presentation.
@@ -26,8 +25,8 @@ const {
   isMultiplier,
   isScatter,
   multiplierValue,
-} = require("./constants");
-const { findWins, collectMultipliers, collectScatters } = require("./winCalculator");
+} = require("./constants.v1");
+const { findWins, collectMultipliers, collectScatters } = require("./winCalculator.v1");
 
 /** Hard stop — a legit sequence exhausts long before this. */
 const MAX_TUMBLES = 40;
@@ -64,20 +63,37 @@ function pickFromWeights(weights, rng, values = MULTIPLIER_VALUES) {
   return values[0];
 }
 
-function pickMultiplierValue(rng, opts = {}) {
-  return economy.pickFace(MULTIPLIER_VALUES, opts.bonus ? BONUS_MULTIPLIER_WEIGHTS : BASE_MULTIPLIER_WEIGHTS,
-    { rng, superBonus: opts.superBonus });
+function plaqueTable({ bonus = false, bigAlready = false, superBonus = false } = {}) {
+  const weights = bigAlready
+    ? SUPPRESSED_MULTIPLIER_WEIGHTS
+    : bonus || superBonus
+      ? BONUS_MULTIPLIER_WEIGHTS
+      : BASE_MULTIPLIER_WEIGHTS;
+  if (!superBonus) return { values: MULTIPLIER_VALUES, weights };
+  const start = MULTIPLIER_VALUES.findIndex((v) => v >= SUPER_MULTIPLIER_MIN);
+  return {
+    values: MULTIPLIER_VALUES.slice(start),
+    weights: weights.slice(start),
+  };
 }
 
-function drawCell(pick, rng, opts = {}) {
-  const symbol = pick();
-  if (symbol !== "mult") return symbol;
-  const value = pickMultiplierValue(rng, opts);
-  if (value !== null) return `x${value}`;
-  // A failed super opportunity produces a regular paying symbol, never x0.
-  let regular;
-  do { regular = pick(); } while (regular === "mult" || regular === "jackpot" || regular === "bonus" || regular === "head");
-  return regular;
+/**
+ * Weighted plaque value. Bonus mode uses a richer table.
+ * Super buy-bonus never deals below x20 (win or lose).
+ * When [bigAlready] is true (x20+ already on the grid), further draws
+ * collapse toward small plaques so huge stacks stay rare.
+ */
+function pickMultiplierValue(rng, {
+  bonus = false,
+  bigAlready = false,
+  superBonus = false,
+  edgeParams = null,
+} = {}) {
+  let { values, weights } = plaqueTable({ bonus, bigAlready, superBonus });
+  if (edgeParams?.modulateMultiplierWeights) {
+    weights = edgeParams.modulateMultiplierWeights(values, weights);
+  }
+  return pickFromWeights(weights, rng, values);
 }
 
 function countBigMultipliers(matrix) {
@@ -96,6 +112,14 @@ function countBigInCells(cells) {
     if (multiplierValue(cell) >= BIG_MULTIPLIER_THRESHOLD) n += 1;
   }
   return n;
+}
+
+/** Draw one cell; "mult" placeholder resolves to a concrete `x<value>`. */
+function drawCell(pick, rng, { bonus = false, bigAlready = false, superBonus = false, edgeParams = null } = {}) {
+  const symbol = pick();
+  return symbol === "mult"
+    ? `x${pickMultiplierValue(rng, { bonus, bigAlready, superBonus, edgeParams })}`
+    : symbol;
 }
 
 function matrixHasMultiplier(matrix) {
@@ -250,10 +274,7 @@ function tumble(matrix, removedPositions, pick, rng, { bonus = false, superBonus
  *   multiplierSum,
  * }
  */
-function resolveSpin({ bonusMode = false, superBonus = false, rng = secureRandom, edgeParams = null, economyVersion = economy.VERSION, payScale = null } = {}) {
-  if (economyVersion === 1) return require("./spinEngine.v1").resolveSpin({ bonusMode, superBonus, rng, edgeParams });
-  if (bonusMode) edgeParams = null;
-  const scale = payScale ?? economy.payScale("poseidon", { bonusMode, superBonus, tierName: edgeParams?.tierName });
+function resolveSpin({ bonusMode = false, superBonus = false, rng = secureRandom, edgeParams = null } = {}) {
   let weights = bonusMode ? BONUS_WEIGHTS : BASE_WEIGHTS;
   if (edgeParams?.modulateSymbolWeights) {
     weights = edgeParams.modulateSymbolWeights(weights);
@@ -268,10 +289,10 @@ function resolveSpin({ bonusMode = false, superBonus = false, rng = secureRandom
   const steps = [];
   let baseWin = 0;
   for (let i = 0; i < MAX_TUMBLES; i += 1) {
-    const wins = findWins(matrix).map(w => ({ ...w, payout: w.payout * scale }));
+    const wins = findWins(matrix);
     if (wins.length === 0) break;
 
-    const stepWin = wins.reduce((sum, w) => sum + w.payout, 0);
+    const stepWin = wins.reduce((sum, w) => sum + w.payout, 0) * (bonusMode ? BONUS_CLUSTER_SCALE : 1);
     baseWin += stepWin;
     const removedPositions = wins.flatMap((w) => w.positions);
     const result = tumble(matrix, removedPositions, pick, rng, drawOpts);

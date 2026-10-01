@@ -1,3 +1,4 @@
+const slotOperation = require("../utils/slotOperation");
 const crypto = require("crypto");
 const { v4: uuidv4 } = require("uuid");
 const { FREE_SPINS_NATURAL, roundMoney } = require("./constants");
@@ -84,11 +85,13 @@ function sessionSnapshot(session) {
     totalWon: session.totalWon,
     superBonus: !!session.superBonus,
     bonusMultiplier: Number(session.bonusMultiplier || 0),
+    economyVersion: session.economyVersion || 1,
     createdAt: session.createdAt,
   };
 }
 
 async function persistSession(session) {
+  if (slotOperation.active()) return;
   if (!useMongo() || !session) return;
   try {
     const Model = getSessionModel();
@@ -103,7 +106,8 @@ async function persistSession(session) {
         totalWon: session.totalWon,
         superBonus: !!session.superBonus,
         bonusMultiplier: Number(session.bonusMultiplier || 0),
-        createdAt: session.createdAt,
+        economyVersion: session.economyVersion || 1,
+    createdAt: session.createdAt,
         updatedAt: now,
       },
       { upsert: true, new: true, setDefaultsOnInsert: true },
@@ -116,6 +120,7 @@ async function persistSession(session) {
 }
 
 async function deletePersistedSession(userId) {
+  if (slotOperation.active()) return;
   if (!useMongo()) return;
   try {
     const Model = getSessionModel();
@@ -130,16 +135,16 @@ async function deletePersistedSession(userId) {
  * request that depends on bonus entitlement.
  */
 async function ensureLoaded(userId) {
+  if (slotOperation.active()) return getBonusSession(userId);
   const key = String(userId);
-  if (bonusSessions.has(key)) return bonusSessions.get(key);
-  if (!useMongo()) return null;
+  if (!useMongo()) return getBonusSession(userId);
   try {
     const Model = getSessionModel();
     const doc = await Model.findOne({
       userId: key,
       freeSpinsRemaining: { $gt: 0 },
     }).lean();
-    if (!doc) return null;
+    if (!doc) { bonusSessions.delete(key); return null; }
     const session = {
       sessionId: doc.sessionId,
       userId: key,
@@ -148,6 +153,7 @@ async function ensureLoaded(userId) {
       totalWon: roundMoney(doc.totalWon || 0),
       superBonus: !!doc.superBonus,
       bonusMultiplier: Number(doc.bonusMultiplier || 0),
+      economyVersion: doc.economyVersion || 1,
       createdAt: doc.createdAt || Date.now(),
     };
     if (session.freeSpinsRemaining <= 0) return null;
@@ -155,7 +161,7 @@ async function ensureLoaded(userId) {
     return session;
   } catch (err) {
     console.error("[poseidon] bonus session load failed:", err?.message || err);
-    return null;
+    throw err;
   }
 }
 
@@ -163,6 +169,7 @@ function createBonusSession(userId, {
   betAmount,
   freeSpins = FREE_SPINS_NATURAL,
   superBonus = false,
+  economyVersion = 2,
 }) {
   const session = {
     sessionId: uuidv4(),
@@ -171,6 +178,7 @@ function createBonusSession(userId, {
     freeSpinsRemaining: freeSpins,
     totalWon: 0,
     superBonus: !!superBonus,
+    economyVersion,
     bonusMultiplier: 0,
     createdAt: Date.now(),
   };
@@ -257,6 +265,7 @@ function clearAllForTestsSync() {
 }
 
 module.exports = {
+  replaceBonusSession,
   createRound,
   getRound,
   createBonusSession,
@@ -273,3 +282,8 @@ module.exports = {
   createRoundHash,
   sessionSnapshot,
 };
+
+function replaceBonusSession(userId, session) {
+  if (session) bonusSessions.set(String(userId), structuredClone(session));
+  else bonusSessions.delete(String(userId));
+}

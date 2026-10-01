@@ -1,3 +1,4 @@
+const slotOperation = require("../utils/slotOperation");
 /**
  * Wallet integration layer — decoupled from game math.
  *
@@ -97,8 +98,9 @@ async function creditBalanceStub(userId, amount, meta = {}) {
 
 async function getBalanceMongo(userId) {
   const Wallet = require("../../models/walletModel");
-  let wallet = await Wallet.findOne({ user: userId });
-  if (!wallet) wallet = await Wallet.create({ user: userId });
+  const session = slotOperation.currentSession();
+  let wallet = await Wallet.findOne({ user: userId }).session(session);
+  if (!wallet) [wallet] = await Wallet.create([{ user: userId }], session ? { session } : {});
   return roundMoney(Number(wallet.balance) || 0);
 }
 
@@ -108,7 +110,7 @@ async function deductBalanceMongo(userId, amount, meta = {}) {
   if (amt <= 0) throw new Error("INVALID_DEDUCT_AMOUNT");
 
   let balanceAfter = 0;
-  await withMongoTransaction(async (session) => {
+  await slotOperation.walletTransaction(async (session) => {
     await ledgerWithdraw({
       session,
       userId,
@@ -127,7 +129,7 @@ async function creditBalanceMongo(userId, amount, meta = {}) {
   if (amt <= 0) return { balance: await getBalanceMongo(userId), skipped: true };
 
   let balanceAfter = 0;
-  await withMongoTransaction(async (session) => {
+  await slotOperation.walletTransaction(async (session) => {
     await ledgerDeposit({
       session,
       userId,
@@ -167,7 +169,7 @@ async function creditBalance(userId, amount, meta = {}) {
  */
 async function settleMongo(userId, { debit, credit, meta, debitLeg, creditLeg }) {
   const { withMongoTransaction, ledgerWithdraw, ledgerDeposit } = require("../../services/walletLedgerService");
-  await withMongoTransaction(async (session) => {
+  await slotOperation.walletTransaction(async (session) => {
     if (debit > 0) {
       await ledgerWithdraw({
         session,

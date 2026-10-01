@@ -1,4 +1,3 @@
-const economy = require("../utils/slotEconomy");
 /**
  * King Earth slot engine.
  *
@@ -31,7 +30,7 @@ const RETRIGGER_AWARD = 5;
 const RETRIGGER_MIN_SCATTER = 3;
 // Priced off the measured return of a round — re-derive with tool/atlantisRtp.js.
 const BUY_COST_MULT = 154;
-const SUPER_BUY_COST_MULT = BUY_COST_MULT * 10;
+const SUPER_BUY_COST_MULT = 784;
 const SUPER_MULTIPLIER_MIN = 20;
 const MAX_WIN_MULTIPLIER = 5000;
 const BET_MIN = 10000;
@@ -67,9 +66,9 @@ const FREESPIN_WEIGHTS = [
   11.0, 11.0, 11.0, 11.0,
   6.2, 5.4, 4.4, 3.2,
 ];
-const BASE_MULTIPLIER_WEIGHTS = economy.faceWeights(MULTIPLIER_VALUES, [82, 11, 4.2, 1.6, .7, .3, .12, .05, .02]);
-const BONUS_MULTIPLIER_WEIGHTS = economy.faceWeights(MULTIPLIER_VALUES, [62, 16, 10, 5.5, 3, 1.8, .9, .45, .2]);
-const SUPPRESSED_MULTIPLIER_WEIGHTS = BASE_MULTIPLIER_WEIGHTS;
+const BASE_MULTIPLIER_WEIGHTS = [82, 11, 4.2, 1.6, .7, .3, .12, .05, .02];
+const BONUS_MULTIPLIER_WEIGHTS = [62, 16, 10, 5.5, 3, 1.8, .9, .45, .2];
+const SUPPRESSED_MULTIPLIER_WEIGHTS = [88, 9, 2.2, .5, .15, .05, .015, .005, .002];
 const MULTIPLIER_GATES = [.48, .35, .33, .32, .35, .4, .4, .35, .4];
 const BIG_MULTIPLIER_THRESHOLD = 20;
 // A plaque on a winning board pays. Stripping those wins put multipliers
@@ -96,7 +95,12 @@ function isMultiplier(symbol) {
 function multiplierValue(symbol) { return isMultiplier(symbol) ? MULTIPLIER_VALUES[symbol - MULTIPLIER] : 0; }
 function weightedIndex(rng, weights) { let r = rng() * weights.reduce((a, b) => a + b, 0); for (let i = 0; i < weights.length; i++) { r -= weights[i]; if (r < 0) return i; } return 0; }
 function pickMultiplierValue(rng, volatility, { bonus = false, bigAlready = false, superBonus = false } = {}) {
-  return economy.pickFace(MULTIPLIER_VALUES, bonus ? BONUS_MULTIPLIER_WEIGHTS : BASE_MULTIPLIER_WEIGHTS, { rng, superBonus });
+  const weights = bigAlready ? SUPPRESSED_MULTIPLIER_WEIGHTS : (bonus || superBonus) ? BONUS_MULTIPLIER_WEIGHTS : BASE_MULTIPLIER_WEIGHTS;
+  if (superBonus) {
+    const start = MULTIPLIER_VALUES.findIndex((v) => v >= SUPER_MULTIPLIER_MIN);
+    return MULTIPLIER_VALUES.slice(start)[weightedIndex(rng, weights.slice(start))];
+  }
+  return MULTIPLIER_VALUES[weightedIndex(rng, weights)];
 }
 function isJackpot(symbol) {
   return symbol === JACKPOT;
@@ -119,7 +123,7 @@ function pickSymbol(rng, isFreeSpin, bigAlready, superBonus = false) {
   if (choice < REGULAR_SYMBOLS) return choice;
   if (choice === REGULAR_SYMBOLS) {
     const value = pickMultiplierValue(rng, "medium", { bonus: isFreeSpin, bigAlready, superBonus });
-    return value === null ? weightedIndex(rng, regular) : MULTIPLIER + MULTIPLIER_VALUES.indexOf(value);
+    return MULTIPLIER + MULTIPLIER_VALUES.indexOf(value);
   }
   if (choice === REGULAR_SYMBOLS + 1) return JACKPOT;
   return HEAD;
@@ -218,7 +222,7 @@ function classifyWinType(total, stake) { const r = total / Math.max(stake, 1); r
 function runTumbles(initialGrid, rng, options) {
   let grid = cloneGrid(initialGrid), baseWin = 0; const lineWins = [], winningCells = new Set(), cascadeSteps = [];
   for (let index = 0; index < MAX_TUMBLES; index++) {
-    const beforeGrid = cloneGrid(grid), { wins, winningCells: stepKeys } = findPayAnywhereWins(grid, options.stake, options.payScale);
+    const beforeGrid = cloneGrid(grid), { wins, winningCells: stepKeys } = findPayAnywhereWins(grid, options.stake, options.isFreeSpin ? FREESPIN_PAY_SCALE : BASE_PAY_SCALE);
     if (!wins.length) break;
     const stepWin = roundMoney(wins.reduce((sum, w) => sum + w.win, 0)); baseWin = roundMoney(baseWin + stepWin);
     const collapsed = collapseGrid(grid, stepKeys, rng, options.volatility, options.doubleChance, options.isFreeSpin, options.superBonus);
@@ -242,11 +246,10 @@ function runTumbles(initialGrid, rng, options) {
 }
 function calculateWins(grid, stake, freeSpinMultiplier = 0) { const { wins, winningCells } = findPayAnywhereWins(grid, stake); const totalWin = wins.reduce((sum, w) => sum + w.win, 0); return { totalWin: roundMoney(totalWin), winningCells: [...winningCells].map((key) => { const [col, row] = key.split(",").map(Number); return { col, row }; }), lineWins: wins, scatterCount: headCells(grid).length }; }
 function spin(baseBet, options = {}) {
-  if (options.economyVersion === 1) return require("./DiceEngine.v1").spin(baseBet, options);
-  const rng = options.rng || createSeededRng(options.serverSeed, options.clientSeed, options.nonce), isFreeSpin = !!options.isFreeSpin, superBonus = !!(isFreeSpin && options.superBonus), stake = roundMoney(baseBet);
+  const rng = createSeededRng(options.serverSeed, options.clientSeed, options.nonce), isFreeSpin = !!options.isFreeSpin, superBonus = !!(isFreeSpin && options.superBonus), stake = roundMoney(baseBet);
   const initialGrid = generateGrid(rng, options.volatility, false, isFreeSpin, superBonus);
   softenPlaqueWins(initialGrid, Array(COLS).fill(ROWS), rng, isFreeSpin);
-  const tumble = runTumbles(initialGrid, rng, { stake, volatility: normalizeVolatility(options.volatility), doubleChance: false, isFreeSpin, superBonus, freeSpinMultiplier: options.freeSpinMultiplier, payScale: options.payScale ?? economy.payScale("zeus", { bonusMode: isFreeSpin, superBonus }) });
+  const tumble = runTumbles(initialGrid, rng, { stake, volatility: normalizeVolatility(options.volatility), doubleChance: false, isFreeSpin, superBonus, freeSpinMultiplier: options.freeSpinMultiplier });
   const scatterCount = headCells(tumble.finalGrid).length, winCap = roundMoney(MAX_WIN_MULTIPLIER * stake);
   const totalWin = Math.min(tumble.multipliedWin, winCap);
   const jackpotSymbolCount = countJackpotSymbols(tumble.finalGrid);

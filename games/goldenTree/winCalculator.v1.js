@@ -1,4 +1,3 @@
-const economy = require("../utils/slotEconomy");
 const {
   REEL_COUNT,
   ROW_COUNT,
@@ -10,7 +9,7 @@ const {
   minMatchCount,
   isLineBreaker,
   roundMoney,
-} = require("./constants");
+} = require("./constants.v1");
 
 /**
  * Each landed wild tree expands over its whole reel (all rows) for win
@@ -236,9 +235,7 @@ function normalizeLandscapeMatrix(matrix) {
  * Backend is sole payout authority.
  */
 function calculateWins(matrix, wildMultipliers, betAmount, options = {}) {
-  if (options.economyVersion === 1) return require("./winCalculator.v1").calculateWins(matrix, wildMultipliers, betAmount, options);
   const bonusMode = options.bonusMode === true;
-  const scale = options.payScale ?? economy.payScale("golden-tree", { bonusMode, tierName: options.tierName });
   const landed = normalizeLandscapeMatrix(matrix);
 
   let evalMatrix;
@@ -253,7 +250,7 @@ function calculateWins(matrix, wildMultipliers, betAmount, options = {}) {
   const candidates = [];
   for (let i = 0; i < PAYLINES.length; i += 1) {
     const win = evaluatePayline(PAYLINES[i], i, evalMatrix, wildMultipliers, betAmount);
-    if (win) candidates.push({ ...win, baseAmount: win.baseAmount * scale, amount: roundMoney(win.baseAmount * scale * win.wildMultiplier) });
+    if (win) candidates.push(win);
   }
 
   const lineWins = dropSubsumedLineWins(candidates);

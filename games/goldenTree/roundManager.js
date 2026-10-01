@@ -1,3 +1,4 @@
+const slotOperation = require("../utils/slotOperation");
 const crypto = require("crypto");
 const { v4: uuidv4 } = require("uuid");
 const {
@@ -124,6 +125,7 @@ function createBonusSession(userId, {
   resolvedType,
   betAmount,
   sessionId = uuidv4(),
+  economyVersion = 2,
 }) {
   const session = {
     sessionId,
@@ -132,6 +134,8 @@ function createBonusSession(userId, {
     resolvedType,
     betAmount: roundMoney(betAmount),
     freeSpinsRemaining: require("./constants").FREE_SPINS_PER_BONUS,
+    economyVersion,
+    totalWon: 0,
     gambleLocked: true,
     createdAt: Date.now(),
   };
@@ -173,6 +177,8 @@ function clearAllForTests() {
 }
 
 module.exports = {
+  replaceBonusSession,
+  ensureLoaded,
   createRound,
   getRound,
   getRoundForUser,
@@ -188,3 +194,15 @@ module.exports = {
   clearAllForTests,
   createRoundHash,
 };
+
+async function ensureLoaded(userId) {
+  if (slotOperation.active() || require("./goldenTreeWalletAdapter").MODE !== "mongo") return getBonusSession(userId);
+  const doc = await require("../../models/goldenTreeBonusSessionModel").findOne({ userId: String(userId), freeSpinsRemaining: { $gt: 0 } }).lean();
+  replaceBonusSession(userId, doc);
+  return doc;
+}
+
+function replaceBonusSession(userId, session) {
+  if (session) bonusSessions.set(String(userId), structuredClone(session));
+  else bonusSessions.delete(String(userId));
+}

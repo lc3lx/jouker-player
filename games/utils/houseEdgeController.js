@@ -43,6 +43,7 @@ function calculateEdge({
   betMin = 10000,
   userId = null,
   isBonusSpin = false,
+  economyVersion = 2,
 } = {}) {
   if (!config.ENABLED) {
     return {
@@ -62,7 +63,8 @@ function calculateEdge({
   }
 
   const { tier, ratio } = resolveTier(betAmount, betMin);
-  const streak = userId ? evaluateStreak(userId) : { status: "neutral", factor: 1.0 };
+  const fixedSlot = economyVersion >= 2 && ["poseidon", "zenobia", "golden-tree"].includes(game);
+  const streak = userId && !fixedSlot ? evaluateStreak(userId) : { status: "neutral", factor: 1.0 };
 
   // Adjusted hit rate combining bet tier with streak feedback
   const effectiveHitMultiplier = Math.max(

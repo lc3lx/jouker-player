@@ -1,4 +1,3 @@
-const economy = require("../utils/slotEconomy");
 /**
  * Zenobia — Queen of the East (زنوبيا ملكة الشرق) — core game constants.
  *
@@ -60,7 +59,7 @@ const RETRIGGER_AWARD = 5;
 /** Buy bonus cost in bet multiples (EV-matched by the sim). */
 const BUY_BONUS_COST = 40.7;
 /** Super buy bonus — richer plaque table, never below [SUPER_MULTIPLIER_MIN]. */
-const SUPER_BUY_BONUS_COST = 407;
+const SUPER_BUY_BONUS_COST = 152;
 
 const SYMBOLS = Object.freeze({
   // low pays — carved stone letters (all pay the same)
@@ -96,25 +95,27 @@ const MULTIPLIER_VALUES = Object.freeze([
 const ROYAL_MULTIPLIER_MIN = 10;
 
 /** Base-game plaque faces — heavily skewed to the small gold end. */
-const BASE_MULTIPLIER_WEIGHTS = Object.freeze(economy.faceWeights(MULTIPLIER_VALUES, [
+const BASE_MULTIPLIER_WEIGHTS = Object.freeze([
   30, 21, 15, 11, 7.5, 5, 3.4, 2.4, 1.9, 1.0, 0.62, 0.3, 0.14, 0.08, 0.04, 0.012, 0.004,
-]));
+]);
 
 /** Free spins — the royal end opens up, x200/x500/x1000 stay rare. */
-const BONUS_MULTIPLIER_WEIGHTS = Object.freeze(economy.faceWeights(MULTIPLIER_VALUES, [
+const BONUS_MULTIPLIER_WEIGHTS = Object.freeze([
   22, 17, 13.5, 11, 8.5, 6.5, 5, 4, 3.6, 2.5, 1.7, 1.0, 0.55, 0.16, 0.07, 0.055, 0.018,
-]));
+]);
 
 /**
  * Once a royal plaque (x20+) is already banked this sequence, later draws
- * retain the same published face probabilities.
+ * collapse toward the gold end so several huge faces rarely stack.
  */
-const SUPPRESSED_MULTIPLIER_WEIGHTS = BASE_MULTIPLIER_WEIGHTS;
+const SUPPRESSED_MULTIPLIER_WEIGHTS = Object.freeze([
+  36, 24, 16, 10, 6, 3.4, 1.9, 1.1, 0.75, 0.32, 0.15, 0.06, 0.025, 0.012, 0.005, 0.0015, 0.0005,
+]);
 
 /** Plaques at/above this face count as "big" for stacking suppression. */
 const BIG_MULTIPLIER_THRESHOLD = 20;
 /** Super buy-bonus: every plaque face is at least this. */
-const SUPER_MULTIPLIER_MIN = 20;
+const SUPER_MULTIPLIER_MIN = 10;
 
 const PAYING_SYMBOLS = Object.freeze([
   SYMBOLS.QUEEN,

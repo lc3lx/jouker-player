@@ -16,7 +16,7 @@ function requireUserId(req, res, next) {
 
 exports.spin = asyncHandler(async (req, res) => {
   const { betAmount } = req.body;
-  const data = await goldenTreeService.executeSpin(req.goldenTreeUserId, betAmount);
+  const data = await goldenTreeService.executeSpin(req.goldenTreeUserId, betAmount, { requestId: req.body.requestId });
   res.status(200).json({ status: "success", data });
 });
 
@@ -39,6 +39,7 @@ exports.buyBonus = asyncHandler(async (req, res) => {
     req.goldenTreeUserId,
     bonusType,
     currentBet,
+    { requestId: req.body.requestId },
   );
   res.status(200).json({ status: "success", data });
 });
@@ -57,3 +58,8 @@ exports.winRules = asyncHandler(async (_req, res) => {
 });
 
 exports.requireUserId = requireUserId;
+
+exports.session = asyncHandler(async (req, res) => {
+  const data = await goldenTreeService.getActiveSession(req.goldenTreeUserId);
+  res.status(200).json({ status: "success", data });
+});

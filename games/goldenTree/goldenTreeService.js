@@ -1,3 +1,4 @@
+const slotOperation = require("../utils/slotOperation");
 const ApiError = require("../../utils/apiError");
 const {
   BET_MIN,
@@ -103,7 +104,7 @@ function rollJackpot(betAmount, { isBonusSpin, rng = secureRandomInt } = {}) {
   };
 }
 
-async function executeSpin(userId, betAmountInput) {
+async function executeSpinInternal(userId, betAmountInput) {
   const userKey = String(userId);
   const bonusSession = roundManager.getBonusSession(userKey);
   const isBonusSpin =
@@ -131,6 +132,7 @@ async function executeSpin(userId, betAmountInput) {
     betMin: BET_MIN,
     userId: userKey,
     isBonusSpin,
+    economyVersion: isBonusSpin ? (bonusSession.economyVersion || 1) : 2,
   });
 
   // All bonus spins guarantee trees on reels 2–4; multiplier upgrades roll
@@ -138,12 +140,15 @@ async function executeSpin(userId, betAmountInput) {
   const { matrix, wildMultipliers } = generateSpin({
     bonusMode: isBonusSpin,
     edgeParams,
+    economyVersion: isBonusSpin ? (bonusSession.economyVersion || 1) : 2,
   });
 
   // Backend is the sole win authority (Flutter client is display-only).
   // ≥3 contiguous from reel 0; orange/seven same as every other line symbol.
   const payable = hardenWinResult(matrix, wildMultipliers, betAmount, {
     bonusMode: isBonusSpin,
+    economyVersion: isBonusSpin ? (bonusSession.economyVersion || 1) : 2,
+    tierName: edgeParams?.tierName,
   });
 
   // #region agent log
@@ -223,7 +228,8 @@ async function executeSpin(userId, betAmountInput) {
         betAmount,
         userId: userKey,
       });
-    } catch (_) {
+    } catch (err) {
+      if (slotOperation.active()) throw err;
       jackpotGame = null;
     }
   }
@@ -233,18 +239,19 @@ async function executeSpin(userId, betAmountInput) {
   }
 
   if (isBonusSpin) {
+    bonusSession.totalWon = roundMoney((bonusSession.totalWon || 0) + totalWin);
     roundManager.consumeBonusSpin(userKey);
   }
 
   const remainingBonus = roundManager.getBonusSession(userKey);
 
   const { publishSpinCompleted } = require("../../domain/publishers/playerActivityPublishers");
-  publishSpinCompleted(userKey, {
+  slotOperation.afterCommit(() => publishSpinCompleted(userKey, {
     sourceId: round.roundId,
     game: "golden-tree",
     won: Number(round.totalWin || 0) > 0,
-  });
-  houseEdgeController.recordSpin(userKey, "golden-tree", isBonusSpin ? 0 : betAmount, totalWin);
+  }));
+  slotOperation.afterCommit(() => houseEdgeController.recordSpin(userKey, "golden-tree", isBonusSpin ? 0 : betAmount, totalWin));
 
   return buildSpinResponse(round, balanceAfter, {
     winCapped: capped,
@@ -311,7 +318,7 @@ async function executeGamble(userId, roundId, choice) {
   };
 }
 
-async function executeBuyBonus(userId, _bonusTypeInput, currentBetInput) {
+async function executeBuyBonusInternal(userId, _bonusTypeInput, currentBetInput) {
   if (roundManager.hasFreeBet(String(userId))) {
     throw new ApiError("Buy Bonus inactive while free bet is active", 403);
   }
@@ -346,6 +353,7 @@ async function executeBuyBonus(userId, _bonusTypeInput, currentBetInput) {
     betAmount,
   });
 
+    slotOperation.afterCommit(() => houseEdgeController.recordSpin(String(userId), "golden-tree", cost, 0));
   const balanceAfter = await wallet.getBalance(String(userId));
 
   return {
@@ -367,4 +375,18 @@ module.exports = {
   validateBet,
   capWin,
   rollJackpot,
+  getActiveSession,
 };
+
+async function getActiveSession(userId) {
+  await roundManager.ensureLoaded(String(userId));
+  const session = roundManager.getBonusSession(userId);
+  return session ? { active: true, ...session, bonusTotalWon: session.totalWon || 0 } : { active: false };
+}
+
+function executeSpin(userId, betAmount, options = {}) {
+  return slotOperation.run({ game: "golden-tree", userId, wallet, manager: roundManager, modelName: "goldenTreeBonusSessionModel", requestId: options.requestId, input: ["spin", betAmount] }, () => executeSpinInternal(userId, betAmount));
+}
+function executeBuyBonus(userId, bonusType, currentBet, options = {}) {
+  return slotOperation.run({ game: "golden-tree", userId, wallet, manager: roundManager, modelName: "goldenTreeBonusSessionModel", requestId: options.requestId, input: ["buy", currentBet] }, () => executeBuyBonusInternal(userId, bonusType, currentBet));
+}

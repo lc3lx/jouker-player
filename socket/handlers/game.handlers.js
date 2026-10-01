@@ -1191,6 +1191,7 @@ function registerGameHandlers(nsp, jwtVerify) {
           clientSeed,
           nonce: nonceStr,
           isFreeSpin,
+          economyVersion: isFreeSpin ? (fsBefore.economyVersion || 1) : 2,
           superBonus: !!(isFreeSpin && fsBefore.superBonus),
           freeSpinMultiplier: isFreeSpin
             ? Number(fsBefore.totalMultiplier || 0)
@@ -1220,17 +1221,9 @@ function registerGameHandlers(nsp, jwtVerify) {
         let payout = outcome.totalWin;
         let roundCapReached = outcome.capped;
 
-        // Free spins: enforce the cumulative 4000× round-win cap across the
-        // whole session before crediting anything.
-        if (isFreeSpin) {
-          const capResult = await kingArthRoundState.recordRoundWin(
-            userId,
-            tableId,
-            payout
-          );
-          payout = capResult.payout;
-          if (capResult.capReached) roundCapReached = true;
-        }
+        const staged = require("../../games/dice/kingArthSettlement").stageSpinSession(fsBefore, outcome, payout, bet);
+        payout = staged.payout;
+        roundCapReached = staged.capReached;
 
         const {
           withMongoTransaction,
@@ -1238,30 +1231,66 @@ function registerGameHandlers(nsp, jwtVerify) {
           ledgerDeposit,
         } = require("../../services/walletLedgerService");
 
+        let play, jackpotGame = null;
+        const playId = new mongoose.Types.ObjectId();
+        const postCommit = [];
         try {
           await withMongoTransaction(async (session) => {
-            if (!isFreeSpin) {
-              await ledgerWithdraw({
-                session,
-                userId,
-                amount: Math.round(stake),
-                ledgerType: "game_loss",
-                meta: { tableId, source: "king_arth_spin" },
-              });
-            }
-            if (payout > 0) {
-              await ledgerDeposit({
-                session,
-                userId,
-                amount: Math.round(payout),
-                ledgerType: "game_win",
-                meta: {
-                  tableId,
-                  source: "king_arth_spin",
+            postCommit.length = 0;
+            return require("../../games/utils/slotOperation").withContext(session, postCommit, async () => {
+              if (!session) throw new Error("MONGO_TRANSACTIONS_REQUIRED_FOR_SLOTS");
+              await require("../../games/dice/kingArthSettlement").recordSpinReceipt(userId, tableId, nonceStr, session);
+              if (!isFreeSpin) {
+                await ledgerWithdraw({
+                  session,
+                  userId,
+                  amount: Math.round(stake),
+                  ledgerType: "game_loss",
+                  meta: { tableId, source: "king_arth_spin" },
+                });
+              }
+              if (payout > 0) {
+                await ledgerDeposit({
+                  session,
+                  userId,
+                  amount: Math.round(payout),
+                  ledgerType: "game_win",
+                  meta: {
+                    tableId,
+                    source: "king_arth_spin",
+                    winType: outcome.winType,
+                  },
+                });
+              }
+              await kingArthRoundState.commitSession(userId, tableId, fsBefore, staged.next, session);
+              const bonusTotalWon = staged.totalWon;
+              [play] = await MiniGamePlay.create([{
+                _id: playId,
+                user: userId,
+                type: "king-arth",
+                bet: isFreeSpin ? 0 : stake,
+                payout,
+                profit: Math.round((payout - (isFreeSpin ? 0 : stake)) * 100) / 100,
+                result: JSON.stringify({
+                  nonce: nonceStr,
+                  clientSeed,
+                  serverSeedHash,
+                  seedGeneration,
+                  volatility: outcome.volatility,
+                  lineWins: outcome.lineWins,
+                  scatterCount: outcome.scatterCount,
+                  multipliers: outcome.multipliers,
+                  cascadeSteps: outcome.cascadeSteps,
                   winType: outcome.winType,
-                },
-              });
-            }
+                  isFreeSpin,
+                  nearMiss: outcome.nearMiss,
+                  bonusTotalWon,
+                }),
+              }], { session });
+              jackpotGame = outcome.jackpotTriggered ? await kingArthJackpot.createRoundForSpin({
+                betAmount: bet, spinId: String(playId), userId,
+              }) : null;
+            });
           });
         } catch (err) {
           if (err && err.message === "INSUFFICIENT_BALANCE") {
@@ -1274,6 +1303,7 @@ function registerGameHandlers(nsp, jwtVerify) {
 
         wallet = await Wallet.findOne({ user: userId });
 
+        for (const job of postCommit) { try { await job(); } catch (_) {} }
         // #region agent log
         try {
           fetch("http://127.0.0.1:7937/ingest/b9a00eef-7143-4edb-b1d5-038072464bf7", {
@@ -1300,97 +1330,21 @@ function registerGameHandlers(nsp, jwtVerify) {
         } catch (_) {}
         // #endregion
 
-        await kingArthSeedRotation.recordSpinCompleted(userId);
-        await recordSpin(stake, payout);
-        await recordBigWin(outcome.winType);
-        await recordSpinAnalytics(userId, stake, payout, outcome.winType);
+        await Promise.allSettled([
+          kingArthSeedRotation.recordSpinCompleted(userId),
+          recordSpin(isFreeSpin ? 0 : stake, payout), recordBigWin(outcome.winType),
+          recordSpinAnalytics(userId, isFreeSpin ? 0 : stake, payout, outcome.winType),
+        ]);
 
-        let freeSpinsAwarded = 0;
-        let freeSpinsRemaining = 0;
-        let bonusTotalWon = 0;
-        if (isFreeSpin) {
-          await kingArthRoundState.setFreeSpinTotalMultiplier(
-            userId,
-            tableId,
-            outcome.multipliers.freeSpinTotal
-          );
-          if (roundCapReached) {
-            // 4000× reached — end the round now, forfeit remaining spins.
-            const ended = await kingArthRoundState.getFreeSpinSession(
-              userId,
-              tableId
-            );
-            bonusTotalWon = Math.max(0, Number(ended?.roundWon || 0));
-            await kingArthRoundState.deleteFreeSpinSession(userId, tableId);
-            freeSpinsRemaining = 0;
-          } else {
-            // Retrigger: 3+ scatters during free spins add 5 more.
-            if (outcome.scatterCount >= DiceEngine.RETRIGGER_MIN_SCATTER) {
-              freeSpinsAwarded = DiceEngine.RETRIGGER_AWARD;
-              await kingArthRoundState.addRetriggerSpins(
-                userId,
-                tableId,
-                DiceEngine.RETRIGGER_AWARD
-              );
-            }
-            const after = await kingArthRoundState.decrementFreeSpin(
-              userId,
-              tableId
-            );
-            freeSpinsRemaining = after?.remaining ?? 0;
-            bonusTotalWon = Math.max(0, Number(after?.roundWon || 0));
-            if (after == null) {
-              // Session already gone — keep last known total at 0.
-              freeSpinsRemaining = 0;
-            }
-          }
-        } else if (outcome.scatterCount >= 4 && !roundCapReached) {
-          // Base spin trigger: 4+ scatters award free spins (engine constant).
-          freeSpinsAwarded = DiceEngine.FREE_SPINS_AWARD;
-          const session = await kingArthRoundState.awardFreeSpins(
-            userId,
-            tableId,
-            outcome.scatterCount,
-            bet,
-            doubleChance,
-            {
-              roundCap: DiceEngine.MAX_WIN_MULTIPLIER * stake,
-              initialWin: payout,
-            }
-          );
-          freeSpinsRemaining = session?.remaining ?? 0;
-          bonusTotalWon = Math.max(0, Number(session?.roundWon || 0));
-        } else {
-          freeSpinsRemaining =
-            await kingArthRoundState.peekFreeSpinRemaining(userId, tableId);
-        }
+        const freeSpinsAwarded = staged.awarded;
+        const freeSpinsRemaining = staged.next?.remaining || 0;
+        const bonusTotalWon = staged.totalWon;
 
         wallet = await Wallet.findOne({ user: userId });
 
         const { publishSpinCompleted } = require("../../domain/publishers/playerActivityPublishers");
 
-        const play = await MiniGamePlay.create({
-          user: userId,
-          type: "king-arth",
-          bet: isFreeSpin ? 0 : stake,
-          payout,
-          profit: Math.round((payout - (isFreeSpin ? 0 : stake)) * 100) / 100,
-          result: JSON.stringify({
-            nonce: nonceStr,
-            clientSeed,
-            serverSeedHash,
-            seedGeneration,
-            volatility: outcome.volatility,
-            lineWins: outcome.lineWins,
-            scatterCount: outcome.scatterCount,
-            multipliers: outcome.multipliers,
-            cascadeSteps: outcome.cascadeSteps,
-            winType: outcome.winType,
-            isFreeSpin,
-            nearMiss: outcome.nearMiss,
-            bonusTotalWon,
-          }),
-        });
+
 
         publishSpinCompleted(userId, {
           sourceId: String(play._id),
@@ -1409,26 +1363,7 @@ function registerGameHandlers(nsp, jwtVerify) {
           fairness.disclosedServerSeedHash = seedPack.revealed.serverSeedHash;
         }
 
-        let jackpotGame = null;
-        if (outcome.jackpotTriggered) {
-          try {
-            jackpotGame = await kingArthJackpot.createRoundForSpin({
-              betAmount: bet,
-              spinId: String(play._id),
-              userId,
-            });
-          } catch (err) {
-            // Non-fatal — spin result still returns without jackpot.
-            try {
-              require("../../utils/logger").error?.("king-arth jackpot create failed", {
-                err: err?.message,
-                userId,
-              });
-            } catch (_) {
-              /* ignore */
-            }
-          }
-        }
+
 
         socket.emit("dice_result", {
           ok: true,
@@ -1478,6 +1413,20 @@ function registerGameHandlers(nsp, jwtVerify) {
         return;
       }
       try {
+        const requestId = payload?.requestId;
+        if (requestId != null && (typeof requestId !== "string" || !/^[A-Za-z0-9_-]{8,128}$/.test(requestId))) {
+          socket.emit("dice_buy_result", { ok: false, code: "invalid_request_id" }); return;
+        }
+        const Receipt = require("../../models/slotOperationModel");
+        const receiptKey = { game: "zeus-buy", userId: String(userId), requestId };
+        const fingerprint = JSON.stringify([tableId, Number(payload?.bet), !!payload?.superBonus]);
+        if (requestId) {
+          const previous = await Receipt.findOne(receiptKey).lean();
+          if (previous) {
+            socket.emit("dice_buy_result", previous.fingerprint === fingerprint ? previous.response : { ok: false, code: "request_id_conflict" });
+            return;
+          }
+        }
         const rawBet = Number(payload && payload.bet);
         const doubleChance = !!(payload && payload.doubleChance);
         const superBonus = !!(payload && payload.superBonus);
@@ -1527,6 +1476,7 @@ function registerGameHandlers(nsp, jwtVerify) {
         } = require("../../services/walletLedgerService");
         try {
           await withMongoTransaction(async (session) => {
+            if (!session) throw new Error("MONGO_TRANSACTIONS_REQUIRED_FOR_SLOTS");
             await ledgerWithdraw({
               session,
               userId,
@@ -1534,6 +1484,20 @@ function registerGameHandlers(nsp, jwtVerify) {
               ledgerType: "game_loss",
               meta: { tableId, source: "king_arth_buy_bonus", bet, superBonus },
             });
+            await kingArthRoundState.commitSession(userId, tableId, null, {
+              lockedBaseBet: bet, lockedDoubleChance: false,
+              remaining: DiceEngine.FREE_SPINS_BOUGHT,
+              roundCap: DiceEngine.MAX_WIN_MULTIPLIER * stake, roundWon: 0,
+              totalMultiplier: 0, superBonus, economyVersion: 2,
+            }, session);
+            if (requestId) {
+              const settledWallet = await Wallet.findOne({ user: userId }).session(session);
+              await Receipt.create([{ ...receiptKey, fingerprint, response: {
+                ok: true, tableId, cost, betPerSpin: bet, superBonus,
+                freeSpinsRemaining: DiceEngine.FREE_SPINS_BOUGHT,
+                freeSpinsAwarded: DiceEngine.FREE_SPINS_BOUGHT, balance: settledWallet.balance,
+              } }], { session });
+            }
           });
         } catch (err) {
           if (err && err.message === "INSUFFICIENT_BALANCE") {
@@ -1542,15 +1506,6 @@ function registerGameHandlers(nsp, jwtVerify) {
           }
           throw err;
         }
-
-        await kingArthRoundState.startFreeSpinSession(userId, tableId, {
-          lockedBaseBet: bet,
-          lockedDoubleChance: false,
-          spins: DiceEngine.FREE_SPINS_BOUGHT,
-          roundCap: DiceEngine.MAX_WIN_MULTIPLIER * stake,
-          initialWin: 0,
-          superBonus,
-        });
 
         await recordSpin(cost, 0);
 
@@ -1940,12 +1895,14 @@ function registerGameHandlers(nsp, jwtVerify) {
       // Durable fallback: REST may have seated the user but roomManager lost the
       // mapping (restart / never joined socket). Resolve from Mongo and vacate.
       const rid = roomId ? String(roomId) : null;
+      let seatVerifiedGone = false;
       if (rid && mongoose.Types.ObjectId.isValid(rid)) {
         try {
           const table = await Table.findById(rid).select("gameType seats");
           const seated = table?.seats?.some(
             (s) => s.user && String(s.user) === String(userId)
           );
+          seatVerifiedGone = !seated;
           if (seated && (table.gameType === "trix" || table.gameType === "tarneeb41")) {
             // #region agent log
             agentDebugLog("B", "game.handlers.js:leave_room:mongoFallback", "leave via Mongo seat fallback", {
@@ -1975,6 +1932,8 @@ function registerGameHandlers(nsp, jwtVerify) {
             roomId: rid,
             reason: err?.message,
           });
+          respond({ ok: false, code: "leave_failed", tableId: rid });
+          return;
         }
       }
       // #region agent log
@@ -1984,7 +1943,8 @@ function registerGameHandlers(nsp, jwtVerify) {
         removedLegacyRoom: !!r,
       });
       // #endregion
-      respond({ ok: true });
+      respond(r || seatVerifiedGone ? { ok: true, seatFreed: true, alreadyGone: !r }
+        : { ok: false, code: "leave_not_confirmed" });
     });
 
     // card_heartbeat — recovery-only. If the client's last stateRevision is

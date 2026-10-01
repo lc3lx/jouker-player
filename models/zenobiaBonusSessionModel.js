@@ -19,6 +19,8 @@ const zenobiaBonusSessionSchema = new mongoose.Schema(
     betAmount: { type: Number, required: true, min: 0 },
     freeSpinsRemaining: { type: Number, required: true, min: 0 },
     totalWon: { type: Number, required: true, default: 0, min: 0 },
+    economyVersion: { type: Number, default: 1 },
+    revision: { type: Number, default: 0 },
     superBonus: { type: Boolean, default: false },
     bonusMultiplier: { type: Number, default: 0, min: 0 },
     createdAt: { type: Number, required: true },

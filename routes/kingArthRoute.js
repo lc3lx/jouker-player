@@ -34,4 +34,15 @@ router.post("/jackpot/reveal", authService.protect, jackpotReveal);
 router.post("/jackpot/revealed", authService.protect, jackpotReveal);
 router.post("/jackpot/settle", authService.protect, jackpotSettle);
 
+router.get("/economy", authService.protect, require("../controllers/slotEconomyController").forGame("zeus"));
+router.get("/session", authService.protect, require("express-async-handler")(async (req, res) => {
+  const session = await require("../games/dice/kingArthRoundState").getFreeSpinSession(String(req.user._id || req.user.id), "king-arth");
+  res.json({ status: "success", data: session ? {
+    active: true, betAmount: session.lockedBaseBet, doubleChance: !!session.lockedDoubleChance,
+    freeSpinsRemaining: session.remaining, bonusMultiplier: session.totalMultiplier || 0,
+    totalWon: session.roundWon || 0, superBonus: !!session.superBonus,
+    economyVersion: session.economyVersion || 1,
+  } : { active: false } });
+}));
+
 module.exports = router;

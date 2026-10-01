@@ -5,14 +5,14 @@ const {
   PAYLINES,
   WIN_RULES_VERSION,
   minMatchCount,
-} = require("./constants");
+} = require("./constants.v1");
 const {
   calculateWins,
   pathMatchesMatrix,
   normalizeLandscapeMatrix,
   applyExpandingWilds,
   basePayout,
-} = require("./winCalculator");
+} = require("./winCalculator.v1");
 const logger = require("../../utils/logger");
 
 /**
@@ -20,9 +20,8 @@ const logger = require("../../utils/logger");
  * Validates against the 10 fixed paylines.
  */
 function hardenWinResult(matrix, wildMultipliers, betAmount, options = {}) {
-  if (options.economyVersion === 1) return require("./winGuard.v1").hardenWinResult(matrix, wildMultipliers, betAmount, options);
   const bonusMode = options.bonusMode === true;
-  const fresh = calculateWins(matrix, wildMultipliers, betAmount, options);
+  const fresh = calculateWins(matrix, wildMultipliers, betAmount, { bonusMode });
 
   const landed = normalizeLandscapeMatrix(matrix);
   const evalMatrix = bonusMode
@@ -91,7 +90,7 @@ function hardenWinResult(matrix, wildMultipliers, betAmount, options = {}) {
     const amount = roundMoney(w.amount);
     if (amount <= 0) continue;
     lineTotal = roundMoney(lineTotal + amount);
-    lineWins.push({ ...w, amount, baseAmount: w.baseAmount });
+    lineWins.push({ ...w, amount, baseAmount: base });
   }
 
   const scatterWins = [];

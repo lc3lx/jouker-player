@@ -24,4 +24,6 @@ router.post("/jackpot/revealed", requireUserId, jackpotReveal);
 router.post("/jackpot/reveal", requireUserId, jackpotReveal);
 router.post("/jackpot/settle", requireUserId, jackpotSettle);
 
+router.get("/economy", authService.protect, require("../controllers/slotEconomyController").forGame("poseidon"));
+
 module.exports = router;

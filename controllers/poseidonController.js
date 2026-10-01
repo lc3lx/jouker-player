@@ -16,7 +16,7 @@ function requireUserId(req, res, next) {
 
 exports.spin = asyncHandler(async (req, res) => {
   const { betAmount } = req.body;
-  const data = await poseidonService.executeSpin(req.poseidonUserId, betAmount);
+  const data = await poseidonService.executeSpin(req.poseidonUserId, betAmount, { requestId: req.body.requestId });
   res.status(200).json({ status: "success", data });
 });
 
@@ -25,7 +25,7 @@ exports.buyBonus = asyncHandler(async (req, res) => {
   const data = await poseidonService.executeBuyBonus(
     req.poseidonUserId,
     currentBet,
-    { superBonus: superBonus === true || superBonus === "true" },
+    { superBonus: superBonus === true || superBonus === "true", requestId: req.body.requestId },
   );
   res.status(200).json({ status: "success", data });
 });

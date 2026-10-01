@@ -127,7 +127,7 @@ const PAYTABLE = Object.freeze({
  * Multiplier 1 is the plain tree: it still substitutes as a wild but carries no
  * badge and no payout boost, and it is the tier a player sees most often.
  * Base game: ×2 uncommon, ×3 rare, ×5 the rarest.
- * Bought bonus: ×2, ×3 and ×5 are all very rare (84% / 10% / 5% / 1%).
+ * Bought bonus: ×2, ×3 and ×5 are all very rare (97% / 2.2% / 0.6% / 0.2%).
  */
 const MAIN_WILD_MULTIPLIER_WEIGHTS = Object.freeze([
   [1, 62],
@@ -136,10 +136,10 @@ const MAIN_WILD_MULTIPLIER_WEIGHTS = Object.freeze([
   [5, 2],
 ]);
 const BONUS_WILD_MULTIPLIER_WEIGHTS = Object.freeze([
-  [1, 84],
-  [2, 10],
-  [3, 5],
-  [5, 1],
+  [1, 970],
+  [2, 22],
+  [3, 6],
+  [5, 2],
 ]);
 
 /** Tree with no multiplier — substitutes, but never boosts the line. */
@@ -160,10 +160,10 @@ const BONUS_FORCED_TREE_WEIGHTS = Object.freeze([
 const BUY_BONUS_TYPE = "Triple";
 /**
  * Priced off the measured average return of a purchased round so the buy sits
- * at 46% bonus RTP. Re-derive with `node tool/goldenTreeRtp.js`
+ * at TARGET_RTP like every other bet. Re-derive with `node tool/goldenTreeRtp.js`
  * after any change to the paytable, reel strips, or tree/multiplier weights.
  */
-const BUY_BONUS_COST = 200;
+const BUY_BONUS_COST = 364;
 
 function minMatchCount(symbol) {
   if (symbol === SYMBOLS.SEVEN) return SEVEN_MIN_CONSECUTIVE;

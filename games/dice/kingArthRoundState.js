@@ -143,7 +143,7 @@ function capFsRemaining(n) {
   return Math.min(Math.max(0, n), MAX_BANKED_FREE_SPINS);
 }
 
-async function getFreeSpinSession(userId, tableId) {
+async function getLegacyFreeSpinSession(userId, tableId) {
   if (redis) {
     try {
       const raw = await redis.get(keyFs(userId, tableId));
@@ -199,7 +199,7 @@ async function deleteFreeSpinSession(userId, tableId) {
 async function startFreeSpinSession(
   userId,
   tableId,
-  { lockedBaseBet, lockedDoubleChance, spins = FREE_SPINS_AWARD, roundCap = 0, initialWin = 0, superBonus = false } = {}
+  { lockedBaseBet, lockedDoubleChance, spins = FREE_SPINS_AWARD, roundCap = 0, initialWin = 0, superBonus = false, economyVersion = 2 } = {}
 ) {
   const session = {
     remaining: capFsRemaining(spins),
@@ -209,6 +209,7 @@ async function startFreeSpinSession(
     roundCap: Math.max(0, roundMoney(roundCap)),
     roundWon: Math.max(0, roundMoney(initialWin)),
     superBonus: !!superBonus,
+    economyVersion,
   };
   await setFreeSpinSession(userId, tableId, session);
   return session;
@@ -304,6 +305,8 @@ async function peekFreeSpinRemaining(userId, tableId) {
 }
 
 module.exports = {
+  commitSession,
+  useMongoSessions,
   LOCK_TTL_MS,
   MAX_BANKED_FREE_SPINS,
   FREE_SPINS_AWARD,
@@ -324,3 +327,35 @@ module.exports = {
   deleteFreeSpinSession,
   stateKey,
 };
+
+function useMongoSessions() {
+  if (process.env.KING_ARTH_SESSION_MODE === "mongo") return true;
+  return process.env.KING_ARTH_SESSION_MODE !== "memory" && process.env.NODE_ENV !== "test" && !process.env.NODE_TEST_CONTEXT;
+}
+async function getFreeSpinSession(userId, tableId) {
+  if (!useMongoSessions()) return getLegacyFreeSpinSession(userId, tableId);
+  const Model = require("../../models/kingArthBonusSessionModel");
+  const key = { userId: String(userId), tableId: String(tableId || "king-arth") };
+  let doc = await Model.findOne(key).lean();
+  if (!doc) {
+    const legacy = await getLegacyFreeSpinSession(userId, tableId);
+    doc = await Model.findOneAndUpdate(key, { $setOnInsert: { ...key, session: legacy ? { ...legacy, economyVersion: 1 } : null, revision: 0 } }, { upsert: true, new: true }).lean();
+  }
+  return doc.session?.remaining > 0 ? { ...doc.session, _revision: doc.revision } : null;
+}
+async function commitSession(userId, tableId, previous, next, mongoSession) {
+  if (!useMongoSessions()) {
+    if (next) await setFreeSpinSession(userId, tableId, next);
+    else await deleteFreeSpinSession(userId, tableId);
+    return;
+  }
+  if (!mongoSession) throw new Error("MONGO_TRANSACTIONS_REQUIRED_FOR_SLOTS");
+  const Model = require("../../models/kingArthBonusSessionModel");
+  const key = { userId: String(userId), tableId: String(tableId || "king-arth") };
+  const doc = await Model.findOne(key).session(mongoSession).lean();
+  if (previous ? !doc || doc.revision !== previous._revision : doc?.session?.remaining > 0) throw new Error("BONUS_SESSION_CHANGED");
+  const clean = next ? { ...next } : null;
+  if (clean) delete clean._revision;
+  const saved = await Model.updateOne({ ...key, revision: doc?.revision || 0 }, { $set: { session: clean }, $inc: { revision: 1 } }, { session: mongoSession, upsert: !doc });
+  if (doc && saved.matchedCount !== 1) throw new Error("BONUS_SESSION_CHANGED");
+}

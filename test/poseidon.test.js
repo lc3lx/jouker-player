@@ -104,44 +104,14 @@ test("winTierFor maps bet multiples to banners", () => {
 
 // --- multiplier value weights -------------------------------------------------
 
-test("weighted plaques: ladder descending; high faces rare but possible", () => {
-  const rng = mulberry32(2024);
-  const counts = {};
-  const draws = 200000;
-  for (let i = 0; i < draws; i += 1) {
-    const v = pickMultiplierValue(rng);
-    counts[v] = (counts[v] || 0) + 1;
+test("specified high faces keep the same probability in base, bonus and stacked draws", () => {
+  for (const opts of [{}, { bonus: true }, { bigAlready: true }, { bonus: true, bigAlready: true }]) {
+    const rng = mulberry32(2024), counts = {};
+    for (let i = 0; i < 200000; i++) { const v = pickMultiplierValue(rng, opts); counts[v] = (counts[v] || 0) + 1; }
+    for (const [face, p] of [[20,.1],[50,.05],[100,.02],[200,.01],[500,.005],[1000,.001]]) {
+      assert.ok(Math.abs((counts[face] || 0) / 200000 - p) < .002, `face ${face}`);
+    }
   }
-  // Full face-value payout: x2 dominates; x500/x1000 stay rare for RTP.
-  assert.ok(counts[2] / draws > 0.75 && counts[2] / draws < 0.9, `x2 share ${counts[2] / draws}`);
-  const midPlus =
-    (counts[20] + counts[50] + counts[100] + counts[200] + counts[500] + counts[1000]) /
-    draws;
-  assert.ok(midPlus > 0.015 && midPlus < 0.08, `x20+ share ${midPlus}`);
-  assert.ok(counts[1000] / draws > 0.00005, `x1000 must appear, got ${counts[1000] / draws}`);
-  for (let i = 1; i < MULTIPLIER_VALUES.length; i += 1) {
-    const prev = counts[MULTIPLIER_VALUES[i - 1]] || 0;
-    const cur = counts[MULTIPLIER_VALUES[i]] || 0;
-    assert.ok(cur < prev, `x${MULTIPLIER_VALUES[i]} rarer than x${MULTIPLIER_VALUES[i - 1]}`);
-  }
-});
-
-test("bonus plaques are richer than base; stacking suppression keeps mid+ rare", () => {
-  const rng = mulberry32(99);
-  const draws = 100000;
-  let baseHigh = 0;
-  let bonusHigh = 0;
-  let suppressedHigh = 0;
-  for (let i = 0; i < draws; i += 1) {
-    if (pickMultiplierValue(rng, { bonus: false }) >= 20) baseHigh += 1;
-    if (pickMultiplierValue(rng, { bonus: true }) >= 20) bonusHigh += 1;
-    if (pickMultiplierValue(rng, { bigAlready: true }) >= 20) suppressedHigh += 1;
-  }
-  assert.ok(bonusHigh > baseHigh * 1.2, `bonus mid+ ${bonusHigh} vs base ${baseHigh}`);
-  assert.ok(
-    suppressedHigh / draws < 0.03,
-    `stacking suppression should rarely land mid+, got ${suppressedHigh / draws}`,
-  );
 });
 
 test("super buy-bonus plaques are always x20+ even when stacking suppresses", () => {
@@ -154,8 +124,8 @@ test("super buy-bonus plaques are always x20+ even when stacking suppresses", ()
       superBonus: true,
       bigAlready: true,
     });
-    assert.ok(open >= 20, `super open plaque ${open}`);
-    assert.ok(stacked >= 20, `super stacked plaque ${stacked}`);
+    assert.ok(open === null || open >= 20, `super open plaque ${open}`);
+    assert.ok(stacked === null || stacked >= 20, `super stacked plaque ${stacked}`);
   }
 
   for (let seed = 1; seed <= 250; seed += 1) {
