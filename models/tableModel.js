@@ -5,6 +5,13 @@ const seatSchema = new mongoose.Schema(
     user: { type: mongoose.Schema.ObjectId, ref: "User", required: true, index: true },
     player: { type: mongoose.Schema.ObjectId, ref: "Player" },
     chips: { type: Number, required: true, min: 0 },
+    rebuyOffer: {
+      offerId: String,
+      expiresAt: Date,
+      status: { type: String, enum: ["pending", "accepted", "cancelled", "expired"] },
+      actionId: String,
+      amount: Number,
+    },
     joinedAt: { type: Date, default: Date.now },
     /** Fixed chair index 0–8 around the table (4 = opposite dealer / bottom). */
     seatPosition: { type: Number, min: 0, max: 8 },

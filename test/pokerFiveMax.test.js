@@ -56,19 +56,19 @@ test("every stake is seeded with a nine-max and a humans-only five-max", async (
       .filter((u) => u?.filter?.gameType === "poker");
 
     const stakeCount = Object.values(FIXED_TIER_TABLES).flat().length;
-    const nineMax = poker.filter((u) => u.update.$set.capacity === 9);
-    const fiveMax = poker.filter((u) => u.update.$set.capacity === 5);
+    const nineMax = poker.filter((u) => u.update.$setOnInsert.capacity === 9);
+    const fiveMax = poker.filter((u) => u.update.$setOnInsert.capacity === 5);
 
     assert.equal(nineMax.length, stakeCount, "one nine-max per stake");
     assert.equal(fiveMax.length, stakeCount, "one five-max per stake");
 
     for (const u of fiveMax) {
       assert.equal(
-        u.update.$set["settings.botsEnabled"],
+        u.update.$setOnInsert["settings.botsEnabled"],
         false,
         "a five-max table must never fill with bots",
       );
-      assert.equal(u.update.$set.tableKind, "static");
+      assert.equal(u.update.$setOnInsert.tableKind, "static");
       assert.ok(
         u.filter.tableNumber > 100,
         "five-max numbering must stay clear of the dynamic/overflow range",
@@ -87,6 +87,14 @@ test("every stake is seeded with a nine-max and a humans-only five-max", async (
       );
     }
 
+    for (const u of poker) {
+      for (const field of ["capacity", "seats", "status", "smallBlind", "bigBlind", "buyIn"]) {
+        assert.equal(u.update.$set[field], undefined, `migration preserves live ${field}`);
+      }
+      const { maximumBuyIn } = require("../utils/poker/buyInPolicy");
+      assert.equal(u.update.$set.maxBuyIn, maximumBuyIn(u.filter.tier, u.update.$set.minBuyIn));
+    }
+
     // Both rooms at one stake share blinds and buy-in — only the size differs.
     for (const five of fiveMax) {
       const nine = nineMax.find(
@@ -95,9 +103,9 @@ test("every stake is seeded with a nine-max and a humans-only five-max", async (
           n.update.$set.minBuyIn === five.update.$set.minBuyIn,
       );
       assert.ok(nine, "each five-max must pair with a nine-max at the same stake");
-      assert.equal(five.update.$set.smallBlind, nine.update.$set.smallBlind);
-      assert.equal(five.update.$set.bigBlind, nine.update.$set.bigBlind);
-      assert.equal(five.update.$set.buyIn, nine.update.$set.buyIn);
+      assert.equal(five.update.$setOnInsert.smallBlind, nine.update.$setOnInsert.smallBlind);
+      assert.equal(five.update.$setOnInsert.bigBlind, nine.update.$setOnInsert.bigBlind);
+      assert.equal(five.update.$setOnInsert.buyIn, nine.update.$setOnInsert.buyIn);
     }
   } finally {
     Table.bulkWrite = orig.bulkWrite;

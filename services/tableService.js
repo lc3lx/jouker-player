@@ -60,6 +60,8 @@ const FIXED_TIER_TABLES = {
   beast: [1500000, 2000000, 5000000, 10000000],
 };
 
+const { POKER_STAKES, maximumBuyIn } = require("../utils/poker/buyInPolicy");
+
 const FIXED_TABLE_NUMBERS = [1, 2, 3, 4];
 
 /** Nine-handed tables — the original lineup, bots fill empty seats. */
@@ -192,10 +194,25 @@ async function ensureFixedTierTables() {
     );
 
     const ops = [];
+    const reservedPrivateRows = await Table.find({
+      gameType: "poker",
+      tableNumber: { $in: [1, 2, 3, 4, 101, 102, 103, 104] },
+      $or: [{ isPrivate: true }, { owner: { $ne: null } }, { tableKind: "tournament" }],
+    }).select("tier tableNumber").lean();
+    const preservedRows = new Set(reservedPrivateRows.map((row) => `${row.tier}:${row.tableNumber}`));
+
+    // Migrate public overflow in place; never touch stacks, chairs or hand state.
+    for (const [tier, stakes] of Object.entries(POKER_STAKES)) {
+      for (const base of stakes) {
+        await Table.updateMany({ gameType: "poker", tier, minBuyIn: base,
+          isPrivate: { $ne: true }, owner: null, tableKind: { $in: ["static", "dynamic"] } },
+          { $set: { maxBuyIn: maximumBuyIn(tier, base) } });
+      }
+    }
 
     // Every stake gets two tables: the nine-handed one (bots fill it) and a
     // five-handed one that is humans only.
-    for (const [tier, buyIns] of Object.entries(FIXED_TIER_TABLES)) {
+    for (const [tier, buyIns] of Object.entries(POKER_STAKES)) {
       buyIns.forEach((buyIn, index) => {
         const { smallBlind, bigBlind, minimumBet, buyIn: buyInVal } = deriveBlindsFromBuyIn(buyIn);
         const common = {
@@ -206,23 +223,23 @@ async function ensureFixedTierTables() {
           buyIn: buyInVal,
           minimumBet,
           minBuyIn: buyIn,
-          maxBuyIn: buyIn,
+          maxBuyIn: maximumBuyIn(tier, buyIn),
           isPrivate: false,
-          status: "waiting",
         };
 
-        ops.push({
+        if (!preservedRows.has(`${tier}:${index + 1}`)) ops.push({
           updateOne: {
             filter: { gameType: "poker", tier, tableNumber: index + 1 },
             update: {
-              $set: { ...common, capacity: POKER_NINE_MAX_CAPACITY },
+              $set: { minBuyIn: buyIn, maxBuyIn: maximumBuyIn(tier, buyIn) },
+              $setOnInsert: { ...Object.fromEntries(Object.entries(common).filter(([key]) => !["minBuyIn", "maxBuyIn"].includes(key))), capacity: POKER_NINE_MAX_CAPACITY, status: "waiting" },
               $unset: { password: 1 },
             },
             upsert: true,
           },
         });
 
-        ops.push({
+        if (!preservedRows.has(`${tier}:${FIVE_MAX_TABLE_NUMBER_BASE + index + 1}`)) ops.push({
           updateOne: {
             filter: {
               gameType: "poker",
@@ -230,13 +247,9 @@ async function ensureFixedTierTables() {
               tableNumber: FIVE_MAX_TABLE_NUMBER_BASE + index + 1,
             },
             update: {
-              $set: {
-                ...common,
-                capacity: POKER_FIVE_MAX_CAPACITY,
-                // Humans only. The engine reads this on every table load and
-                // refuses to lobby-fill or solo-start with bots.
-                "settings.botsEnabled": false,
-              },
+              $set: { minBuyIn: buyIn, maxBuyIn: maximumBuyIn(tier, buyIn) },
+              $setOnInsert: { ...Object.fromEntries(Object.entries(common).filter(([key]) => !["minBuyIn", "maxBuyIn"].includes(key))),
+                capacity: POKER_FIVE_MAX_CAPACITY, status: "waiting", "settings.botsEnabled": false },
               $unset: { password: 1 },
             },
             upsert: true,
@@ -318,10 +331,10 @@ async function ensureFixedTierTables() {
       await Table.bulkWrite(ops, { ordered: false });
     }
 
-    // Migrate legacy poker `open` / `playing` statuses to waiting|ready|full.
+    // Migrate legacy open rows only; never overwrite an ongoing hand status.
     const legacyPoker = await Table.find({
       gameType: "poker",
-      status: { $in: ["open", "playing"] },
+      status: "open",
     }).select("seats capacity status");
     for (const doc of legacyPoker) {
       const cap = normalizeCapacity(doc.capacity);
@@ -571,7 +584,7 @@ exports.getTables = asyncHandler(async (req, res) => {
     const buyIn = Number(req.query.buyIn || 0);
     if (Number.isFinite(buyIn) && buyIn > 0) {
       filter.minBuyIn = buyIn;
-      filter.maxBuyIn = buyIn;
+      if (filter.gameType !== "poker") filter.maxBuyIn = buyIn;
     }
   } else if (
     gameType === "tarneeb41" &&
@@ -1207,7 +1220,7 @@ exports.joinTable = asyncHandler(async (req, res, next) => {
       const reqSeatRaw = req.body.seatIndex;
       const reqSeat =
         reqSeatRaw != null && Number.isFinite(Number(reqSeatRaw))
-          ? Math.max(0, Math.min(8, Math.floor(Number(reqSeatRaw))))
+          ? Number(reqSeatRaw)
           : null;
       const result = await joinPokerWithRetry({
         userId: req.user._id,
@@ -1262,8 +1275,9 @@ exports.joinTable = asyncHandler(async (req, res, next) => {
       );
     }
     if (e.message === "SEAT_TAKEN") {
-      throw new ApiError("هذا المقعد محجوز بالفعل", 400);
+      throw new ApiError("هذا الكرسي محجوز، اختر كرسياً آخر", 400);
     }
+    if (e.message === "INVALID_SEAT") throw new ApiError("Invalid seat for this table", 400);
     throw e;
   }
 

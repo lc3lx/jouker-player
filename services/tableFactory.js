@@ -1,3 +1,4 @@
+const { maximumBuyIn } = require("../utils/poker/buyInPolicy");
 /**
  * TableFactory — single creation entrypoint for all Table documents.
  * No other file should call Table.create() to create new tables.
@@ -26,7 +27,7 @@ async function createStaticTable({ gameType, tier, buyIn, tableNumber, capacity,
         smallBlind: 0,
         bigBlind: 0,
         minBuyIn: buyIn,
-        maxBuyIn: buyIn,
+        maxBuyIn: gameType === "poker" ? maximumBuyIn(tier, buyIn) : buyIn,
         capacity: cap,
         isPrivate: false,
         status: gameType === "poker" ? "waiting" : "open",
@@ -49,7 +50,7 @@ async function createDynamicTable({
   tier,
   buyIn,
   minBuyIn = buyIn,
-  maxBuyIn = buyIn,
+  maxBuyIn = gameType === "poker" ? maximumBuyIn(tier, minBuyIn) : buyIn,
   capacity,
   tableNumber,
   smallBlind = 0,

@@ -210,8 +210,11 @@ test("timeout folds when facing bet", async () => {
   assert.equal(g.seats[0].folded, true);
 });
 
-test("applyEngineVacate removes human and schedules pending vacate", async () => {
+test("applyEngineVacate removes human and schedules pending vacate", async (t) => {
   const g = mkGame(2);
+  t.after(() => g.disposeTimers());
+  // Isolate vacating from the independent lobby start/bot-fill lifecycle.
+  g.scheduleWaitForPlayers = () => {};
   const uid = g.seats[0].userId;
   const ok = await g.applyEngineVacate(uid, { chips: 8000 });
   assert.equal(ok, true);

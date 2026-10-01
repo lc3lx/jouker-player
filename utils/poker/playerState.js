@@ -32,7 +32,7 @@ function canParticipateInNextHand(seat) {
 }
 
 function canBeDealtIntoHand(seat) {
-  if (!seat || toSafeInt(seat.chips, 0) <= 0) return false;
+  if (!seat || seat.rebuyOffer?.status === "pending" || toSafeInt(seat.chips, 0) <= 0) return false;
   if (seat.isBot) return true;
   const st = seat.playerState || PLAYER_STATE.SEATED;
   if ([PLAYER_STATE.SITTING_OUT, PLAYER_STATE.LEAVE_PENDING, PLAYER_STATE.DISCONNECTED].includes(st)) return false;

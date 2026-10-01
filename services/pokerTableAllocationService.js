@@ -1,3 +1,4 @@
+const { maximumBuyIn, validBuyIn } = require("../utils/poker/buyInPolicy");
 const Table = require("../models/tableModel");
 const { withMongoTransaction, transferToLocked } = require("./walletLedgerService");
 const {
@@ -61,7 +62,7 @@ async function findAvailablePokerTable(tier, buyIn, session, opts = {}) {
     tier,
     capacity: cap,
     minBuyIn: opts.minBuyIn ?? buyIn,
-    maxBuyIn: opts.maxBuyIn ?? buyIn,
+    maxBuyIn: opts.maxBuyIn ?? maximumBuyIn(tier, buyIn),
     isPrivate: { $ne: true },
     owner: null,
     tableKind: { $in: ["static", "dynamic"] },
@@ -97,7 +98,7 @@ async function findAvailablePokerTable(tier, buyIn, session, opts = {}) {
         smallBlind: opts.smallBlind ?? smallBlind,
         bigBlind: opts.bigBlind ?? bigBlind,
         minBuyIn: opts.minBuyIn ?? buyIn,
-        maxBuyIn: opts.maxBuyIn ?? buyIn,
+        maxBuyIn: opts.maxBuyIn ?? maximumBuyIn(tier, buyIn),
         // A five-max overflow must be humans-only like the table it spilled from.
         settings: opts.botsEnabled === false ? { botsEnabled: false } : undefined,
         session,
@@ -179,6 +180,9 @@ async function executePokerJoinTransaction({
   if (tableTx.gameType !== "poker") throw new Error("NOT_POKER");
 
   const cap = normalizeCapacity(tableTx.capacity);
+  if (seatIndex != null && (!Number.isInteger(seatIndex) || seatIndex < 0 || seatIndex >= cap)) {
+    throw new Error("INVALID_SEAT");
+  }
   tableTx.capacity = cap;
   tableTx.waitingQueue = Array.isArray(tableTx.waitingQueue) ? tableTx.waitingQueue : [];
 
@@ -188,7 +192,7 @@ async function executePokerJoinTransaction({
   const inQueue = tableTx.waitingQueue.find((q) => String(q.user) === String(userId));
   if (inQueue) throw new Error("ALREADY_QUEUED");
 
-  if (buyIn < tableTx.minBuyIn || buyIn > tableTx.maxBuyIn) {
+  if (!validBuyIn(buyIn, tableTx.minBuyIn, tableTx.maxBuyIn)) {
     throw new Error("INVALID_BUYIN");
   }
 
@@ -241,14 +245,6 @@ async function executePokerJoinTransaction({
     session,
   });
 
-  await transferToLocked({
-    session,
-    userId,
-    amount: buyIn,
-    tableId: tableTx._id,
-    meta: { reason: "join_table", tableNumber: tableTx.tableNumber },
-  });
-
   const seatPosition =
     seatIndex != null
       ? clampSeatPosition(seatIndex, capNow)
@@ -256,6 +252,14 @@ async function executePokerJoinTransaction({
   if (occupiedSeatPositions(tableTx.seats).has(seatPosition)) {
     throw new Error("SEAT_TAKEN");
   }
+
+  await transferToLocked({
+    session,
+    userId,
+    amount: buyIn,
+    tableId: tableTx._id,
+    meta: { reason: "join_table", tableNumber: tableTx.tableNumber },
+  });
 
   tableTx.seats.push({
     user: userId,
@@ -332,10 +336,14 @@ async function joinPokerWithRetry({
         // otherwise a full five-max spills into the nine-max room next door.
         // Read that off the origin only here: the happy path never needs it.
         const origin = await Table.findById(targetId)
-          .select("capacity settings")
+          .select("capacity settings minBuyIn maxBuyIn smallBlind bigBlind")
           .lean();
-        const next = await withPokerAllocationLock(tier, buyIn, () =>
-          findAvailablePokerTable(tier, buyIn, null, {
+        if (!origin) throw err;
+        const base = origin?.minBuyIn ?? buyIn;
+        const next = await withPokerAllocationLock(tier, base, () =>
+          findAvailablePokerTable(tier, base, null, {
+            minBuyIn: base, maxBuyIn: origin?.maxBuyIn,
+            smallBlind: origin?.smallBlind, bigBlind: origin?.bigBlind,
             excludeIds,
             capacity: normalizeCapacity(origin?.capacity ?? POKER_CAPACITY),
             botsEnabled: origin?.settings?.botsEnabled !== false,
@@ -350,12 +358,15 @@ async function joinPokerWithRetry({
   throw lastError || new Error("TABLE_FULL");
 }
 
-async function allocateAndJoinPoker({ userId, playerId, buyIn, tier, preferredTableId, preferQueue }) {
+async function allocateAndJoinPoker({ userId, playerId, buyIn, baseBuyIn, tier, preferredTableId, preferQueue, capacity }) {
   let targetId = preferredTableId ? String(preferredTableId) : null;
 
   if (!targetId) {
-    const table = await withPokerAllocationLock(tier, buyIn, () =>
-      findAvailablePokerTable(tier, buyIn)
+    // An unanchored purchase cannot identify a pool: multiple base stakes
+    // accept the same amount. Callers must supply the table stake separately.
+    if (!Number.isSafeInteger(baseBuyIn) || baseBuyIn <= 0) throw new Error("TABLE_BASE_REQUIRED");
+    const table = await withPokerAllocationLock(tier, baseBuyIn, () =>
+      findAvailablePokerTable(tier, baseBuyIn, null, { capacity })
     );
     targetId = String(table._id);
   }

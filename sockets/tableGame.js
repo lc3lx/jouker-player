@@ -800,6 +800,7 @@ class PokerTable {
         seatPosition: s.seatPosition,
         name: s.name,
         avatar: s.avatar,
+        rebuyOffer: s.rebuyOffer || null,
         chips: s.chips,
         inHand: s.inHand,
         hole: Array.isArray(s.hole) ? [...s.hole] : [],
@@ -904,6 +905,7 @@ class PokerTable {
         seatPosition: toSafeInt(s.seatPosition, seatIndex),
         name: s.name || "Player",
         avatar: s.avatar || null,
+        rebuyOffer: s.rebuyOffer?.toObject ? s.rebuyOffer.toObject() : s.rebuyOffer,
         chips: toSafeInt(s.chips, 0),
         inHand: !!s.inHand,
         hole: Array.isArray(s.hole) ? [...s.hole] : [],
@@ -1268,6 +1270,8 @@ class PokerTable {
     this.clearNextHandTimer();
     this.stopSpectatorDrain();
     this.stopLockHeartbeat();
+    for (const t of this.rebuyTimers?.values() || []) clearTimeout(t);
+    this.rebuyTimers?.clear();
     for (const t of this.reconnectTimers.values()) clearTimeout(t);
     this.reconnectTimers.clear();
     for (const t of this.vacateTimers.values()) clearTimeout(t);
@@ -1442,111 +1446,129 @@ class PokerTable {
     else if (bigBlind != null) this.minimumBet = toSafeInt(bigBlind, this.minimumBet);
   }
 
+  // Kept as a lifecycle hook: cash poker now offers a manual purchase.
   async autoRebuyBustedHumans() {
-    if (this.isTournamentTable()) return 0;
-    if (this.frozen) {
-      logger.warn("poker_auto_rebuy_skipped_frozen", {
-        tableId: this.tableId,
-        frozenReason: this.frozenReason,
-      });
-      return 0;
+    if (!this.isOwner || this.isTournamentTable() || this.frozen || this.running) return 0;
+    const { offerRebuy } = require("../services/pokerRebuyService");
+    for (const seat of this.seats) {
+      if (!isHumanSeat(seat) || seat.chips > 0 || seat.playerState === PLAYER_STATE.LEAVE_PENDING) continue;
+      const offer = await offerRebuy(this.tableId, seat.userId);
+      if (!this.seats.includes(seat) || seat.chips > 0 || seat.playerState === PLAYER_STATE.LEAVE_PENDING) continue;
+      if (!offer) continue;
+      if (offer.exit) {
+        // This hook can run inside the hand lock. The leave pipeline acquires it itself.
+        setImmediate(() => void this.leavePlayerPermanently(seat.userId).then(() => this.emitRebuyExit(seat.userId)));
+        continue;
+      }
+      seat.rebuyOffer = offer;
+      this.minBuyIn = offer.minBuyIn;
+      this.maxBuyIn = offer.maxBuyIn;
+      this.clearReconnectTimer(seat.userId);
+      seat.playerState = PLAYER_STATE.SEATED;
+      seat.reconnectDeadline = null;
+      seat.inHand = false;
+      this.armRebuyExpiry(seat.userId, offer);
     }
-    const amount = Math.max(0, toSafeInt(this.buyIn, toSafeInt(this.minBuyIn, 0)));
-    if (amount <= 0) return 0;
+    return 0;
+  }
 
-    // Refresh can historically drop 0-chip seats. Re-attach busted humans from Mongo.
+  restoreRebuyOffersFromMongo(table) {
+    if (table.minBuyIn != null) this.minBuyIn = table.minBuyIn;
+    if (table.maxBuyIn != null) this.maxBuyIn = table.maxBuyIn;
+    for (const ms of table.seats || []) {
+      const seat = this.seats[this.findSeatIndexByUser(String(ms.user?._id || ms.user))];
+      if (!seat) continue;
+      const stalePurchase = seat.rebuyOffer?.offerId !== ms.rebuyOffer?.offerId || seat.rebuyOffer?.status !== "accepted";
+      seat.rebuyOffer = ms.rebuyOffer?.toObject ? ms.rebuyOffer.toObject() : ms.rebuyOffer;
+      if (seat.rebuyOffer?.status === "pending") {
+        seat.chips = 0; seat.inHand = false;
+        this.clearReconnectTimer(seat.userId);
+        if (seat.playerState !== PLAYER_STATE.LEAVE_PENDING) seat.playerState = PLAYER_STATE.SEATED;
+        seat.reconnectDeadline = null;
+      } else if (stalePurchase && seat.rebuyOffer?.status === "accepted" && seat.chips === 0 && ms.chips > 0) {
+        this._rebuyRevision = (this._rebuyRevision || 0) + 1;
+        this.adjustHandBaselineForSeat(ms.chips, 1);
+        seat.chips = ms.chips; seat.handStartChips = ms.chips;
+        seat.inHand = false; seat.bet = 0; seat.invested = 0;
+      }
+      this.armRebuyExpiry(seat.userId, seat.rebuyOffer);
+      if (["cancelled", "expired"].includes(seat.rebuyOffer?.status) && ms.chips === 0) {
+        setImmediate(() => void this.leavePlayerPermanently(seat.userId).then(() => this.emitRebuyExit(seat.userId)));
+      }
+    }
+
+  }
+
+  armRebuyExpiry(userId, offer) {
+    if (!this.isOwner || offer?.status !== "pending") return;
+    if (!this.rebuyTimers) this.rebuyTimers = new Map();
+    const uid = String(userId);
+    clearTimeout(this.rebuyTimers.get(uid));
+    const timer = setTimeout(() => {
+      this.rebuyTimers.delete(uid);
+      void this.handleRebuy(uid, { offerId: offer.offerId,
+        actionId: `expiry:${offer.offerId}`, amount: 0, expire: true });
+    }, Math.max(0, new Date(offer.expiresAt).getTime() - Date.now()));
+    timer.unref?.();
+    this.rebuyTimers.set(uid, timer);
+  }
+
+  async handleRebuy(userId, payload = {}) {
+    const reject = (reason) => ({ status: "rejected", reason, actionId: payload.actionId });
+    if (!this.isOwner) return reject("NOT_OWNER");
+    if (this.frozen || this.isTournamentTable()) return reject("NOT_CASH_POKER");
+    const locked = await this.acquireActionLockWithin(10000);
+    if (!locked) {
+      if (payload.expire) {
+        const timer = setTimeout(() => void this.handleRebuy(userId, payload), 250);
+        timer.unref?.();
+      }
+      return reject("LOCK_BUSY");
+    }
+    let result;
     try {
-      const table = await Table.findById(this.tableId).populate({
-        path: "seats.user",
-        select: "name profileImg",
-      });
-      for (const ms of table?.seats || []) {
-        const uid = String(ms.user?._id || ms.user || "");
-        if (!uid || toSafeInt(ms.chips, 0) > 0) continue;
-        if (this.findSeatIndexByUser(uid) >= 0) continue;
-        const chair =
-          ms.seatPosition != null
-            ? clampSeatPosition(ms.seatPosition, this.capacity)
-            : nextFreeSeatPosition(this.seats, this.capacity);
-        this.seats.push({
-          userId: uid,
-          name: ms.user?.name || "Player",
-          avatar: ms.user?.profileImg || null,
-          chips: 0,
-          inHand: false,
-          hole: [],
-          folded: false,
-          allIn: false,
-          bet: 0,
-          invested: 0,
-          isBot: false,
-          lastAction: null,
-          actedThisStreet: false,
-          seatPosition: chair,
-          cosmetics: emptyCosmetics(),
-          playerState: PLAYER_STATE.SEATED,
-        });
-      }
-    } catch (_) { /* rebuy loop still runs on RAM seats */ }
-
-    let restored = 0;
-    for (const s of this.seats) {
-      if (!isHumanSeat(s) || toSafeInt(s.chips, 0) > 0) continue;
-      if ([PLAYER_STATE.DISCONNECTED, PLAYER_STATE.LEAVE_PENDING].includes(s.playerState)) continue;
-      const uid = s.userId;
-      try {
-        await withMongoTransaction(async (session) => {
-          await transferToLocked({
-            session,
-            userId: uid,
-            amount,
-            tableId: this.tableId,
-            meta: { reason: "auto_rebuy" },
-          });
-          const tableQuery = Table.findById(this.tableId);
-          const table = session ? await tableQuery.session(session) : await tableQuery;
-          if (!table) throw new Error("TABLE_NOT_FOUND");
-          const tSeat = (table.seats || []).find(
-            (x) => String(x.user) === String(uid)
-          );
-          if (!tSeat) throw new Error("SEAT_NOT_FOUND");
-          tSeat.chips = amount;
-          await table.save(session ? { session } : undefined);
-        });
-        s.chips = amount;
-        s.allIn = false;
-        s.folded = false;
-        s.inHand = false;
-        if (s.playerState === PLAYER_STATE.ACTIVE_HAND) {
-          s.playerState = PLAYER_STATE.SEATED;
+      if (!this.isOwner || this.frozen) return reject("TABLE_UNAVAILABLE");
+      this._rebuyInFlight = true;
+      const { confirmRebuy } = require("../services/pokerRebuyService");
+      result = await confirmRebuy({ tableId: this.tableId, userId,
+        offerId: payload.offerId, actionId: payload.actionId, amount: payload.amount,
+        cancel: payload.cancel === true, ownerFence: this.ownershipFence });
+      this._rebuyRevision = (this._rebuyRevision || 0) + 1;
+      const seat = this.seats[this.findSeatIndexByUser(userId)];
+      if (seat) {
+        if (result.status === "accepted" && !result.duplicate) {
+          this.adjustHandBaselineForSeat(result.amount, 1);
+          seat.chips = result.amount; seat.handStartChips = result.amount;
+          seat.bet = 0; seat.invested = 0; seat.hole = [];
+          if (this.running || this.starting) seat.playerState = PLAYER_STATE.WAITING;
+          seat.inHand = false; seat.allIn = false; seat.folded = false;
         }
-        restored += 1;
-        logger.info("poker_auto_rebuy", {
-          tableId: this.tableId,
-          userId: uid,
-          amount,
-        });
-        // #region agent log
-        _agentDbg("G", "tableGame.js:autoRebuyBustedHumans", "rebuy ok", {
-          tableId: String(this.tableId),
-          amount,
-        });
-        // #endregion
-      } catch (err) {
-        logger.warn("poker_auto_rebuy_failed", {
-          tableId: this.tableId,
-          userId: uid,
-          reason: err?.message || "unknown",
-        });
-        // #region agent log
-        _agentDbg("G", "tableGame.js:autoRebuyBustedHumans", "rebuy failed", {
-          tableId: String(this.tableId),
-          reason: err?.message || "unknown",
-        });
-        // #endregion
+        if (seat.rebuyOffer) seat.rebuyOffer.status = result.status;
+      }
+      clearTimeout(this.rebuyTimers?.get(String(userId)));
+      await this.broadcastState();
+    } catch (error) {
+      result = reject(error.message);
+    } finally {
+      this._rebuyInFlight = false;
+      await this.releaseActionLock();
+    }
+    if (result.exit) {
+      await this.leavePlayerPermanently(userId);
+      await this.emitRebuyExit(userId);
+    } else if (result.status === "accepted" && !this.running) {
+      this.scheduleNextHand();
+    }
+    return { ...result, actionId: payload.actionId };
+  }
+
+  async emitRebuyExit(userId) {
+    const sockets = await this.nsp.in(`tg:${this.tableId}`).fetchSockets();
+    for (const socket of sockets) {
+      if (String(socket.data?.userId ?? socket.userId) === String(userId)) {
+        socket.emit("table_event", { type: "rebuy_exit", tableId: this.tableId });
       }
     }
-    return restored;
   }
 
   async onWaitForPlayersWindowEnd() {
@@ -1791,6 +1813,7 @@ class PokerTable {
         userId: uid,
         name: s.user?.name || "Player",
         avatar: s.user?.profileImg || null,
+        rebuyOffer: s.rebuyOffer?.toObject ? s.rebuyOffer.toObject() : s.rebuyOffer,
         chips: toSafeInt(s.chips, 0),
         inHand: false,
         hole: [],
@@ -1810,6 +1833,7 @@ class PokerTable {
       });
     }
     this.seats = mapped.slice(0, this.capacity);
+    for (const seat of this.seats) this.armRebuyExpiry(seat.userId, seat.rebuyOffer);
     // #region agent log
     _agentDbg("K", "tableGame.js:resetStateFromTable", "reloaded seats", {
       tableId: String(this.tableId),
@@ -1929,7 +1953,8 @@ class PokerTable {
   }
 
   async refreshSeatsFromDb() {
-    if (this.frozen || this._dealingHand) return false;
+    if (this.frozen || this._dealingHand || this._rebuyInFlight) return false;
+    const rebuyRevision = this._rebuyRevision || 0;
     const prevByUser = new Map(this.seats.map((s) => [String(s.userId), s]));
     const previousBots = this.seats
       .filter((s) => s.isBot && s.chips > 0)
@@ -1951,7 +1976,7 @@ class PokerTable {
     if (!table) return false;
     // A DB read can finish after another request has begun dealing. Never
     // overwrite that hand with the idle snapshot captured before the await.
-    if (this.frozen || this._dealingHand) return false;
+    if (this.frozen || this._dealingHand || this._rebuyInFlight || rebuyRevision !== (this._rebuyRevision || 0)) return false;
     const handActive = this.isHandActive();
     this.botsEnabled = table.settings?.botsEnabled !== false;
     if (
@@ -1975,7 +2000,8 @@ class PokerTable {
       }
       for (const ms of table.seats) {
         const uid = String(ms.user?._id || ms.user);
-        if (this.findSeatIndexByUser(uid) >= 0) continue;
+        const existing = this.seats[this.findSeatIndexByUser(uid)];
+        if (existing) continue;
         // The Mongo-side seat allocator only knows about humans, so the chair it
         // handed out is usually a bot's in the live engine. Bots yield: a paying
         // player is never locked out of a table that is merely bot-full.
@@ -2478,6 +2504,7 @@ class PokerTable {
   /** Ownership recovery keeps the original deadline, not a fresh grace period. */
   rescheduleReconnectTimersAfterRestore() {
     if (!this.isOwner) return;
+    for (const seat of this.seats) this.armRebuyExpiry(seat.userId, seat.rebuyOffer);
     for (const seat of this.seats) {
       if (!seat?.isBot && seat.playerState === PLAYER_STATE.DISCONNECTED) {
         seat.reconnectDeadline = Number(seat.reconnectDeadline) ||
@@ -2581,6 +2608,7 @@ class PokerTable {
     const seat = this.seats[idx];
     if (seat.isBot) return;
     if (seat.playerState === PLAYER_STATE.LEAVE_PENDING) return;
+    if (seat.rebuyOffer?.status === "pending") return;
     if (seat.playerState !== PLAYER_STATE.DISCONNECTED) {
       seat.disconnectedAt = Date.now();
       seat.reconnectDeadline = seat.disconnectedAt + POKER_TIMINGS.RECONNECT_WINDOW_MS;
@@ -2650,7 +2678,9 @@ class PokerTable {
       await markPendingPermanentLeave({ tableId: this.tableId, userId: uid });
       const currentSeat = this.seats[this.findSeatIndexByUser(uid)];
       if (currentSeat) currentSeat.playerState = PLAYER_STATE.LEAVE_PENDING;
-      const midHand = this.running === true && String(this.round || "idle") !== "idle";
+      const expiredRebuySeat = currentSeat && !currentSeat.inHand && currentSeat.chips === 0 &&
+        ["expired", "cancelled"].includes(currentSeat.rebuyOffer?.status);
+      const midHand = this.running === true && String(this.round || "idle") !== "idle" && !expiredRebuySeat;
       // Never force mid-hand: Mongo seat.chips still holds the pre-pot stack.
       // Pass liveHandInProgress from this owner engine so stale status:"playing"
       // between hands cannot block an idle cash-out.
@@ -2667,14 +2697,28 @@ class PokerTable {
         scheduleDeferredPermanentLeave({ tableId: this.tableId, userId: uid });
       }
       if (res.left) {
-        const gone = this.findSeatIndexByUser(uid);
-        if (gone >= 0) {
-          this.seats.splice(gone, 1);
-          this.reindexSeatsByPosition();
-          void this.notifySeatOpened();
-        }
-        if (this.seatedHumanCount() >= 1) {
-          this.addBotsForMissingSeats();
+        const removalLocked = await this.acquireActionLockWithin(10000);
+        if (removalLocked) {
+          try {
+            const roleIds = {
+              dealerIndex: this.seats[this.dealerIndex]?.userId,
+              currentIndex: this.seats[this.currentIndex]?.userId,
+              sbSeatIndex: this.seats[this.sbSeatIndex]?.userId,
+              bbSeatIndex: this.seats[this.bbSeatIndex]?.userId,
+            };
+            const gone = this.findSeatIndexByUser(uid);
+            if (gone >= 0) {
+              this.seats.splice(gone, 1);
+              this.reindexSeatsByPosition();
+              if (this.running) {
+                for (const [key, roleUid] of Object.entries(roleIds)) {
+                  if (roleUid != null && roleUid !== uid) this[key] = this.findSeatIndexByUser(roleUid);
+                }
+              }
+              void this.notifySeatOpened();
+            }
+            if (this.seatedHumanCount() >= 1 && !this.running) this.addBotsForMissingSeats();
+          } finally { await this.releaseActionLock(); }
         }
       }
       await this.broadcastState();
@@ -5443,6 +5487,7 @@ class PokerTable {
 
     this.running = false;
     this.clearActionScheduling();
+    await this.autoRebuyBustedHumans();
     if (manageLifecycle) {
       await this.broadcastState(true); // reveal at end while round is showdown
       this.setRound("idle");
@@ -5465,6 +5510,7 @@ class PokerTable {
       forUserId != null && turnUserId != null && String(forUserId) === String(turnUserId);
     const rawSpec = isActor ? this.computeTurnActionSpec(turnSeatIndex) : null;
     const actionSpec = normalizeClientActionSpec(rawSpec, isActor);
+    const rebuySeat = forUserId == null ? null : this.seats[this.findSeatIndexByUser(forUserId)];
     const lobby = this.buildLobbyStateFields();
 
     return {
@@ -5498,6 +5544,11 @@ class PokerTable {
         this.bbSeatIndex >= 0 ? this._seatPositionOf(this.bbSeatIndex) : null,
       turnUserId,
       actionDeadline: this.actionDeadline,
+      ...(rebuySeat?.rebuyOffer?.status === "pending" ? { rebuyOffer: {
+        offerId: rebuySeat.rebuyOffer.offerId,
+        expiresAt: new Date(rebuySeat.rebuyOffer.expiresAt).getTime(),
+        minBuyIn: this.minBuyIn, maxBuyIn: this.maxBuyIn,
+      } } : (forUserId != null ? { rebuyOffer: null } : {})),
       turnSeconds: this.turnSeconds,
       botFillDeadline: this.botFillDeadline,
       waitForPlayersDeadline: this.waitForPlayersDeadline,
@@ -6127,6 +6178,29 @@ class GameRegistry {
    * (promote follower copies whose owner has died). No-op single-instance.
    */
   startOwnershipLoops() {
+    if (!this.rebuyRecoveryTimer) {
+      const recover = async () => {
+        if (this._recoveringRebuys) return;
+        this._recoveringRebuys = true;
+        try {
+          const tables = await Table.find({ gameType: "poker", "seats.rebuyOffer.status": { $in: ["pending", "cancelled", "expired"] } }).select("_id").lean();
+          for (const table of tables) {
+            const game = await this.get(String(table._id));
+            if (game?.isOwner) {
+              if (!await game.acquireActionLockWithin(1000)) continue;
+              try {
+                const durable = await Table.findById(table._id).select("seats minBuyIn maxBuyIn").lean();
+                if (durable) game.restoreRebuyOffersFromMongo(durable);
+              } finally { await game.releaseActionLock(); }
+            }
+          }
+        } catch (error) { logger.warn("poker_rebuy_recovery_failed", { reason: error.message }); }
+        finally { this._recoveringRebuys = false; }
+      };
+      this.rebuyRecoveryTimer = setInterval(() => void recover(), 5000);
+      this.rebuyRecoveryTimer.unref?.();
+      void recover();
+    }
     if (!this.ownershipEnabled || this.heartbeatTimer) return;
     const ttl = this.ownership.leaseTtlMs || 15000;
     const beat = Math.max(2000, Math.floor(ttl / 3));
@@ -6141,6 +6215,8 @@ class GameRegistry {
   }
 
   stopOwnershipLoops() {
+    clearInterval(this.rebuyRecoveryTimer);
+    this.rebuyRecoveryTimer = null;
     if (this.heartbeatTimer) clearInterval(this.heartbeatTimer);
     if (this.sweepTimer) clearInterval(this.sweepTimer);
     this.heartbeatTimer = null;
@@ -6213,6 +6289,7 @@ class GameRegistry {
         gt.restoreFromSnapshot(snapshot);
         if (table) await gt.reconcileEngineWithMongo(table);
       }
+      if (table) gt.restoreRebuyOffersFromMongo(table);
       await gt.clearStaleSettlementLock();
       await gt.applyCosmeticsToSeats();
       if (gt.running && gt.round !== "showdown") {
@@ -6351,6 +6428,8 @@ class GameRegistry {
       }
     }
 
+    gt.restoreRebuyOffersFromMongo(table);
+
     // H-3: a fresh owner clears any settlement marker orphaned by a crashed
     // predecessor (re-settlement stays idempotent via the HandHistory guard).
     if (isOwner) await gt.clearStaleSettlementLock();
@@ -6428,6 +6507,11 @@ function initTableGame(io, options = {}) {
     if (!game || !game.isOwner) return;
     const sid = cmd.socketId;
     switch (cmd.type) {
+      case "rebuy": {
+        const result = await game.handleRebuy(cmd.userId, cmd.payload || {});
+        if (sid) nsp.to(sid).emit("rebuy_result", result);
+        break;
+      }
       case "action": {
         const res = await game.handleAction(cmd.userId, cmd.payload || {});
         if (res && res.status === "rejected") {
@@ -7039,6 +7123,18 @@ function initTableGame(io, options = {}) {
           tableId,
           reason: e?.message || "unknown",
         });
+      }
+    });
+
+    socket.on("rebuy", async (payload = {}) => {
+      if (!payload.tableId) return;
+      try {
+        await ownerRunOrForward(String(payload.tableId), {
+          type: "rebuy", tableId: String(payload.tableId), userId: socket.userId,
+          socketId: socket.id, payload,
+        }, async (game) => socket.emit("rebuy_result", await game.handleRebuy(socket.userId, payload)));
+      } catch (error) {
+        socket.emit("rebuy_result", { status: "rejected", actionId: payload.actionId, reason: error.message });
       }
     });
 

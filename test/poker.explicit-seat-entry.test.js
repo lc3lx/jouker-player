@@ -84,3 +84,33 @@ test('new overflow preserves the buy-in range, blinds, and nine-seat capacity', 
   assert.equal(result.smallBlind, 25);
   assert.equal(result.bigBlind, 50);
 });
+
+test('losing a selected chair never calls the wallet transfer', async () => {
+  const before = transfers;
+  Table.findById = () => ({ session: async () => ({
+    _id: 'chair-race', gameType: 'poker', capacity: 9,
+    minBuyIn: 10000, maxBuyIn: 1000000, waitingQueue: [],
+    seats: [{ user: 'winner', seatPosition: 4, chips: 10000 }],
+  }) });
+  await assert.rejects(joinPokerWithRetry({
+    userId: 'loser', playerId: 'p10', buyIn: 1000000,
+    initialTableId: 'chair-race', tier: 'beginner', seatIndex: 4, strictTable: true,
+  }), /SEAT_TAKEN/);
+  assert.equal(transfers, before);
+});
+
+test('public overflow uses the poker cap from the base stake', async () => {
+  let filter;
+  Table.findOne = (query) => { filter = query; return { sort: async () => ({ _id: 'reuse' }) }; };
+  await findAvailablePokerTable('beginner', 10000, null, { capacity: 5 });
+  assert.equal(filter.minBuyIn, 10000);
+  assert.equal(filter.maxBuyIn, 1000000);
+  assert.equal(filter.capacity, 5);
+});
+
+test('allocation without a selected table requires its base stake separately from the purchase', async () => {
+  const { allocateAndJoinPoker } = require('../services/pokerTableAllocationService');
+  await assert.rejects(allocateAndJoinPoker({
+    userId: 'buyer', playerId: 'player', buyIn: 1000000, tier: 'beginner',
+  }), /TABLE_BASE_REQUIRED/);
+});
