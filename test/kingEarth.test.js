@@ -11,7 +11,7 @@ const roundState = require("../games/dice/kingArthRoundState");
 test("uses the eight supplied symbols and multiplier plaque values", () => {
   assert.equal(engine.REGULAR_SYMBOLS, 8);
   assert.deepEqual(engine.MULTIPLIER_VALUES, [2, 5, 10, 20, 50, 100, 200, 500, 1000]);
-  assert.equal(engine.FREE_SPINS_AWARD, 5);
+  assert.equal(engine.FREE_SPINS_AWARD, 10);
   assert.equal(engine.FREE_SPINS_BOUGHT, 10);
   // Prices are derived from the measured return of a round — assert the shape
   // (a super round costs meaningfully more) rather than pinning the numbers,
@@ -75,11 +75,11 @@ test("multiplier landing rates use Poseidon-aligned plaque spawn weights", () =>
   assert.deepEqual(engine.BONUS_MULTIPLIER_WEIGHTS, [62, 16, 10, 5.5, 3, 1.8, 0.9, 0.45, 0.2]);
 });
 
-test("natural free spins start with five spins", async () => {
+test("natural free spins start with ten spins", async () => {
   const uid = `king-earth-${Date.now()}`;
   try {
     const session = await roundState.awardFreeSpins(uid, "test", 4, 1, false);
-    assert.equal(session.remaining, 5);
+    assert.equal(session.remaining, 10);
     assert.equal(session.superBonus, false);
   } finally {
     await roundState.deleteFreeSpinSession(uid, "test");

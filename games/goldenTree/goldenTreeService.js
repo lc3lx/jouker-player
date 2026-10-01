@@ -183,17 +183,9 @@ async function executeSpin(userId, betAmountInput) {
     ? jackpotMeters.snapshot()
     : jackpotMeters.contribute(betAmount);
 
-  const activeCapMult = Math.min(
-    MAX_WIN_MULTIPLIER,
-    edgeParams?.winCapMultiplier || MAX_WIN_MULTIPLIER
-  );
-  let calculatedWin = payable.totalWin;
-  if (edgeParams?.modulateWinMultiple && betAmount > 0) {
-    const rawMult = calculatedWin / betAmount;
-    const modulatedMult = edgeParams.modulateWinMultiple(rawMult);
-    calculatedWin = roundMoney(modulatedMult * betAmount);
-  }
-  const { totalWin, capped, cap } = capWin(calculatedWin, betAmount, activeCapMult);
+  // Credit the displayed paylines and tree multipliers in full. Bet-tier
+  // compression would disagree with the line amounts returned to the client.
+  const { totalWin, capped, cap } = capWin(payable.totalWin, betAmount);
 
   let balanceAfter;
   try {

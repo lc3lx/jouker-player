@@ -8,7 +8,7 @@ const crypto = require("crypto");
 const LOCK_TTL_MS = 45_000;
 const FREE_SPIN_TTL_SEC = 7 * 24 * 3600;
 const MAX_BANKED_FREE_SPINS = 50;
-const FREE_SPINS_AWARD = 5; // 4+ Zeus-head scatters in the base game
+const FREE_SPINS_AWARD = 10; // 4+ Zeus-head scatters in the base game
 const RETRIGGER_AWARD = 5; // 3+ heads during free spins add 5 more
 
 function roundMoney(n) {

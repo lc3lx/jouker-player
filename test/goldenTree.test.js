@@ -893,6 +893,24 @@ test("buy bonus creates 5 free spins session", async () => {
   assert.equal(spin1.matrix[4].includes(SYMBOLS.WILD), false);
 });
 
+test("bonus credits the displayed tree multipliers in full at a large bet", async () => {
+  const { MAX_WIN_MULTIPLIER } = require("../games/goldenTree/constants");
+  const user = "tree-displayed-payout";
+  const bet = 1000000;
+  wallet.seedStubBalance(user, bet * 10000);
+  const purchase = await goldenTreeService.executeBuyBonus(user, "Triple", bet);
+  assert.equal(purchase.freeSpinsRemaining, 5);
+  let balance = purchase.balance;
+  for (let i = 0; i < 5; i++) {
+    const spin = await goldenTreeService.executeSpin(user, bet);
+    const displayedWin = roundMoney(spin.lineWins.reduce((sum, win) => sum + win.amount, 0));
+    assert.equal(spin.totalWin, Math.min(displayedWin, bet * MAX_WIN_MULTIPLIER));
+    assert.equal(spin.balance, roundMoney(balance + spin.totalWin));
+    assert.equal(spin.freeSpinsRemaining, 4 - i);
+    balance = spin.balance;
+  }
+});
+
 test("forceTrees plants the triple only on columns 1-3", () => {
   for (let i = 0; i < 80; i += 1) {
     const { matrix } = generateSpin({ bonusMode: true, forceTrees: true });

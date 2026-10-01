@@ -7,9 +7,9 @@
  * plaques (x2 → x1000) stay on screen for the whole tumbling sequence; when
  * the sequence ends with a win, their sum multiplies it. Base game is
  * per-spin. During free spins, plaques from winning spins bank into a
- * session total activated only by fresh plaques on a win (losing spins do not add).
+ * session total activated by fresh plaques on a win (losing spins do not add).
  * The character-head scatter is the free-spins trigger: 4+ heads in the base
- * game award 5 free spins; during free spins 3+ heads add 5 more. Multiplier
+ * game award 10 free spins; during free spins 3+ heads add 5 more. Multiplier
  * plaques only multiply wins — they never open the bonus.
  *
  * RTP was originally tuned for MIN_MATCH=8; lowering to 7 raises hit rate.
@@ -34,7 +34,7 @@ const HEAD_WEIGHT_BASE = 2.4;
 const HEAD_WEIGHT_BONUS = 1.7;
 /** @deprecated use TRIGGER_NATURAL_MIN / TRIGGER_RETRIGGER_MIN */
 const TRIGGER_MIN_MULTIPLIERS = TRIGGER_RETRIGGER_MIN;
-const FREE_SPINS_NATURAL = 5;
+const FREE_SPINS_NATURAL = 10;
 const FREE_SPINS_BOUGHT = 10;
 const RETRIGGER_AWARD = 5;
 
@@ -116,7 +116,7 @@ function appliedMultiplierFor(sum, isBonus = false) {
  * Plaques only bank on a winning spin.
  * Base: this spin's plaques multiply the win.
  * Bonus: banked total + this spin's plaques (if win) multiplies the win, and
- * that total carries forward, but activates only on wins with fresh plaques.
+ * that total carries forward, but applies only on wins with fresh plaques.
  */
 function resolvePayoutMultiplier({
   baseWin = 0,
@@ -131,7 +131,7 @@ function resolvePayoutMultiplier({
   const nextCarried = isFreeSpin
     ? Math.min(Number.isFinite(bankCap) ? bankCap : Infinity, prev + plaques)
     : 0;
-  // The bank is retained, but a win needs a NEW plaque to activate it.
+  // Keep the bank, but require a new plaque on this winning spin to activate it.
   const pool = isFreeSpin ? nextCarried : plaques;
   const applied = win && plaques > 0 && pool > 0 ? pool : 1;
   return { applied, nextCarried, plaques };

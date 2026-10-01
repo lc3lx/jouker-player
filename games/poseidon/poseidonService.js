@@ -91,39 +91,24 @@ async function executeSpin(userId, betAmountInput) {
 
     // --- win math (bet multiples) ---
     // Base: this spin's plaques multiply a winning sequence. Bonus: plaques from
-    // winning spins bank into a session total; later wins require a fresh plaque.
+    // winning spins bank into a session total activated only by fresh plaques.
     // Losing spins ignore plaques for payout (they still count for the free-spins
     // trigger below). Overall win is still hard-capped by MAX_WIN_MULTIPLIER.
     const carried = isFreeSpin ? Number(bonusSession.bonusMultiplier || 0) : 0;
     const freshPlaques = Math.max(0, Number(spin.multiplierSum) || 0);
-    let { applied: appliedMultiplier, nextCarried } = resolvePayoutMultiplier({
+    const { applied: appliedMultiplier, nextCarried } = resolvePayoutMultiplier({
       baseWin: spin.baseWin,
       plaqueSum: freshPlaques,
       carried,
       isFreeSpin,
       bankCap: superBonus ? SUPER_BONUS_BANK_CAP : BONUS_BANK_CAP,
     });
-    // A bought/free-spin bank never multiplies a win that has no new plaque.
-    if (!(freshPlaques > 0)) appliedMultiplier = 1;
-    if (isFreeSpin) {
-      roundManager.setBonusMultiplier(userKey, nextCarried);
-    }
 
-    if (edgeParams?.highMultiplierDampening < 1.0 && appliedMultiplier > 1) {
-      appliedMultiplier = Math.max(
-        1,
-        Math.round(1 + (appliedMultiplier - 1) * edgeParams.highMultiplierDampening)
-      );
-    }
-
-    const activeCapMultiplier = Math.min(
-      MAX_WIN_MULTIPLIER,
-      edgeParams.winCapMultiplier || MAX_WIN_MULTIPLIER
-    );
+    // Pay the displayed multiplier in full. Only the published maximum applies;
+    // bet-tier compression would make baseWin * appliedMultiplier disagree
+    // with both the credited amount and the bonus bank shown to the player.
+    const activeCapMultiplier = MAX_WIN_MULTIPLIER;
     let totalWinX = spin.baseWin * appliedMultiplier;
-    if (edgeParams?.modulateWinMultiple) {
-      totalWinX = edgeParams.modulateWinMultiple(totalWinX);
-    }
     const winCapped = totalWinX > activeCapMultiplier;
     if (winCapped) totalWinX = activeCapMultiplier;
 
@@ -182,6 +167,8 @@ async function executeSpin(userId, betAmountInput) {
 
     let bonusTotalWon = 0;
     if (isFreeSpin) {
+      // A rejected wallet settlement must not bank this spin's plaques.
+      roundManager.setBonusMultiplier(userKey, nextCarried);
       roundManager.addBonusWin(userKey, totalWin);
       bonusTotalWon = roundManager.getBonusSession(userKey)?.totalWon ?? 0;
       roundManager.consumeBonusSpin(userKey);

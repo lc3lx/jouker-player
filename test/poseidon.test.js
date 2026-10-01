@@ -375,6 +375,7 @@ test("bought bonus accumulates winning plaques across free spins", async () => {
     { ...blank(), baseWin: 1, multiplierSum: 0 },
     { ...blank(), baseWin: 0, multiplierSum: 20, multipliers: [{ col: 2, row: 0, value: 20 }] },
     { ...blank(), baseWin: 1, multiplierSum: 0 },
+    { ...blank(), baseWin: 1, multiplierSum: 5, multipliers: [{ col: 1, row: 0, value: 5 }] },
   ];
   let i = 0;
   engine.resolveSpin = () => spins[Math.min(i++, spins.length - 1)];
@@ -401,8 +402,72 @@ test("bought bonus accumulates winning plaques across free spins", async () => {
     assert.equal(e.appliedMultiplier, 1);
     assert.equal(e.totalWin, 10000);
     assert.equal(e.bonusMultiplier, 15);
+    assert.equal(b.balance - a.balance, b.totalWin);
+    assert.equal(c.balance - b.balance, c.totalWin);
+    assert.equal(d.balance, c.balance);
+    assert.equal(e.balance - d.balance, e.totalWin);
+    const f = await poseidonService.executeSpin("user-bank", 10000);
+    assert.equal(f.bonusMultiplier, 20);
+    assert.equal(f.appliedMultiplier, 20);
+    assert.equal(f.totalWin, 200000);
+    assert.equal(f.balance - e.balance, f.totalWin);
   } finally {
     engine.resolveSpin = original;
+  }
+});
+
+test("displayed bonus multiplier pays in full on a large bet, up to the published cap", async () => {
+  const engine = require('../games/poseidon/spinEngine');
+  const original = engine.resolveSpin;
+  let baseWin = 2;
+  engine.resolveSpin = () => ({
+    initialMatrix: fullMatrix(SYMBOLS.A), finalMatrix: fullMatrix(SYMBOLS.A),
+    steps: [], multipliers: [{ col: 0, row: 0, value: 100 }],
+    multiplierSum: 100, baseWin, scatterCount: 0,
+  });
+  try {
+    const user = 'full-value-bonus';
+    wallet.seedStubBalance(user, 1e10);
+    await poseidonService.executeBuyBonus(user, 1000000);
+    const before = await wallet.getBalance(user);
+    const result = await poseidonService.executeSpin(user, 10000);
+    assert.equal(result.appliedMultiplier, 100);
+    assert.equal(result.totalWin, 200000000);
+    assert.equal(result.balance - before, result.totalWin);
+    assert.equal(result.totalWin, result.baseWinAmount * result.appliedMultiplier);
+    baseWin = 100;
+    const capped = await poseidonService.executeSpin(user, 10000);
+    assert.equal(capped.appliedMultiplier, 200);
+    assert.equal(capped.bonusMultiplier, 200);
+    assert.equal(capped.winCapped, true);
+    assert.equal(capped.totalWin, 1000000 * MAX_WIN_MULTIPLIER);
+    assert.equal(capped.totalWin, capped.maxWinCap);
+    assert.equal(capped.balance - result.balance, capped.totalWin);
+  } finally {
+    engine.resolveSpin = original;
+  }
+});
+
+test("failed settlement leaves the bonus bank and remaining spins unchanged", async () => {
+  const engine = require('../games/poseidon/spinEngine');
+  const originalEngine = engine.resolveSpin;
+  const originalWallet = wallet.atomicSpinWallet;
+  try {
+    const user = 'failed-bonus-settlement';
+    wallet.seedStubBalance(user, 1e8);
+    await poseidonService.executeBuyBonus(user, 10000);
+    const before = { ...roundManager.getBonusSession(user) };
+    engine.resolveSpin = () => ({
+      initialMatrix: fullMatrix(SYMBOLS.A), finalMatrix: fullMatrix(SYMBOLS.A),
+      steps: [], multipliers: [{ col: 0, row: 0, value: 10 }],
+      multiplierSum: 10, baseWin: 1, scatterCount: 0,
+    });
+    wallet.atomicSpinWallet = async () => { throw new Error('settlement failed'); };
+    await assert.rejects(poseidonService.executeSpin(user, 10000), /settlement failed/);
+    assert.deepEqual(roundManager.getBonusSession(user), before);
+  } finally {
+    engine.resolveSpin = originalEngine;
+    wallet.atomicSpinWallet = originalWallet;
   }
 });
 
@@ -514,7 +579,7 @@ test("free spins consume the session without charging bets", async () => {
   assert.equal(res.balance, before - bet + res.totalWin);
 });
 
-test("natural trigger awards 5 free spins on 4+ character heads", async () => {
+test("natural trigger awards 10 free spins on 4+ character heads", async () => {
   const engine = require("../games/poseidon/spinEngine");
   const original = engine.resolveSpin;
   const head = "head";
@@ -547,7 +612,8 @@ test("natural trigger awards 5 free spins on 4+ character heads", async () => {
     assert.equal(res.freeSpinsTriggered, true);
     assert.equal(res.scatterCount, 4);
     assert.equal(res.multiplierCount, 0);
-    assert.equal(res.freeSpinsAwarded, FREE_SPINS_NATURAL);
+    assert.equal(FREE_SPINS_NATURAL, 10);
+    assert.equal(res.freeSpinsAwarded, 10);
     assert.equal(res.freeSpinsRemaining, FREE_SPINS_NATURAL);
   } finally {
     engine.resolveSpin = original;
