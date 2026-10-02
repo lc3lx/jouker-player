@@ -7,12 +7,12 @@ const operation = require("../games/utils/slotOperation");
 
 test("specified faces are exact normalized probabilities, independent of stacking or bet", () => {
   for (const folder of ["poseidon", "zenobia", "dice"]) {
-    const c = require(`../games/${folder}/${folder === "dice" ? "DiceEngine" : "constants"}`);
+    const c = require(`../games/${folder}/${folder === "dice" ? "DiceEngine.v2" : "constants"}`);
     for (const weights of [c.BASE_MULTIPLIER_WEIGHTS, c.BONUS_MULTIPLIER_WEIGHTS]) {
       assert.ok(Math.abs(weights.reduce((a,b) => a+b,0) - 100) < 1e-10);
       for (const [face, percent] of Object.entries(economy.HIGH_PROBABILITIES)) assert.equal(weights[c.MULTIPLIER_VALUES.indexOf(Number(face))], percent);
     }
-    const engine = require(`../games/${folder}/${folder === "dice" ? "DiceEngine" : "spinEngine"}`);
+    const engine = require(`../games/${folder}/${folder === "dice" ? "DiceEngine.v2" : "spinEngine"}`);
     const counts = new Map(), rng = rngFor(817), draws = 500000;
     for (let n = 0; n < draws; n++) {
       const opts = { bonus: true, superBonus: true, bigAlready: true };

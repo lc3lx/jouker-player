@@ -9,7 +9,7 @@ function stageSpinSession(previous, outcome, payout, bet) {
     return { payout, capReached: !!outcome.capped, awarded, totalWon: awarded ? payout : 0,
       next: awarded ? { remaining: awarded, lockedBaseBet: bet, lockedDoubleChance: !!outcome.doubleChance,
         totalMultiplier: 0, roundCap: outcome.maxWin || engine.MAX_WIN_MULTIPLIER * bet, roundWon: payout,
-        superBonus: false, economyVersion: 2 } : null };
+        superBonus: false, economyVersion: outcome.economyVersion || engine.ECONOMY_VERSION } : null };
   }
   const left = Math.max(0, Number(previous.roundCap || 0) - Number(previous.roundWon || 0));
   const credited = previous.roundCap > 0 ? Math.min(payout, left) : payout;

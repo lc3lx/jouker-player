@@ -1191,7 +1191,7 @@ function registerGameHandlers(nsp, jwtVerify) {
           clientSeed,
           nonce: nonceStr,
           isFreeSpin,
-          economyVersion: isFreeSpin ? (fsBefore.economyVersion || 1) : 2,
+          economyVersion: isFreeSpin ? (fsBefore.economyVersion || 1) : DiceEngine.ECONOMY_VERSION,
           superBonus: !!(isFreeSpin && fsBefore.superBonus),
           freeSpinMultiplier: isFreeSpin
             ? Number(fsBefore.totalMultiplier || 0)
@@ -1277,6 +1277,7 @@ function registerGameHandlers(nsp, jwtVerify) {
                   serverSeedHash,
                   seedGeneration,
                   volatility: outcome.volatility,
+                  economyVersion: outcome.economyVersion || (fsBefore?.economyVersion || DiceEngine.ECONOMY_VERSION),
                   lineWins: outcome.lineWins,
                   scatterCount: outcome.scatterCount,
                   multipliers: outcome.multipliers,
@@ -1488,7 +1489,7 @@ function registerGameHandlers(nsp, jwtVerify) {
               lockedBaseBet: bet, lockedDoubleChance: false,
               remaining: DiceEngine.FREE_SPINS_BOUGHT,
               roundCap: DiceEngine.MAX_WIN_MULTIPLIER * stake, roundWon: 0,
-              totalMultiplier: 0, superBonus, economyVersion: 2,
+              totalMultiplier: 0, superBonus, economyVersion: DiceEngine.ECONOMY_VERSION,
             }, session);
             if (requestId) {
               const settledWallet = await Wallet.findOne({ user: userId }).session(session);

@@ -17,6 +17,8 @@ exports.verifySpin = asyncHandler(async (req, res, next) => {
     isFreeSpin,
     freeSpinMultiplier,
     volatility,
+    economyVersion,
+    superBonus,
   } = req.body || {};
 
   if (typeof serverSeed !== "string" || serverSeed.length < 16) {
@@ -43,11 +45,14 @@ exports.verifySpin = asyncHandler(async (req, res, next) => {
       isFreeSpin: !!isFreeSpin,
       freeSpinMultiplier: Number(freeSpinMultiplier || 0),
       volatility: volatility || "medium",
+      economyVersion: Number(economyVersion || DiceEngine.ECONOMY_VERSION),
+      superBonus: !!superBonus,
     });
     res.status(200).json({
       status: "success",
       data: {
         grid: outcome.grid,
+        economyVersion: Number(economyVersion || DiceEngine.ECONOMY_VERSION),
         initialGrid: outcome.initialGrid,
         finalGrid: outcome.finalGrid,
         totalWin: outcome.totalWin,

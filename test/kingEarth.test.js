@@ -65,18 +65,6 @@ test("multiplier applies only when the spin wins", () => {
   }
 });
 
-test("multiplier landing rates use Poseidon-aligned plaque spawn weights", () => {
-  const regularMass = engine.BASE_WEIGHTS.reduce((sum, weight) => sum + weight, 0);
-  const baseChance = 0.22 / (regularMass + 0.22);
-  const bonusChance = 0.55 / (regularMass + 0.55);
-  assert.ok(Math.abs(baseChance - 0.22 / (regularMass + 0.22)) < 1e-12);
-  assert.ok(Math.abs(bonusChance - 0.55 / (regularMass + 0.55)) < 1e-12);
-  for (const weights of [engine.BASE_MULTIPLIER_WEIGHTS, engine.BONUS_MULTIPLIER_WEIGHTS]) {
-    assert.deepEqual(weights.slice(3), [10,5,2,1,0.5,0.1]);
-    assert.ok(Math.abs(weights.reduce((a,b) => a+b,0) - 100) < 1e-10);
-  }
-});
-
 test("natural free spins start with ten spins", async () => {
   const uid = `king-earth-${Date.now()}`;
   try {

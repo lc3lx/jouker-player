@@ -1,9 +1,9 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
-const engine = require('../games/dice/DiceEngine');
+const engine = require('../games/dice/DiceEngine.v2');
 
 for (const superBonus of [false, true]) {
-  test(`Zeus ${superBonus ? 'super' : 'standard'} purchase return matches its price`, () => {
+  test(`Legacy v2 Zeus ${superBonus ? 'super' : 'standard'} purchase return matches its price`, () => {
     const rounds = 10000;
     const bet = 10000;
     let returned = 0;

@@ -199,7 +199,7 @@ async function deleteFreeSpinSession(userId, tableId) {
 async function startFreeSpinSession(
   userId,
   tableId,
-  { lockedBaseBet, lockedDoubleChance, spins = FREE_SPINS_AWARD, roundCap = 0, initialWin = 0, superBonus = false, economyVersion = 2 } = {}
+  { lockedBaseBet, lockedDoubleChance, spins = FREE_SPINS_AWARD, roundCap = 0, initialWin = 0, superBonus = false, economyVersion = require("./DiceEngine").ECONOMY_VERSION } = {}
 ) {
   const session = {
     remaining: capFsRemaining(spins),

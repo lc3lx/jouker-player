@@ -14,7 +14,7 @@ function rngFor(seed) {
 function adapter(game, version = 2) {
   const suffix = version === 1 ? ".v1" : "";
   if (game === "zeus") {
-    const e = require(`../games/dice/DiceEngine${suffix}`);
+    const e = require(`../games/dice/DiceEngine${version === 2 ? ".v2" : suffix}`);
     return { cost: e.BUY_COST_MULT, superCost: e.SUPER_BUY_COST_MULT, spins: 10, cap: e.MAX_WIN_MULTIPLIER, trigger: 4, retrigger: 3, cumulative: true,
       spin(rng, bonus, superBonus, bank, n, params) {
         const s = e.spin(10000, { rng, isFreeSpin: bonus, superBonus, freeSpinMultiplier: bank, serverSeed: `audit-${n}`, clientSeed: "audit", nonce: n, payScale: 1 });
@@ -114,6 +114,15 @@ function main() {
   const selected = process.argv.find(s => /^--game=/.test(s))?.split("=")[1];
   const version = baseline ? 1 : 2, profiles = JSON.parse(fs.readFileSync(calibrationPath)), results = [];
   for (const game of selected ? [selected] : ["zeus", "poseidon", "zenobia", "golden-tree"]) {
+    if (game === "zeus" && !baseline) {
+      if (calibrate) throw new Error("Zeus v3 has fixed published rules; pay scaling is disabled. Select another game for calibration.");
+      const modes = process.argv.includes("--base-only") ? ["base"] : bonusOnly ? ["bonus", "super"] : ["base", "bonus", "super"];
+      for (const bet of bonusBets) for (const mode of modes) {
+        const report = require("./zeusRulesAudit").measure({ mode, bet, version: 3, rounds, seeds });
+        results.push(report); console.log(JSON.stringify(report));
+      }
+      continue;
+    }
     const profile = profiles[game];
     for (const superBonus of process.argv.includes("--base-only") ? [] : game === "golden-tree" ? [false] : [false, true]) {
       const batches = seeds.map(seed => samples(game, { rounds, seed, bonus: true, superBonus, version }));
@@ -141,7 +150,7 @@ function main() {
   }
   const out = process.argv.find(s => /^--out=/.test(s))?.slice(6);
   if (out) fs.writeFileSync(out, JSON.stringify({ generatedAt: new Date().toISOString(), seeds, calibration: profiles, results }, null, 2) + "\n");
-  if (!baseline && !calibrate && results.some(r => r.mode !== "base" && (r.rtp < 0.44 || r.rtp > 0.48 || r.halfWidth > 0.02))) process.exitCode = 1;
+  if (!baseline && !calibrate && results.some(r => r.version !== 3 && r.mode !== "base" && (r.rtp < 0.44 || r.rtp > 0.48 || r.halfWidth > 0.02))) process.exitCode = 1;
 }
 if (require.main === module) main();
 module.exports = { main, rngFor, adapter, samples, measure, solve };
