@@ -74,3 +74,35 @@ test("transient socket discovery failure cannot abort showdown presentation", as
   assert.equal(g.running, true);
   assert.equal(g.frozen, false);
 });
+
+test("winner hold blocks early start, reconnect and direct deal requests", async t => {
+  const g = game(t);
+  g.running = false;
+  g.round = "idle";
+  const now = Date.now();
+  t.mock.method(Date, "now", () => now);
+  g.nextHandNotBefore = now + 5000;
+  g.healSeatsMissingSockets = async () => assert.fail("early start healed the table");
+  g.seatPendingMongoHumans = async () => assert.fail("early next hand changed seats");
+  let deals = 0;
+  g._dealHandOnce = async () => { deals++; };
+  await g.startIfReady();
+  await g.beginNextHandIfPossible();
+  await g.startHand();
+  assert.equal(deals, 0);
+  assert.equal(g.running, false);
+  t.mock.method(Date, "now", () => now + 5000);
+  await g.startHand();
+  assert.equal(deals, 1, "dealing resumes when the display deadline expires");
+});
+
+test("rescheduling after rebuy preserves the winner display deadline", t => {
+  const g = game(t);
+  g.running = false;
+  const deadline = Date.now() + 5000;
+  g.nextHandNotBefore = deadline;
+  g.scheduleNextHand();
+  g.scheduleNextHand();
+  assert.equal(g.nextHandNotBefore, deadline);
+  assert.ok(g.nextHandTimer);
+});

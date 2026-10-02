@@ -491,6 +491,7 @@ class PokerTable {
     this.waitForPlayersDeadline = null;
     this.initialDealDeadline = null;
     this.nextHandTimer = null;
+    this.nextHandNotBefore = 0;
     this.resetStateFromTable(table);
     this.turnSeconds = POKER_TIMINGS.TURN_SECONDS;
     this.reconnectTimers = new Map();
@@ -1291,7 +1292,11 @@ class PokerTable {
   scheduleNextHand() {
     if (!this.isOwner) return; // H-3: only the lease owner drives the loop
     this.clearNextHandTimer();
-    const delay = POKER_TIMINGS.NEXT_HAND_DELAY_MS;
+    const now = Date.now();
+    if (this.nextHandNotBefore <= now) {
+      this.nextHandNotBefore = now + POKER_TIMINGS.NEXT_HAND_DELAY_MS;
+    }
+    const delay = Math.max(0, this.nextHandNotBefore - now);
     this.nextHandTimer = setTimeout(() => {
       this.nextHandTimer = null;
       void this.beginNextHandIfPossible();
@@ -1324,6 +1329,7 @@ class PokerTable {
 
   async beginNextHandIfPossible() {
     if (!this.isOwner) return; // H-3
+    if (Date.now() < this.nextHandNotBefore) return;
 
     if (this.frozen && !this.running) {
       this._tryUnfreezeFromChipProbe("begin_next_hand");
@@ -3324,6 +3330,7 @@ class PokerTable {
 
   async startIfReady({ refreshFromDb = true, allowBotFill = false } = {}) {
     if (!this.isOwner) return; // H-3
+    if (Date.now() < this.nextHandNotBefore) return;
     if (this.frozen) return;
     await this.healSeatsMissingSockets();
     if (this.running || this.starting) {
@@ -3685,6 +3692,7 @@ class PokerTable {
   }
 
   async startHand() {
+    if (Date.now() < this.nextHandNotBefore) return;
     if (this._dealingHand || this.frozen) return;
     this._dealingHand = true;
     try {
@@ -4736,6 +4744,9 @@ class PokerTable {
     }
 
     this.showdownRevealedSeats = new Set();
+    // Set the gate before publishing the winner/idle state: client start,
+    // reconnect and rebuy requests must not bypass the winner display gap.
+    this.nextHandNotBefore = Date.now() + POKER_TIMINGS.NEXT_HAND_DELAY_MS;
     await this.emitToSeatedSockets("showdown_end", {
       tableId: this.tableId,
       handId: closingHandId,
@@ -5513,10 +5524,14 @@ class PokerTable {
       order.find((i) => toSafeInt(this.seats[i]?.chips, 0) > 0) ?? this.dealerIndex;
     this.dealerIndex = nextDealer;
 
+    // Rebuy publishes state asynchronously; reserve the display gap before
+    // releasing running so those updates cannot trigger an immediate deal.
+    this.nextHandNotBefore = Date.now() + POKER_TIMINGS.NEXT_HAND_DELAY_MS;
     this.running = false;
     this.clearActionScheduling();
     await this.autoRebuyBustedHumans();
     if (manageLifecycle) {
+      this.nextHandNotBefore = Date.now() + POKER_TIMINGS.NEXT_HAND_DELAY_MS;
       await this.broadcastState(true); // reveal at end while round is showdown
       this.setRound("idle");
       this.currentHandId = null;
