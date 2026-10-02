@@ -138,15 +138,25 @@ function matrixHasMultiplier(matrix) {
 }
 
 function generateGrid(rng, { bonus = false, superBonus = false } = {}) {
-  const face = pickMultiplierValue(rng, { bonus, superBonus });
+  let face = pickMultiplierValue(rng, { bonus, superBonus });
+  if (superBonus && face === null) {
+    face = 20;
+  }
+
   const jackpotRoll = rng();
-  const jackpotCount = jackpotRoll < JACKPOT_WIN_PROBABILITY ? 3
-    : jackpotRoll < JACKPOT_APPEARANCE_PROBABILITY ? (rng() < 0.5 ? 1 : 2) : 0;
+  const jackpotCount = bonus
+    ? 0
+    : (jackpotRoll < JACKPOT_WIN_PROBABILITY
+        ? 3
+        : jackpotRoll < JACKPOT_APPEARANCE_PROBABILITY
+            ? (rng() < 0.5 ? 1 : 2)
+            : 0);
+
   const naturalBonus = !bonus && rng() < NATURAL_BONUS_PROBABILITY;
 
   const special = [];
   if (face !== null) special.push(`x${face}`);
-  special.push(...Array(jackpotCount).fill("jackpot"));
+  if (jackpotCount > 0) special.push(...Array(jackpotCount).fill("jackpot"));
   if (naturalBonus) special.push(...Array(4).fill(SCATTER));
 
   const positions = Array.from({ length: REEL_COUNT * ROW_COUNT }, (_, i) => i);
@@ -180,7 +190,7 @@ function tumble(matrix, removedPositions, rng, { bonus = false } = {}) {
   let heads = 0;
   for (let c = 0; c < REEL_COUNT; c++) {
     for (let r = 0; r < ROW_COUNT; r++) {
-      if (matrix[c][r] === SCATTER) heads++;
+      if (isScatter(matrix[c][r])) heads++;
     }
   }
   for (let c = 0; c < REEL_COUNT; c++) {
@@ -191,7 +201,7 @@ function tumble(matrix, removedPositions, rng, { bonus = false } = {}) {
     const incoming = [];
     while (survivors.length + incoming.length < ROW_COUNT) {
       const sym = pickRegularSymbol(rng, bonus, bonus || heads < 3);
-      if (sym === SCATTER) heads++;
+      if (isScatter(sym)) heads++;
       incoming.push(sym);
     }
     refills.push(incoming);

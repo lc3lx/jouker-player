@@ -238,8 +238,9 @@ async function executeSpinInternal(userId, betAmountInput) {
     roundManager.settleRound(round.roundId);
   }
 
+  const bonusTotalWon = isBonusSpin ? roundMoney((bonusSession?.totalWon || 0) + totalWin) : 0;
   if (isBonusSpin) {
-    bonusSession.totalWon = roundMoney((bonusSession.totalWon || 0) + totalWin);
+    bonusSession.totalWon = bonusTotalWon;
     roundManager.consumeBonusSpin(userKey);
   }
 
@@ -259,6 +260,7 @@ async function executeSpinInternal(userId, betAmountInput) {
     isFreeSpin: isBonusSpin,
     bonusSessionId: bonusSession?.sessionId || null,
     freeSpinsRemaining: remainingBonus?.freeSpinsRemaining ?? 0,
+    bonusTotalWon,
     jackpotHit: false,
     jackpotAmount: 0,
     jackpotMeters: meters,
