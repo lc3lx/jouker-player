@@ -669,13 +669,17 @@ class PokerTable {
 
   async acquireActionLock() {
     const ok = await this.lockManager.acquire(this.tableId);
-    if (ok) this.startLockHeartbeat();
+    if (ok) {
+      this._actionLockHeld = true;
+      this.startLockHeartbeat();
+    }
     return ok;
   }
 
   async releaseActionLock() {
     this.stopLockHeartbeat();
     await this.lockManager.release(this.tableId);
+    this._actionLockHeld = false;
   }
 
   /**
@@ -1517,7 +1521,7 @@ class PokerTable {
     const reject = (reason) => ({ status: "rejected", reason, actionId: payload.actionId });
     if (!this.isOwner) return reject("NOT_OWNER");
     if (this.frozen || this.isTournamentTable()) return reject("NOT_CASH_POKER");
-    const locked = await this.acquireActionLockWithin(10000);
+    const locked = await this.acquireActionLockWithin(20000);
     if (!locked) {
       if (payload.expire) {
         const timer = setTimeout(() => void this.handleRebuy(userId, payload), 250);
@@ -1546,7 +1550,13 @@ class PokerTable {
         if (seat.rebuyOffer) seat.rebuyOffer.status = result.status;
       }
       clearTimeout(this.rebuyTimers?.get(String(userId)));
-      await this.broadcastState();
+      // The purchase is already committed. A failed state delivery must not
+      // report a failed purchase (and encourage a different purchase request).
+      try {
+        await this.broadcastState();
+      } catch (error) {
+        logger.warn("poker_rebuy_broadcast_failed", { tableId: this.tableId, reason: error.message });
+      }
     } catch (error) {
       result = reject(error.message);
     } finally {
@@ -2576,7 +2586,8 @@ class PokerTable {
    * Unstick turn timer after app kill / socket drop: enforce overdue timeout or reschedule.
    */
   async resyncTurnAfterReconnect(userId) {
-    if (!this.running || this.frozen) return;
+    if (!this.running || this.frozen || this._actionLockHeld ||
+        !["preflop", "flop", "turn", "river"].includes(this.round)) return;
 
     const actorIdx = this.currentIndex;
     const actor = this.seats[actorIdx];
@@ -2593,7 +2604,7 @@ class PokerTable {
 
     const now = Date.now();
     if (this.actionDeadline != null && this.actionDeadline <= now) {
-      await this.handleTimeout();
+      await this.handleTimeout(actorIdx, this.actionDeadline, this.currentHandId);
       return;
     }
     if (!this.turnTimer && !this.botThinkTimer) {
@@ -3873,20 +3884,23 @@ class PokerTable {
     const ok = await this.auditChipConservation("post_blinds");
     if (!ok) return;
 
+    this._turnTransition = true;
     await this.broadcastState();
     await sleep(POKER_TIMINGS.PREFLOP_DEAL_MS);
     this.scheduleCurrentTurn();
+    await this.broadcastState();
   }
 
   scheduleCurrentTurn() {
     if (!this.isOwner) return; // H-3
+    this._turnTransition = false;
     this.clearActionScheduling();
     if (!this.running) return;
 
     const seat = this.seats[this.currentIndex];
     if (!seat || !seat.inHand || seat.folded || seat.allIn) {
       this.actionDeadline = null;
-      setTimeout(() => this.advance(), 0);
+      setTimeout(() => void this.advanceWithoutActor(), 0);
       return;
     }
 
@@ -3931,21 +3945,48 @@ class PokerTable {
 
     this.actionDeadline = Date.now() + this.turnSeconds * 1000;
     const expectedIndex = this.currentIndex;
+    const expectedDeadline = this.actionDeadline;
+    const expectedHandId = this.currentHandId;
     this.turnTimer = setTimeout(() => {
-      this.handleTimeout(expectedIndex);
+      void this.handleTimeout(expectedIndex, expectedDeadline, expectedHandId);
     }, this.turnSeconds * 1000 + 100);
   }
 
-  async handleTimeout(expectedIndex) {
+  async advanceWithoutActor() {
+    if (!this.isOwner || !this.running || this.frozen) return;
+    if (!await this.acquireActionLock()) {
+      const timer = setTimeout(() => void this.advanceWithoutActor(), 100);
+      timer.unref?.();
+      return;
+    }
+    try {
+      const seat = this.seats[this.currentIndex];
+      if (seat && seat.inHand && !seat.folded && !seat.allIn) return;
+      await this.advance();
+    } catch (error) {
+      logger.error("poker_runout_failed", { tableId: this.tableId, reason: error.message });
+      this.frozen = true;
+      this.frozenReason = "runout";
+      this.clearActionScheduling();
+      await this.broadcastState();
+    } finally {
+      await this.releaseActionLock();
+    }
+  }
+
+  async handleTimeout(expectedIndex, expectedDeadline = this.actionDeadline, expectedHandId = this.currentHandId) {
     const lockAcquired = await this.acquireActionLock();
     if (!lockAcquired) {
       setTimeout(() => {
-        void this.handleTimeout(expectedIndex);
+        void this.handleTimeout(expectedIndex, expectedDeadline, expectedHandId);
       }, 300);
       return;
     }
 
     try {
+      if (!this.isOwner || !this.running || this.frozen ||
+          !["preflop", "flop", "turn", "river"].includes(this.round)) return;
+      if (this.currentHandId !== expectedHandId || this.actionDeadline !== expectedDeadline) return;
       // Guard: if turn already advanced to a different player, skip
       if (expectedIndex !== undefined && this.currentIndex !== expectedIndex) return;
       const s = this.seats[this.currentIndex];
@@ -4364,6 +4405,7 @@ class PokerTable {
   }
 
   async pacedAdvanceAfterAction() {
+    this._turnTransition = true;
     await sleep(POKER_TIMINGS.ACTION_REVEAL_MS);
     await this.advance();
   }
@@ -4417,11 +4459,11 @@ class PokerTable {
       const order = this.seatOrderFrom(this.dealerIndex);
       const start = order[0];
       this.currentIndex = this.nextToActIndex(start);
-      await this.broadcastState();
       if (streetDelay > 0) await sleep(streetDelay);
       const okPost = await this.auditChipConservation(`street_start_${this.round}`);
       if (!okPost) return;
       this.scheduleCurrentTurn();
+      await this.broadcastState();
       return;
     }
 
@@ -4448,8 +4490,8 @@ class PokerTable {
       });
     } catch (_) {}
     // #endregion
-    await this.broadcastState();
     this.scheduleCurrentTurn();
+    await this.broadcastState();
   }
 
   async finishHandByFold() {
@@ -5505,7 +5547,7 @@ class PokerTable {
   getPublicState(forUserId) {
     const turnSeatIndex = this.currentIndex;
     const turnSeat = this.seats[turnSeatIndex];
-    const turnUserId = turnSeat?.userId || null;
+    const turnUserId = this._turnTransition ? null : turnSeat?.userId || null;
     const isActor =
       forUserId != null && turnUserId != null && String(forUserId) === String(turnUserId);
     const rawSpec = isActor ? this.computeTurnActionSpec(turnSeatIndex) : null;
@@ -5597,7 +5639,15 @@ class PokerTable {
    */
   async emitToSeatedSockets(event, payload) {
     const seatedUserIds = new Set(this.seats.map((s) => String(s.userId)));
-    const sockets = await this.nsp.in(`tg:${this.tableId}`).fetchSockets();
+    let sockets;
+    try {
+      sockets = await this.nsp.in(`tg:${this.tableId}`).fetchSockets();
+    } catch (error) {
+      // Presentation delivery is best-effort. The following authoritative
+      // snapshots carry the revealed cards; never abandon settlement here.
+      logger.warn("poker_presentation_delivery_failed", { tableId: this.tableId, event, reason: error.message });
+      return;
+    }
     for (const socket of sockets) {
       const uid = socket.data?.userId ?? socket.userId;
       if (uid != null && seatedUserIds.has(String(uid))) {
@@ -6584,6 +6634,9 @@ function initTableGame(io, options = {}) {
           const m = game.getPublicState(cmd.userId);
           nsp.to(sid).emit("table_state_me", m);
           nsp.to(sid).emit("reconnect_state", m);
+          if (cmd.payload?.actionId && !game._actionLockHeld) {
+            nsp.to(sid).emit("action_result", { status: "reconciled", actionId: cmd.payload.actionId });
+          }
         }
         await game.broadcastState();
         break;
@@ -7102,18 +7155,21 @@ function initTableGame(io, options = {}) {
       );
     });
 
-    socket.on("resync_turn", async ({ tableId }) => {
+    socket.on("resync_turn", async ({ tableId, actionId }) => {
       try {
         if (!tableId) return;
         if (!await security.onEvent(socket.userId, socket.userIp, "resync", 20, 60)) return;
         await ownerRunOrForward(
           String(tableId),
-          { type: "resync", tableId: String(tableId), userId: socket.userId, socketId: socket.id },
+          { type: "resync", tableId: String(tableId), userId: socket.userId, socketId: socket.id, payload: { actionId } },
           async (game) => {
             await game.resyncTurnAfterReconnect(socket.userId);
             const priv = game.getPublicState(socket.userId);
             socket.emit("table_state_me", priv);
             socket.emit("reconnect_state", priv);
+            if (actionId && !game._actionLockHeld) {
+              socket.emit("action_result", { status: "reconciled", actionId });
+            }
             await game.broadcastState();
           }
         );

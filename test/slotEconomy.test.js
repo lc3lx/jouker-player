@@ -7,12 +7,12 @@ const operation = require("../games/utils/slotOperation");
 
 test("specified faces are exact normalized probabilities, independent of stacking or bet", () => {
   for (const folder of ["poseidon", "zenobia", "dice"]) {
-    const c = require(`../games/${folder}/${folder === "dice" ? "DiceEngine.v2" : "constants"}`);
+    const c = require(`../games/${folder}/${folder === "dice" ? "DiceEngine.v2" : folder === "poseidon" ? "constants.v2" : "constants"}`);
     for (const weights of [c.BASE_MULTIPLIER_WEIGHTS, c.BONUS_MULTIPLIER_WEIGHTS]) {
       assert.ok(Math.abs(weights.reduce((a,b) => a+b,0) - 100) < 1e-10);
       for (const [face, percent] of Object.entries(economy.HIGH_PROBABILITIES)) assert.equal(weights[c.MULTIPLIER_VALUES.indexOf(Number(face))], percent);
     }
-    const engine = require(`../games/${folder}/${folder === "dice" ? "DiceEngine.v2" : "spinEngine"}`);
+    const engine = require(`../games/${folder}/${folder === "dice" ? "DiceEngine.v2" : folder === "poseidon" ? "spinEngine.v2" : "spinEngine"}`);
     const counts = new Map(), rng = rngFor(817), draws = 500000;
     for (let n = 0; n < draws; n++) {
       const opts = { bonus: true, superBonus: true, bigAlready: true };
@@ -49,7 +49,7 @@ for (const folder of ["poseidon", "zenobia", "goldenTree"]) {
     const [first, again] = await Promise.all([buy(user, "purchase_00001"), buy(user, "purchase_00001")]);
     assert.deepEqual(first, again);
     assert.equal(first.balance, 1e8 - first.cost);
-    assert.equal(manager.getBonusSession(user).economyVersion, 2);
+    assert.equal(manager.getBonusSession(user).economyVersion, folder === "poseidon" ? 3 : 2);
     const remaining = manager.getBonusSession(user).freeSpinsRemaining;
     const [spin, repeated] = await Promise.all([service.executeSpin(user, 10000, { requestId: "spin_00000001" }), service.executeSpin(user, 10000, { requestId: "spin_00000001" })]);
     assert.deepEqual(spin, repeated);

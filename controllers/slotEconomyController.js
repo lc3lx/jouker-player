@@ -15,13 +15,14 @@ exports.forGame = game => asyncHandler(async (req, res) => {
   }
   const bonusMode = !!bonus, superBonus = !!bonus?.superBonus;
   const zeus = game === "zeus" ? require("../games/dice/DiceEngine") : null;
-  const version = bonus ? bonus.economyVersion || 1 : zeus?.ECONOMY_VERSION || economy.VERSION;
+  const poseidon = game === "poseidon" ? require("../games/poseidon/constants") : null;
+  const version = bonus ? bonus.economyVersion || 1 : zeus?.ECONOMY_VERSION || poseidon?.ECONOMY_VERSION || economy.VERSION;
   const betAmount = Number(bonus?.betAmount || bonus?.lockedBaseBet || req.query.betAmount || 10000);
-  const params = bonusMode || game === "zeus" ? null : edge.calculateEdge({ game, betAmount, userId: null });
-  const scale = zeus && version >= 3 ? 1 : economy.payScale(game, { bonusMode, superBonus, tierName: params?.tierName, economyVersion: version });
+  const params = bonusMode || game === "zeus" || (game === "poseidon" && version >= 3) ? null : edge.calculateEdge({ game, betAmount, userId: null });
+  const scale = (zeus || game === "poseidon") && version >= 3 ? 1 : economy.payScale(game, { bonusMode, superBonus, tierName: params?.tierName, economyVersion: version });
   const folder = game === "golden-tree" ? "goldenTree" : game === "zeus" ? "dice" : game;
   const name = game === "zeus" ? "DiceEngine" : "constants";
-  const suffix = version === 1 ? ".v1" : zeus && version === 2 ? ".v2" : "";
+  const suffix = version === 1 ? ".v1" : (zeus || game === "poseidon") && version === 2 ? ".v2" : "";
   const c = require(`../games/${folder}/${name}${suffix}`);
   const amounts = {};
   for (const [symbol, bands] of Object.entries(c.PAYTABLE)) {
@@ -31,19 +32,23 @@ exports.forGame = game => asyncHandler(async (req, res) => {
       amounts[raw.toFixed(6)] = value * scale;
     });
   }
-  const zeusRules = zeus ? {
-    payoutRows: Object.entries(c.PAYTABLE).map(([symbol, bands]) => ({ symbol: Number(symbol),
-      values: version >= 3 ? [c.PAY_RULES[symbol].start, c.PAY_RULES[symbol].increment] : bands.map(n => n * scale) })),
-    payoutColumns: version >= 3 ? ["8", "additional"] : ["8-9", "10-11", "12+"],
-    ...(version >= 3 ? {
-      multiplierValues: c.MULTIPLIER_VALUES,
-      multiplierProbabilities: { base: c.BASE_MULTIPLIER_WEIGHTS, bonus: c.BONUS_MULTIPLIER_WEIGHTS, super: c.SUPER_MULTIPLIER_WEIGHTS },
-      probabilityUnit: "per_spin", jackpotAppearanceProbability: c.JACKPOT_APPEARANCE_PROBABILITY,
-      jackpotWinProbability: c.JACKPOT_WIN_PROBABILITY, naturalBonusProbability: c.NATURAL_BONUS_PROBABILITY,
+  const rules = (zeus || game === "poseidon") && version >= 3 ? {
+    ...(zeus ? {
+      payoutRows: Object.entries(c.PAYTABLE).map(([symbol, bands]) => ({ symbol: Number(symbol),
+        values: [c.PAY_RULES[symbol].start, c.PAY_RULES[symbol].increment] })),
+      payoutColumns: ["8", "additional"],
     } : {}),
-  } : {};
-  res.json({ status: "success", data: { economyVersion: version, bonusMode, superBonus, bonusRtp: zeus && version >= 3 ? null : economy.BONUS_RTP,
+    multiplierValues: c.MULTIPLIER_VALUES,
+    multiplierProbabilities: { base: c.BASE_MULTIPLIER_WEIGHTS, bonus: c.BONUS_MULTIPLIER_WEIGHTS, super: c.SUPER_MULTIPLIER_WEIGHTS },
+    probabilityUnit: "per_spin", jackpotAppearanceProbability: c.JACKPOT_APPEARANCE_PROBABILITY,
+    jackpotWinProbability: c.JACKPOT_WIN_PROBABILITY, naturalBonusProbability: c.NATURAL_BONUS_PROBABILITY,
+  } : (zeus ? {
+    payoutRows: Object.entries(c.PAYTABLE).map(([symbol, bands]) => ({ symbol: Number(symbol),
+      values: bands.map(n => n * scale) })),
+    payoutColumns: ["8-9", "10-11", "12+"],
+  } : {});
+  res.json({ status: "success", data: { economyVersion: version, bonusMode, superBonus, bonusRtp: (zeus || game === "poseidon") && version >= 3 ? null : economy.BONUS_RTP,
     buyCostMultiplier: c.BUY_BONUS_COST || c.BUY_COST_MULT,
     superBuyCostMultiplier: c.SUPER_BUY_BONUS_COST || c.SUPER_BUY_COST_MULT || null,
-    amounts, ...zeusRules } });
+    amounts, ...rules } });
 });

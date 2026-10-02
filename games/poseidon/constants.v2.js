@@ -17,12 +17,6 @@ const economy = require("../utils/slotEconomy");
  * Re-tune with the seeded sim in test/poseidon.test.js if needed.
  */
 
-const ECONOMY_VERSION = 3;
-const JACKPOT_APPEARANCE_PROBABILITY = 0.18;
-const JACKPOT_WIN_PROBABILITY = 0.0001;
-const NATURAL_BONUS_PROBABILITY = 0.004;
-const JACKPOT_MIN_SYMBOLS = 3;
-
 const REEL_COUNT = 6;
 const ROW_COUNT = 5;
 
@@ -37,7 +31,7 @@ const TRIGGER_RETRIGGER_MIN = 3;
 /** Reel id for the Poseidon-head bonus scatter. */
 const SCATTER = "head";
 /** Visible often enough that 4-of-a-kind is reachable, not a once-a-session ghost. */
-const HEAD_WEIGHT_BASE = 1.0;
+const HEAD_WEIGHT_BASE = 2.4;
 const HEAD_WEIGHT_BONUS = 1.7;
 /** @deprecated use TRIGGER_NATURAL_MIN / TRIGGER_RETRIGGER_MIN */
 const TRIGGER_MIN_MULTIPLIERS = TRIGGER_RETRIGGER_MIN;
@@ -77,14 +71,15 @@ const SYMBOLS = Object.freeze({
  */
 const MULTIPLIER_VALUES = Object.freeze([2, 5, 10, 20, 50, 100, 200, 500, 1000]);
 
-/** Base-game plaque value weights — calibrated with rare 50+ (Zeus v3 clone). */
-const BASE_MULTIPLIER_WEIGHTS = Object.freeze([10, 6, 2.5, 0.8, 0.15, 0.05, 0.02, 0.005, 0.001]);
+/** Base-game plaque value weights — heavily skewed to small faces. */
+const BASE_MULTIPLIER_WEIGHTS = Object.freeze(economy.faceWeights(MULTIPLIER_VALUES, [
+  82, 11, 4.2, 1.6, 0.7, 0.3, 0.12, 0.05, 0.02,
+]));
 
-/** Buy-bonus / free-spins — calibrated weights (Zeus v3 clone). */
-const BONUS_MULTIPLIER_WEIGHTS = Object.freeze([14, 9, 5, 1.8, 0.7, 0.3, 0.12, 0.04, 0.01]);
-
-/** Super buy-bonus multiplier weights (Zeus v3 clone). */
-const SUPER_MULTIPLIER_WEIGHTS = Object.freeze([0, 0, 0, 15, 7, 5, 3, 2, 1]);
+/** Buy-bonus / free-spins — still richer, but x500/x1000 stay rare. */
+const BONUS_MULTIPLIER_WEIGHTS = Object.freeze(economy.faceWeights(MULTIPLIER_VALUES, [
+  62, 16, 10, 5.5, 3, 1.8, 0.9, 0.45, 0.2,
+]));
 
 /**
  * When a mid/big plaque (x20+) is already on screen, further draws retain
@@ -275,12 +270,6 @@ function roundMoney(value) {
 }
 
 module.exports = {
-  ECONOMY_VERSION,
-  JACKPOT_APPEARANCE_PROBABILITY,
-  JACKPOT_WIN_PROBABILITY,
-  NATURAL_BONUS_PROBABILITY,
-  JACKPOT_MIN_SYMBOLS,
-  SUPER_MULTIPLIER_WEIGHTS,
   REEL_COUNT,
   ROW_COUNT,
   BET_MIN,

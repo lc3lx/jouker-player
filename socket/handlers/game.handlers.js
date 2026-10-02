@@ -1369,6 +1369,7 @@ function registerGameHandlers(nsp, jwtVerify) {
         socket.emit("dice_result", {
           ok: true,
           tableId,
+          economyVersion: outcome.economyVersion || fsBefore?.economyVersion || 1,
           grid: outcome.grid,
           initialGrid: outcome.initialGrid,
           finalGrid: outcome.finalGrid,

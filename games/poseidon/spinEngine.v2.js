@@ -1,0 +1,320 @@
+const economy = require("../utils/slotEconomy");
+/**
+ * Poseidon spin engine — generates the drop and resolves the entire tumbling
+ * sequence server-side. The client only replays the presentation.
+ *
+ * Matrix layout: matrix[col][row], row 0 = top. All win amounts here are bet
+ * multiples; poseidonService converts them to coins.
+ */
+
+const crypto = require("crypto");
+const {
+  REEL_COUNT,
+  ROW_COUNT,
+  MIN_MATCH,
+  BASE_WEIGHTS,
+  BONUS_WEIGHTS,
+  PLAQUE_WIN_KEEP,
+  BONUS_CLUSTER_SCALE,
+  PAYING_SYMBOLS,
+  MULTIPLIER_VALUES,
+  BASE_MULTIPLIER_WEIGHTS,
+  BONUS_MULTIPLIER_WEIGHTS,
+  SUPPRESSED_MULTIPLIER_WEIGHTS,
+  BIG_MULTIPLIER_THRESHOLD,
+  SUPER_MULTIPLIER_MIN,
+  isMultiplier,
+  isScatter,
+  multiplierValue,
+} = require("./constants");
+const { findWins, collectMultipliers, collectScatters } = require("./winCalculator");
+
+/** Hard stop — a legit sequence exhausts long before this. */
+const MAX_TUMBLES = 40;
+
+function secureRandom() {
+  // crypto.randomInt range is capped at 2^48 - 1; 2^32 resolution is plenty.
+  return crypto.randomInt(0, 2 ** 32) / 2 ** 32;
+}
+
+function secureRandomInt(maxExclusive) {
+  return crypto.randomInt(0, maxExclusive);
+}
+
+function buildPicker(weightTable, rng) {
+  const entries = [...weightTable];
+  const total = entries.reduce((sum, [, w]) => sum + w, 0);
+  return () => {
+    let roll = rng() * total;
+    for (const [symbol, weight] of entries) {
+      roll -= weight;
+      if (roll < 0) return symbol;
+    }
+    return entries[entries.length - 1][0];
+  };
+}
+
+function pickFromWeights(weights, rng, values = MULTIPLIER_VALUES) {
+  const total = weights.reduce((sum, w) => sum + w, 0);
+  let roll = rng() * total;
+  for (let i = 0; i < weights.length; i += 1) {
+    roll -= weights[i];
+    if (roll < 0) return values[i];
+  }
+  return values[0];
+}
+
+function pickMultiplierValue(rng, opts = {}) {
+  return economy.pickFace(MULTIPLIER_VALUES, opts.bonus ? BONUS_MULTIPLIER_WEIGHTS : BASE_MULTIPLIER_WEIGHTS,
+    { rng, superBonus: opts.superBonus });
+}
+
+function drawCell(pick, rng, opts = {}) {
+  const symbol = pick();
+  if (symbol !== "mult") return symbol;
+  const value = pickMultiplierValue(rng, opts);
+  if (value !== null) return `x${value}`;
+  // A failed super opportunity produces a regular paying symbol, never x0.
+  let regular;
+  do { regular = pick(); } while (regular === "mult" || regular === "jackpot" || regular === "bonus" || regular === "head");
+  return regular;
+}
+
+function countBigMultipliers(matrix) {
+  let n = 0;
+  for (const col of matrix) {
+    for (const cell of col) {
+      if (multiplierValue(cell) >= BIG_MULTIPLIER_THRESHOLD) n += 1;
+    }
+  }
+  return n;
+}
+
+function countBigInCells(cells) {
+  let n = 0;
+  for (const cell of cells) {
+    if (multiplierValue(cell) >= BIG_MULTIPLIER_THRESHOLD) n += 1;
+  }
+  return n;
+}
+
+function matrixHasMultiplier(matrix) {
+  for (const col of matrix) {
+    for (const cell of col) {
+      if (isMultiplier(cell)) return true;
+    }
+  }
+  return false;
+}
+
+function payingCounts(matrix) {
+  const counts = new Map();
+  for (const col of matrix) {
+    for (const cell of col) {
+      if (isMultiplier(cell) || isScatter(cell) || cell === "jackpot") continue;
+      counts.set(cell, (counts.get(cell) || 0) + 1);
+    }
+  }
+  return counts;
+}
+
+/** Paying symbol that can take one more copy without reaching a win. */
+function safeReplacement(counts, avoid) {
+  let best = null;
+  let bestN = Infinity;
+  for (const symbol of PAYING_SYMBOLS) {
+    if (symbol === avoid) continue;
+    const n = counts.get(symbol) || 0;
+    if (n >= MIN_MATCH - 1) continue;
+    if (n < bestN) {
+      best = symbol;
+      bestN = n;
+    }
+  }
+  return best;
+}
+
+/**
+ * Plaques stay on screen. When one is visible, most would-be wins are broken
+ * by swapping newly dealt paying symbols down below MIN_MATCH. Survivor cells
+ * from a tumble are left alone so refill lists still rebuild the column.
+ * [mutableRows] is how many top cells of each column may change.
+ */
+function softenPlaqueWins(matrix, mutableRows, rng, refills = null, bonusMode = false, edgeParams = null) {
+  // Bought spins must be allowed to pay. Stripping them made a 10-spin
+  // purchase feel empty.
+  if (bonusMode) return;
+  if (!matrixHasMultiplier(matrix)) return;
+  const keepProbability = edgeParams?.plaqueWinKeep != null ? edgeParams.plaqueWinKeep : PLAQUE_WIN_KEEP;
+  if (rng() < keepProbability) return;
+
+  for (let guard = 0; guard < 8; guard += 1) {
+    const wins = findWins(matrix);
+    if (wins.length === 0) return;
+    const counts = payingCounts(matrix);
+    let progressed = false;
+
+    for (const win of wins) {
+      let extra = (counts.get(win.symbol) || 0) - (MIN_MATCH - 1);
+      if (extra <= 0) continue;
+      for (let col = 0; col < REEL_COUNT && extra > 0; col += 1) {
+        const limit = mutableRows[col] || 0;
+        for (let row = 0; row < limit && extra > 0; row += 1) {
+          if (matrix[col][row] !== win.symbol) continue;
+          const replacement = safeReplacement(counts, win.symbol);
+          if (!replacement) return;
+          counts.set(win.symbol, (counts.get(win.symbol) || 1) - 1);
+          counts.set(replacement, (counts.get(replacement) || 0) + 1);
+          matrix[col][row] = replacement;
+          if (refills && refills[col]) refills[col][row] = replacement;
+          extra -= 1;
+          progressed = true;
+        }
+      }
+    }
+    if (!progressed) return;
+  }
+}
+
+function generateGrid(pick, rng, { bonus = false, superBonus = false, edgeParams = null } = {}) {
+  const matrix = [];
+  let bigAlready = 0;
+  for (let col = 0; col < REEL_COUNT; col += 1) {
+    const column = [];
+    for (let row = 0; row < ROW_COUNT; row += 1) {
+      const cell = drawCell(pick, rng, {
+        bonus,
+        superBonus,
+        bigAlready: bigAlready > 0,
+        edgeParams,
+      });
+      if (multiplierValue(cell) >= BIG_MULTIPLIER_THRESHOLD) bigAlready += 1;
+      column.push(cell);
+    }
+    matrix.push(column);
+  }
+  return matrix;
+}
+
+/**
+ * Remove the given positions, slide survivors down, refill from the top.
+ * Returns { matrix, refills } where refills[col] lists new symbols top-down.
+ */
+function tumble(matrix, removedPositions, pick, rng, { bonus = false, superBonus = false, edgeParams = null } = {}) {
+  const removed = new Set(removedPositions.map(([c, r]) => `${c}:${r}`));
+  const next = [];
+  const refills = [];
+  // Count big plaques that survive the tumble before any refill.
+  let bigSurvivors = 0;
+  for (let col = 0; col < REEL_COUNT; col += 1) {
+    for (let row = 0; row < ROW_COUNT; row += 1) {
+      if (removed.has(`${col}:${row}`)) continue;
+      if (multiplierValue(matrix[col][row]) >= BIG_MULTIPLIER_THRESHOLD) {
+        bigSurvivors += 1;
+      }
+    }
+  }
+
+  let bigSoFar = bigSurvivors;
+  for (let col = 0; col < REEL_COUNT; col += 1) {
+    const survivors = [];
+    for (let row = 0; row < ROW_COUNT; row += 1) {
+      if (!removed.has(`${col}:${row}`)) survivors.push(matrix[col][row]);
+    }
+    const incoming = [];
+    while (survivors.length + incoming.length < ROW_COUNT) {
+      const cell = drawCell(pick, rng, {
+        bonus,
+        superBonus,
+        bigAlready: bigSoFar > 0,
+        edgeParams,
+      });
+      if (multiplierValue(cell) >= BIG_MULTIPLIER_THRESHOLD) bigSoFar += 1;
+      incoming.push(cell);
+    }
+    refills.push(incoming);
+    next.push([...incoming, ...survivors]);
+  }
+  return { matrix: next, refills };
+}
+
+/**
+ * Resolve one full spin.
+ *
+ * Returns bet-multiple amounts:
+ * {
+ *   initialMatrix, finalMatrix,
+ *   steps: [{ wins, stepWin, removedPositions, refills, matrixAfter }],
+ *   baseWin,          // sum of tumble step wins, before any multiplier
+ *   multipliers,      // plaques on the final screen [{col,row,value}]
+ *   multiplierSum,
+ * }
+ */
+function resolveSpin({ bonusMode = false, superBonus = false, rng = secureRandom, edgeParams = null, economyVersion = economy.VERSION, payScale = null } = {}) {
+  if (economyVersion === 1) return require("./spinEngine.v1").resolveSpin({ bonusMode, superBonus, rng, edgeParams });
+  if (bonusMode) edgeParams = null;
+  const scale = payScale ?? economy.payScale("poseidon", { bonusMode, superBonus, tierName: edgeParams?.tierName });
+  let weights = bonusMode ? BONUS_WEIGHTS : BASE_WEIGHTS;
+  if (edgeParams?.modulateSymbolWeights) {
+    weights = edgeParams.modulateSymbolWeights(weights);
+  }
+  const pick = buildPicker(weights, rng);
+  const drawOpts = { bonus: bonusMode, superBonus: !!superBonus && bonusMode, edgeParams };
+
+  let matrix = generateGrid(pick, rng, drawOpts);
+  softenPlaqueWins(matrix, Array(REEL_COUNT).fill(ROW_COUNT), rng, null, bonusMode, edgeParams);
+  const initialMatrix = matrix.map((col) => [...col]);
+
+  const steps = [];
+  let baseWin = 0;
+  for (let i = 0; i < MAX_TUMBLES; i += 1) {
+    const wins = findWins(matrix).map(w => ({ ...w, payout: w.payout * scale }));
+    if (wins.length === 0) break;
+
+    const stepWin = wins.reduce((sum, w) => sum + w.payout, 0);
+    baseWin += stepWin;
+    const removedPositions = wins.flatMap((w) => w.positions);
+    const result = tumble(matrix, removedPositions, pick, rng, drawOpts);
+    softenPlaqueWins(
+      result.matrix,
+      result.refills.map((col) => col.length),
+      rng,
+      result.refills,
+      bonusMode,
+      edgeParams
+    );
+    matrix = result.matrix;
+
+    steps.push({
+      wins,
+      stepWin,
+      removedPositions,
+      refills: result.refills,
+      matrixAfter: matrix.map((col) => [...col]),
+    });
+  }
+
+  const multipliers = collectMultipliers(matrix);
+  const scatters = collectScatters(matrix);
+  return {
+    initialMatrix,
+    finalMatrix: matrix,
+    steps,
+    baseWin,
+    multipliers,
+    multiplierSum: multipliers.reduce((sum, m) => sum + m.value, 0),
+    scatters,
+    scatterCount: scatters.length,
+  };
+}
+
+module.exports = {
+  resolveSpin,
+  generateGrid,
+  tumble,
+  pickMultiplierValue,
+  secureRandom,
+  secureRandomInt,
+  countBigMultipliers,
+  countBigInCells,
+};

@@ -169,7 +169,7 @@ function createBonusSession(userId, {
   betAmount,
   freeSpins = FREE_SPINS_NATURAL,
   superBonus = false,
-  economyVersion = 2,
+  economyVersion = 3,
 }) {
   const session = {
     sessionId: uuidv4(),

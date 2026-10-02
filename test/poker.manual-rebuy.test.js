@@ -142,6 +142,20 @@ test("rebuy during another hand waits for the next deal and preserves settlement
   assert.equal(canBeDealtIntoHand(g.seats[0]), true);
 });
 
+test("committed rebuy stays accepted when its state broadcast fails", async (t) => {
+  const f = await fixture();
+  const offer = await offerRebuy(f.tableId, f.userId);
+  const req = { offerId: offer.offerId, actionId: "delivery-failure", amount: 650877 };
+  const mongo = await Table.findById(f.tableId).lean();
+  const g = new PokerTable({ in: () => ({ fetchSockets: async () => [] }) }, mongo);
+  t.after(() => g.disposeTimers());
+  g.running = true; g.round = "flop";
+  g.broadcastState = async () => { throw new Error("network timeout"); };
+  assert.equal((await g.handleRebuy(String(f.userId), req)).status, "accepted");
+  assert.equal((await g.handleRebuy(String(f.userId), req)).duplicate, true);
+  assert.equal((await Wallet.findOne({ user: f.userId })).balance, 2000000 - 650877);
+});
+
 test("concurrent rebuy and ordinary cash-out conserve all wallet funds", async () => {
   const { permanentLeavePokerTable } = require("../services/pokerVacateService");
   const f = await fixture(); const req = await request(f, 1000000);

@@ -104,13 +104,22 @@ test("winTierFor maps bet multiples to banners", () => {
 
 // --- multiplier value weights -------------------------------------------------
 
-test("specified high faces keep the same probability in base, bonus and stacked draws", () => {
-  for (const opts of [{}, { bonus: true }, { bigAlready: true }, { bonus: true, bigAlready: true }]) {
-    const rng = mulberry32(2024), counts = {};
-    for (let i = 0; i < 200000; i++) { const v = pickMultiplierValue(rng, opts); counts[v] = (counts[v] || 0) + 1; }
-    for (const [face, p] of [[20,.1],[50,.05],[100,.02],[200,.01],[500,.005],[1000,.001]]) {
-      assert.ok(Math.abs((counts[face] || 0) / 200000 - p) < .002, `face ${face}`);
+test("calibrated multiplier probabilities follow Zeus cloned rules (rare 50+)", () => {
+  const modes = [
+    { name: "base", bonus: false, superBonus: false, weights: [10, 6, 2.5, 0.8, 0.15, 0.05, 0.02, 0.005, 0.001] },
+    { name: "bonus", bonus: true, superBonus: false, weights: [14, 9, 5, 1.8, 0.7, 0.3, 0.12, 0.04, 0.01] },
+    { name: "super", bonus: true, superBonus: true, weights: [0, 0, 0, 15, 7, 5, 3, 2, 1] },
+  ];
+  for (const mode of modes) {
+    const counts = new Map(), draws = 100000;
+    for (let i = 0; i < draws; i++) {
+      const face = pickMultiplierValue(() => (i + 0.5) / draws, { ...mode, bigAlready: true });
+      counts.set(face, (counts.get(face) || 0) + 1);
     }
+    for (const [i, face] of MULTIPLIER_VALUES.entries()) {
+      assert.equal(counts.get(face) || 0, Math.round(mode.weights[i] * 1000));
+    }
+    assert.equal(counts.get(null), Math.round((100 - mode.weights.reduce((a, b) => a + b, 0)) * 1000));
   }
 });
 

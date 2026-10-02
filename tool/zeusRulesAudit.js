@@ -51,7 +51,7 @@ function measure({ mode, bet = 10000, version = 3, rounds = 10000, seeds = [11, 
   return { game: "zeus", mode, version, bet, sessions: n, completedSessions: n, spins,
     rtp: mean, slotRtp: slots / n, jackpotRtp: jackpot / n, ci95: [mean - halfWidth, mean + halfWidth],
     jackpotTriggers: triggers, capSessions, bigWinRate: bigSessions / n, maxWinX: maximum,
-    jackpotMethod: "equally likely first-triple tier from production prize multipliers", targetRtp: version === 3 ? null : 0.46 };
+    jackpotMethod: "equally likely first-triple tier from production prize multipliers", targetRtp: version === 3 ? null : mode === "base" ? 0.965 : 0.46 };
 }
 function main() {
   const arg = (name, fallback) => process.argv.find(a => a.startsWith(`--${name}=`))?.split("=")[1] || fallback;
