@@ -1518,9 +1518,13 @@ class PokerTable {
   }
 
   async handleRebuy(userId, payload = {}) {
-    const reject = (reason) => ({ status: "rejected", reason, actionId: payload.actionId });
+    const reject = (reason) => {
+      logger.warn("poker_rebuy_rejected", { tableId: this.tableId, reason });
+      return { status: "rejected", reason, actionId: payload.actionId };
+    };
     if (!this.isOwner) return reject("NOT_OWNER");
-    if (this.frozen || this.isTournamentTable()) return reject("NOT_CASH_POKER");
+    if (this.frozen) return reject("TABLE_UNAVAILABLE");
+    if (this.isTournamentTable()) return reject("NOT_CASH_POKER");
     const locked = await this.acquireActionLockWithin(20000);
     if (!locked) {
       if (payload.expire) {
