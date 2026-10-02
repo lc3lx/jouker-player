@@ -16,9 +16,9 @@ const MULTIPLIER = 8;
 const MULTIPLIER_VALUES = [2, 5, 10, 20, 50, 100, 200, 500, 1000];
 /** Scatter jackpot — 3+ on finalGrid opens the match-3 scratch round. */
 const JACKPOT = REGULAR_SYMBOLS + MULTIPLIER_VALUES.length; // 17
-const JACKPOT_APPEARANCE_PROBABILITY = 0.20;
-const JACKPOT_WIN_PROBABILITY = 0.02;
-const NATURAL_BONUS_PROBABILITY = 0.05;
+const JACKPOT_APPEARANCE_PROBABILITY = 0.18;
+const JACKPOT_WIN_PROBABILITY = 0.0001;
+const NATURAL_BONUS_PROBABILITY = 0.004;
 const JACKPOT_MIN_SYMBOLS = 3;
 // Kept as the bonus counter name. The character head (not multiplier plaques)
 // is the free-spins scatter: 4 in the base game, 3 during free spins.
@@ -70,8 +70,8 @@ const FREESPIN_WEIGHTS = [
 ];
 // Absolute percentages PER SPIN, not per cell or conditional on winning.
 // The joint x2/x5 allowance is divided equally. Remaining mass means no plaque.
-const BASE_MULTIPLIER_WEIGHTS = Object.freeze([7.5, 7.5, 7, 5, 4, 3, 1, .05, .01]);
-const BONUS_MULTIPLIER_WEIGHTS = Object.freeze([12.5, 12.5, 10, 10, 5, 4, 2, 1, .5]);
+const BASE_MULTIPLIER_WEIGHTS = Object.freeze([10, 6, 2.5, 0.8, 0.15, 0.05, 0.02, 0.005, 0.001]);
+const BONUS_MULTIPLIER_WEIGHTS = Object.freeze([14, 9, 5, 1.8, 0.7, 0.3, 0.12, 0.04, 0.01]);
 const SUPER_MULTIPLIER_WEIGHTS = Object.freeze([0, 0, 0, 15, 7, 5, 3, 2, 1]);
 // Pay exactly the published per-symbol formula in every mode.
 const BASE_PAY_SCALE = 1;

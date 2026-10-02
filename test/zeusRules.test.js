@@ -19,9 +19,9 @@ test("each symbol pays the requested formula from 8 through 30, at multiple stak
 });
 
 const modes = [
-  { name: "base", bonus: false, superBonus: false, weights: [7.5,7.5,7,5,4,3,1,.05,.01] },
-  { name: "bonus", bonus: true, superBonus: false, weights: [12.5,12.5,10,10,5,4,2,1,.5] },
-  { name: "super", bonus: true, superBonus: true, weights: [0,0,0,15,7,5,3,2,1] },
+  { name: "base", bonus: false, superBonus: false, weights: [10, 6, 2.5, 0.8, 0.15, 0.05, 0.02, 0.005, 0.001] },
+  { name: "bonus", bonus: true, superBonus: false, weights: [14, 9, 5, 1.8, 0.7, 0.3, 0.12, 0.04, 0.01] },
+  { name: "super", bonus: true, superBonus: true, weights: [0, 0, 0, 15, 7, 5, 3, 2, 1] },
 ];
 for (const mode of modes) {
   test(`${mode.name}: complete unit interval gives the exact specified per-spin probabilities`, () => {
@@ -30,7 +30,7 @@ for (const mode of modes) {
       const face = e.pickMultiplierValue(() => (i + 0.5) / draws, "high", { ...mode, bigAlready: true });
       counts.set(face, (counts.get(face) || 0) + 1);
     }
-    for (const [i, face] of e.MULTIPLIER_VALUES.entries()) assert.equal(counts.get(face) || 0, mode.weights[i] * 1000);
+    for (const [i, face] of e.MULTIPLIER_VALUES.entries()) assert.equal(counts.get(face) || 0, Math.round(mode.weights[i] * 1000));
     assert.equal(counts.get(null), Math.round((100 - mode.weights.reduce((a,b) => a+b,0)) * 1000));
   });
   test(`${mode.name}: full spins and cascades retain the sampled plaque/jackpot rates`, () => {
@@ -54,8 +54,8 @@ for (const mode of modes) {
     }
     const near = (observed, p) => assert.ok(Math.abs(observed / draws - p) <= 6 * Math.sqrt(p * (1-p) / draws) + 1/draws);
     mode.weights.forEach((p,i) => near(counts.get(e.MULTIPLIER_VALUES[i]) || 0, p / 100));
-    near(appearances, .20); near(jackpots, .02);
-    if (!mode.bonus) near(natural, .05); else assert.equal(natural, 0);
+    near(appearances, .18); near(jackpots, .0001);
+    if (!mode.bonus) near(natural, .004); else assert.equal(natural, 0);
   });
 }
 
