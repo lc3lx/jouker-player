@@ -96,13 +96,21 @@ exports.kick = asyncHandler(async (req, res) => {
     if (!pokerTable.seats.some((seat) => String(seat.user) === String(targetUserId))) {
       throw new ApiError("Player is not seated at this table", 404);
     }
-    // A live Poker hand owns the authoritative chip totals in memory. Use the
-    // standard deferred leave flow so a player is only refunded post-settlement.
-    const { markPendingPermanentLeave, scheduleDeferredPermanentLeave } = require("./pokerVacateService");
+    const { permanentLeavePokerTable } = require("./pokerVacateService");
     const { requestLivePokerLeave } = require("../sockets/pokerTableGameBridge");
-    await markPendingPermanentLeave({ tableId: id, userId: targetUserId });
-    await requestLivePokerLeave(String(id), targetUserId);
-    scheduleDeferredPermanentLeave({ tableId: id, userId: targetUserId });
+    let engineRes = null;
+    try {
+      engineRes = await requestLivePokerLeave(String(id), targetUserId);
+    } catch (_) {}
+
+    const result = await permanentLeavePokerTable({
+      tableId: id,
+      userId: targetUserId,
+      force: true,
+      uncommittedChips: engineRes?.uncommittedChips,
+      forfeitedBet: engineRes?.forfeitedBet,
+    });
+
     try {
       const { getMainIo } = require("../utils/lobbyRealtime");
       const tableNsp = getMainIo()?.of("/table-game");
@@ -115,12 +123,16 @@ exports.kick = asyncHandler(async (req, res) => {
         }
       }
     } catch (_) {
-      // The durable leave has already been recorded; notification is best effort.
+      // The leave has already been recorded; notification is best effort.
     }
-    emitTablesUpdated({ reason: "vip_kick_requested", tableId: String(id) });
-    return res.status(202).json({
+    emitTablesUpdated({ reason: "vip_kick", tableId: String(id) });
+    return res.status(200).json({
       status: "success",
-      message: "Player removal requested; cash-out completes after any active hand settles",
+      message: "Player kicked successfully",
+      data: {
+        cashedOut: result.cashedOut,
+        forfeitedBet: result.forfeitedBet || 0,
+      },
     });
   }
 

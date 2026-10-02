@@ -29,6 +29,7 @@ const ROW_COUNT = 5;
 const BET_MIN = 10000;
 const BET_MAX = 1000000000;
 const MAX_WIN_MULTIPLIER = 5000;
+const MIN_MATCH = 8;
 
 /** 4+ character-head scatters in the base game trigger free spins. */
 const TRIGGER_NATURAL_MIN = 4;
@@ -154,24 +155,38 @@ const PAYING_SYMBOLS = Object.freeze([
 ]);
 
 /**
- * Anywhere-pays paytable in bet multiples.
- * Bands: 8–9 matches / 10–11 matches / 12+ matches.
- * Ranking: crown > fish > pearl > starfish > coral > letters.
- * Re-derive every band with `node tool/atlantisRtp.js` after any rule change —
- * raising MIN_MATCH from 7 to 8 cut the old values' return by more than half.
+ * Anywhere-pays pay rules and paytable in bet multiples (Zeus v3 clone).
+ * Payout increases for every matching symbol above 8.
+ * Ranking: crown > fish > pearl > starfish > coral > letters (A, E, N, S).
  */
-const LETTER_PAYS = Object.freeze([2.12, 2.45, 3.2]);
-const PAYTABLE = Object.freeze({
-  [SYMBOLS.CROWN]: [4.25, 7.4, 10.5],
-  [SYMBOLS.FISH]: [3.6, 5.9, 8.85],
-  [SYMBOLS.PEARL]: [3.2, 4.9, 7.4],
-  [SYMBOLS.STARFISH]: [2.73, 3.9, 5.9],
-  [SYMBOLS.CORAL]: [2.45, 3.2, 4.6],
-  [SYMBOLS.A]: LETTER_PAYS,
-  [SYMBOLS.E]: LETTER_PAYS,
-  [SYMBOLS.N]: LETTER_PAYS,
-  [SYMBOLS.S]: LETTER_PAYS,
+const PAY_RULES = Object.freeze({
+  [SYMBOLS.A]: Object.freeze({ start: 0.8, increment: 0.1 }),
+  [SYMBOLS.E]: Object.freeze({ start: 0.8, increment: 0.1 }),
+  [SYMBOLS.N]: Object.freeze({ start: 0.8, increment: 0.1 }),
+  [SYMBOLS.S]: Object.freeze({ start: 0.8, increment: 0.1 }),
+  [SYMBOLS.CORAL]: Object.freeze({ start: 1.1, increment: 0.2 }),
+  [SYMBOLS.STARFISH]: Object.freeze({ start: 1.2, increment: 0.25 }),
+  [SYMBOLS.PEARL]: Object.freeze({ start: 1.4, increment: 0.35 }),
+  [SYMBOLS.FISH]: Object.freeze({ start: 1.6, increment: 0.4 }),
+  [SYMBOLS.CROWN]: Object.freeze({ start: 2.0, increment: 0.5 }),
 });
+
+function payoutFor(symbol, count) {
+  const rule = PAY_RULES[symbol];
+  if (!rule || !Number.isInteger(count) || count < MIN_MATCH) return 0;
+  return Math.round((rule.start + (count - MIN_MATCH) * rule.increment) * 10000) / 10000;
+}
+
+const PAYTABLE = Object.freeze(Object.fromEntries(
+  Object.keys(PAY_RULES).map(symbol => [
+    symbol,
+    Object.freeze([
+      payoutFor(symbol, 8),
+      payoutFor(symbol, 10),
+      payoutFor(symbol, 12),
+    ]),
+  ])
+));
 
 /**
  * Per-cell draw weights. Independent weighted draws per cell (not physical
@@ -230,8 +245,6 @@ const WIN_TIERS = Object.freeze([
   ["super", 25],
 ]);
 
-const MIN_MATCH = 8;
-
 function isScatter(cell) {
   return cell === SCATTER;
 }
@@ -244,14 +257,6 @@ function multiplierValue(cell) {
   return isMultiplier(cell) ? Number(cell.slice(1)) : 0;
 }
 
-function payoutFor(symbol, count) {
-  const bands = PAYTABLE[symbol];
-  if (!bands || count < MIN_MATCH) return 0;
-  const raw = count >= 12 ? bands[2] : count >= 10 ? bands[1] : bands[0];
-  // Letters land a bit more often now, so each cluster pays slightly less
-  // and the base game stays near a fair return.
-  return Math.round(raw * 0.78 * 1000) / 1000;
-}
 
 /** Bought spins pay a smaller cluster; the plaque bank is the bonus.
  *  Uncapped plaque sums need a smaller cluster or a ×100 snowballs the buy. */
@@ -310,6 +315,7 @@ module.exports = {
   appliedMultiplierFor,
   resolvePayoutMultiplier,
   PAYING_SYMBOLS,
+  PAY_RULES,
   PAYTABLE,
   BASE_WEIGHTS,
   BONUS_WEIGHTS,

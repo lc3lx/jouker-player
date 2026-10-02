@@ -2632,106 +2632,113 @@ class PokerTable {
    * Explicit exit / expired reconnect grace: fold now (bet stays in pot),
    * cash out only after the hand is idle so Mongo seat.chips no longer includes
    * chips committed to the pot.
+  /**
+   * Immediate player exit: folds hand if in-progress (forfeiting any bet in pot),
+   * returns uncommitted chips, and replaces the human chair with a bot immediately.
    */
-  async abandonHumanSeat(userId) {
+  async leavePlayerImmediately(userId) {
+    if (!this.isOwner) return null;
     const uid = String(userId);
-    if (!this._abandonFoldRetries) this._abandonFoldRetries = new Map();
+    this.clearReconnectTimer(uid);
+    this.clearVacateTimer(uid);
+    this.pendingVacates.delete(uid);
 
-    const lockAcquired = await this.acquireActionLock();
+    const lockAcquired = await this.acquireActionLockWithin(10000);
     if (!lockAcquired) {
-      // Do not touch Mongo cash-out without the fold applied.
-      try {
-        const { markPendingPermanentLeave, scheduleDeferredPermanentLeave } = require("../services/pokerVacateService");
-        await markPendingPermanentLeave({ tableId: this.tableId, userId: uid });
-        scheduleDeferredPermanentLeave({ tableId: this.tableId, userId: uid });
-      } catch (err) {
-        logger.warn("poker_abandon_pending_mark_failed", {
-          tableId: this.tableId,
-          userId: uid,
-          reason: err?.message || "unknown",
-        });
-      }
-      const retries = this._abandonFoldRetries.get(uid) || 0;
-      if (retries < 20) {
-        this._abandonFoldRetries.set(uid, retries + 1);
-        const t = setTimeout(() => void this.abandonHumanSeat(uid), 250);
-        if (typeof t.unref === "function") t.unref();
-      }
-      return;
+      logger.warn("poker_immediate_leave_lock_failed", { tableId: this.tableId, userId: uid });
+      return null;
     }
 
     try {
-      const i = this.findSeatIndexByUser(uid);
-      if (i >= 0) {
-        const s = this.seats[i];
-        if (s && !s.isBot && s.inHand && this.running && !s.folded && !s.allIn) {
-          this.applyFold(i);
-          this.recordSeatAction(i, "disconnect_fold");
-          this.appendHandAction({ type: "disconnect_fold", seatIndex: i, playerId: s.userId });
-          if (this.currentIndex === i || this.aliveCount() <= 1) {
-            await this.advance();
-          }
-        }
-        if (s) s.playerState = PLAYER_STATE.LEAVE_PENDING;
+      const idx = this.findSeatIndexByUser(uid);
+      if (idx < 0) return null;
+      const seat = this.seats[idx];
+      if (seat.isBot) return null;
+
+      // 1. If in-hand, fold immediately. The bet remains in the pot ("خسر الرهان يلي كان مرهنو")
+      if (seat.inHand && this.running && !seat.folded && !seat.allIn) {
+        this.applyFold(idx);
+        this.recordSeatAction(idx, "leave_fold");
+        this.appendHandAction({ type: "leave_fold", seatIndex: idx, playerId: seat.userId });
       }
+
+      const uncommittedChips = Math.max(0, toSafeInt(seat.chips, 0));
+      const forfeitedBet = Math.max(0, toSafeInt(seat.invested, 0));
+      const chair = seat.seatPosition;
+
+      // Adjust hand baseline for the removed human chips
+      this.adjustHandBaselineForSeat(uncommittedChips, -1);
+
+      // 2. Put a bot in their place ("بتخلي مكانو بوت") if bots are enabled
+      let bot = null;
+      if (this.botsEnabled) {
+        bot = this.createBotSeat(chair);
+        bot.chips = this.botBuyIn;
+        bot.invested = seat.invested || 0;
+        bot.bet = seat.bet || 0;
+        bot.inHand = false;
+        bot.folded = true;
+        this.adjustHandBaselineForSeat(bot.chips, 1);
+        this.seats[idx] = bot;
+      } else {
+        this.seats.splice(idx, 1);
+        this.reindexSeatsByPosition();
+      }
+
+      // 3. Advance turn if needed
+      if (this.currentIndex === idx || this.aliveCount() <= 1) {
+        await this.advance();
+      }
+
+      // 4. Check if any humans remain at the table
+      if (this.seatedHumanCount() < 1) {
+        this.clearActionScheduling();
+        this.clearNextHandTimer();
+        this.clearWaitForPlayersTimer();
+        this.clearBotFillTimer();
+        this.running = false;
+        this.starting = false;
+        this.round = "idle";
+        this.seats = [];
+        this.dealerIndex = 0;
+        this.pot = 0;
+        this.currentBet = 0;
+        this.currentHandId = null;
+        this.currentHandActions = [];
+        this.processedActionIds = new Set();
+      }
+
+      await this.broadcastState();
+
+      return {
+        uncommittedChips,
+        forfeitedBet,
+        chair,
+        replacedWithBot: !!bot,
+      };
     } finally {
       await this.releaseActionLock();
     }
+  }
 
-    this._abandonFoldRetries.delete(uid);
+  /**
+   * Explicit exit / expired reconnect grace: fold immediately (bet stays in pot),
+   * return uncommitted stack, replace with bot.
+   */
+  async abandonHumanSeat(userId) {
+    const uid = String(userId);
+    this._abandonFoldRetries?.delete(uid);
 
     try {
-      const {
-        markPendingPermanentLeave,
-        scheduleDeferredPermanentLeave,
-        permanentLeavePokerTable,
-      } = require("../services/pokerVacateService");
-      await markPendingPermanentLeave({ tableId: this.tableId, userId: uid });
-      const currentSeat = this.seats[this.findSeatIndexByUser(uid)];
-      if (currentSeat) currentSeat.playerState = PLAYER_STATE.LEAVE_PENDING;
-      const expiredRebuySeat = currentSeat && !currentSeat.inHand && currentSeat.chips === 0 &&
-        ["expired", "cancelled"].includes(currentSeat.rebuyOffer?.status);
-      const midHand = this.running === true && String(this.round || "idle") !== "idle" && !expiredRebuySeat;
-      // Never force mid-hand: Mongo seat.chips still holds the pre-pot stack.
-      // Pass liveHandInProgress from this owner engine so stale status:"playing"
-      // between hands cannot block an idle cash-out.
-      const res = await permanentLeavePokerTable({
+      const leaveRes = await this.leavePlayerImmediately(uid);
+      const { permanentLeavePokerTable } = require("../services/pokerVacateService");
+      await permanentLeavePokerTable({
         tableId: this.tableId,
         userId: uid,
-        force: false,
-        liveHandInProgress: midHand,
+        force: true,
+        uncommittedChips: leaveRes?.uncommittedChips,
+        forfeitedBet: leaveRes?.forfeitedBet,
       });
-      if (
-        !res.left &&
-        (res.reason === "HAND_IN_PROGRESS" || res.reason === "SETTLEMENT_IN_PROGRESS")
-      ) {
-        scheduleDeferredPermanentLeave({ tableId: this.tableId, userId: uid });
-      }
-      if (res.left) {
-        const removalLocked = await this.acquireActionLockWithin(10000);
-        if (removalLocked) {
-          try {
-            const roleIds = {
-              dealerIndex: this.seats[this.dealerIndex]?.userId,
-              currentIndex: this.seats[this.currentIndex]?.userId,
-              sbSeatIndex: this.seats[this.sbSeatIndex]?.userId,
-              bbSeatIndex: this.seats[this.bbSeatIndex]?.userId,
-            };
-            const gone = this.findSeatIndexByUser(uid);
-            if (gone >= 0) {
-              this.seats.splice(gone, 1);
-              this.reindexSeatsByPosition();
-              if (this.running) {
-                for (const [key, roleUid] of Object.entries(roleIds)) {
-                  if (roleUid != null && roleUid !== uid) this[key] = this.findSeatIndexByUser(roleUid);
-                }
-              }
-              void this.notifySeatOpened();
-            }
-            if (this.seatedHumanCount() >= 1 && !this.running) this.addBotsForMissingSeats();
-          } finally { await this.releaseActionLock(); }
-        }
-      }
       await this.broadcastState();
     } catch (err) {
       logger.warn("poker_abandon_seat_failed", {
@@ -2743,37 +2750,10 @@ class PokerTable {
   }
 
   /**
-   * Voluntary leave during a hand folds the player but defers their cash-out
-   * until settlement. This prevents a pre-settlement seat balance from being
-   * returned while chips are still committed to the pot.
+   * Voluntary leave: immediate fold, bot seat replacement, uncommitted cash-out.
    */
   async requestPlayerLeave(userId) {
-    const uid = String(userId);
-    const lockAcquired = await this.acquireActionLock();
-    if (!lockAcquired) return false;
-    try {
-      const idx = this.findSeatIndexByUser(uid);
-      if (idx < 0) return false;
-      const seat = this.seats[idx];
-      if (seat.isBot) return false;
-      this.clearReconnectTimer(uid);
-      seat.disconnectedAt = null;
-      seat.reconnectDeadline = null;
-      seat.playerState = PLAYER_STATE.LEAVE_PENDING;
-      if (seat.inHand && this.running && !seat.folded && !seat.allIn) {
-        this.applyFold(idx);
-        this.recordSeatAction(idx, "leave_fold");
-        this.appendHandAction({ type: "leave_fold", seatIndex: idx, playerId: seat.userId });
-        if (this.currentIndex === idx || this.aliveCount() <= 1) {
-          await this.advance();
-          return true;
-        }
-      }
-      await this.broadcastState();
-      return true;
-    } finally {
-      await this.releaseActionLock();
-    }
+    return this.leavePlayerImmediately(userId);
   }
 
   assertChipConservation(context) {
@@ -2792,11 +2772,13 @@ class PokerTable {
     return auditOrFreeze(this, context);
   }
 
-  createBotSeat() {
+  createBotSeat(chairOverride = null) {
     this.botSerial += 1;
     const chair =
-      nextFreeSeatPosition(this.seats, this.capacity) ??
-      POKER_OPPOSITE_DEALER_SEAT;
+      chairOverride != null && Number.isFinite(Number(chairOverride))
+        ? Number(chairOverride)
+        : (nextFreeSeatPosition(this.seats, this.capacity) ??
+           POKER_OPPOSITE_DEALER_SEAT);
 
     // Base synthetic seat (the fallback identity, unchanged from before).
     const seat = {
@@ -6608,12 +6590,10 @@ function initTableGame(io, options = {}) {
         await game.broadcastState();
         break;
       }
-      case "app_exit": {
-        await game.leavePlayerPermanently(cmd.userId);
-        break;
-      }
+      case "app_exit":
+      case "leave_immediate":
       case "leave_pending": {
-        await game.requestPlayerLeave(cmd.userId);
+        await game.leavePlayerImmediately(cmd.userId);
         break;
       }
       case "reset-empty": {
@@ -6696,19 +6676,19 @@ function initTableGame(io, options = {}) {
       fence: game ? game.ownershipFence : null,
     });
     // #endregion
-    if (!game) return;
+    if (!game) return null;
     if (game.isOwner) {
-      await runLocal(game);
-      return;
+      return await runLocal(game);
     }
     const ownerId = await currentOwnerId(tableId);
     if (ownerId && ownerId !== registry.instanceId) {
       await commandBus.publishTo(ownerId, forwardCmd);
-      return;
+      return null;
     }
     // Ownerless / stale — a second get() may claim ownership for us (failover).
     const g2 = await registry.get(String(tableId));
-    if (g2 && g2.isOwner) await runLocal(g2);
+    if (g2 && g2.isOwner) return await runLocal(g2);
+    return null;
   }
 
   registry.ownerRunOrForward = ownerRunOrForward;
@@ -7520,21 +7500,45 @@ async function removeLiveHumanSeat(tableId, userId) {
 
 /** Route a voluntary leave to the table owner in a multi-instance deployment. */
 async function requestLivePokerLeave(tableId, userId) {
-  if (!activeRegistry) return false;
+  if (!activeRegistry) return null;
   const tid = String(tableId);
   const uid = String(userId);
-  const run = async (game) => game.requestPlayerLeave(uid);
+  const run = async (game) => game.leavePlayerImmediately(uid);
   if (typeof activeRegistry.ownerRunOrForward === "function") {
-    await activeRegistry.ownerRunOrForward(
+    return await activeRegistry.ownerRunOrForward(
       tid,
       { type: "leave_pending", tableId: tid, userId: uid },
       run
     );
-    return true;
   }
   const game = await activeRegistry.get(tid);
-  if (!game || !game.isOwner) return false;
+  if (!game || !game.isOwner) return null;
   return run(game);
+}
+
+async function leavePlayerImmediately(tableId, userId) {
+  return requestLivePokerLeave(tableId, userId);
+}
+
+function getLivePlayerSeatSnapshot(tableId, userId) {
+  if (!activeRegistry) return null;
+  const entry = activeRegistry.map.get(String(tableId));
+  if (!entry || !entry.game) return null;
+  const game = entry.game;
+  const idx = game.findSeatIndexByUser(userId);
+  if (idx < 0) return null;
+  const seat = game.seats[idx];
+  return {
+    index: idx,
+    seatPosition: seat.seatPosition,
+    chips: toSafeInt(seat.chips, 0),
+    invested: toSafeInt(seat.invested, 0),
+    inHand: seat.inHand,
+    folded: seat.folded,
+    isBot: seat.isBot,
+    running: game.running,
+    round: game.round,
+  };
 }
 
 async function restoreLiveEngineSeat(tableId, userId, meta = {}) {
@@ -7718,6 +7722,8 @@ module.exports = {
   vacateLiveEngineSeat,
   removeLiveHumanSeat,
   requestLivePokerLeave,
+  leavePlayerImmediately,
+  getLivePlayerSeatSnapshot,
   restoreLiveEngineSeat,
   buildAdminRealtimeTablePayload,
   getLiveTableGameForAdmin,

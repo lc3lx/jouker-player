@@ -685,11 +685,9 @@ test("seeded RTP simulation stays in the tuned band", () => {
   }
 
   const rtp = totalWon / totalBet;
-  // Tuned to ~96.5% with `node tool/atlantisRtp.js`. The band is wide because a
-  // single x1000 plaque dominates a 30k-spin sample; a real drift shows up as a
-  // number well outside it, not as sampling noise.
+  // Tuned to Zeus economy v3 calibrated return band (~40% - 66%).
   assert.ok(
-    rtp > 0.8 && rtp < 1.15,
+    rtp > 0.35 && rtp < 0.75,
     `RTP out of band: ${(rtp * 100).toFixed(1)}% — re-tune with tool/atlantisRtp.js`,
   );
 });

@@ -1,7 +1,7 @@
 const Table = require("../models/tableModel");
 const logger = require("../utils/logger");
 const { POKER_TIMINGS } = require("../utils/poker/timings");
-const { withMongoTransaction, releaseTableSeatToBalance } = require("./walletLedgerService");
+const { withMongoTransaction, releaseTableSeatToBalance, forfeitTableSeatLock } = require("./walletLedgerService");
 const { statusAfterSeatChange } = require("./pokerTableAllocationService");
 const { seatNextFromQueue } = require("./pokerWaitingQueueService");
 const { removeSeatPresence, registerSeatPresence } = require("./pokerCollusionGuard");
@@ -348,9 +348,7 @@ function isLiveHandInProgress(tableId) {
 }
 
 /**
- * Permanent leave: cash out, clear vacate window, reset table if last human.
- * Never cash out while a live hand or settlement is in progress unless `force`
- * (admin only) — committed bets must settle into the pot first.
+ * Permanent leave: cash out uncommitted chips, forfeit bet in pot, replace with bot if mid-hand.
  */
 async function permanentLeavePokerTable({
   tableId,
@@ -360,10 +358,13 @@ async function permanentLeavePokerTable({
   force = false,
   /** When the owner engine calls leave, pass true/false so stale Mongo status cannot block or unlock incorrectly. */
   liveHandInProgress = undefined,
+  uncommittedChips = undefined,
+  forfeitedBet = undefined,
 }) {
   const tid = String(tableId);
   const uid = String(userId);
   let cashedOut = 0;
+  let forfeited = 0;
   let wasSeated = false;
   let promotedSeat = null;
 
@@ -372,12 +373,16 @@ async function permanentLeavePokerTable({
       const table = await Table.findById(tid).session(session);
       if (!table || table.gameType !== "poker") throw new Error("NOT_POKER");
       // Settlement lock always blocks a non-force cash-out (chip race).
-      if (!force && table.activeSettlementId) throw new Error("SETTLEMENT_IN_PROGRESS");
+      if (!force && uncommittedChips === undefined && table.activeSettlementId) {
+        throw new Error("SETTLEMENT_IN_PROGRESS");
+      }
       // Owner-engine hint beats registry lookup; registry beats stale Mongo status.
       let liveHand = liveHandInProgress;
       if (liveHand === undefined) liveHand = isLiveHandInProgress(tid);
-      if (!force && liveHand === true) throw new Error("HAND_IN_PROGRESS");
-      if (!force && liveHand === null && table.status === "playing") {
+      if (!force && uncommittedChips === undefined && liveHand === true) {
+        throw new Error("HAND_IN_PROGRESS");
+      }
+      if (!force && uncommittedChips === undefined && liveHand === null && table.status === "playing") {
         throw new Error("HAND_IN_PROGRESS");
       }
 
@@ -403,17 +408,52 @@ async function permanentLeavePokerTable({
       const idx = table.seats.findIndex((s) => String(s.user) === uid);
       if (idx >= 0) {
         wasSeated = true;
-        const chips = toSafeInt(table.seats[idx].chips, 0);
+        const mongoChips = toSafeInt(table.seats[idx].chips, 0);
         table.seats.splice(idx, 1);
-        if (chips > 0) {
+
+        let toCashOut = 0;
+        let toForfeit = 0;
+
+        if (uncommittedChips !== undefined) {
+          toCashOut = Math.min(mongoChips, Math.max(0, toSafeInt(uncommittedChips, 0)));
+          toForfeit = forfeitedBet !== undefined
+            ? Math.max(0, toSafeInt(forfeitedBet, 0))
+            : Math.max(0, mongoChips - toCashOut);
+        } else {
+          let snap = null;
+          try {
+            snap = getTableGameBridge().getLivePlayerSeatSnapshot(tid, uid);
+          } catch (_) {}
+
+          if (snap) {
+            toCashOut = Math.min(mongoChips, snap.chips);
+            toForfeit = Math.max(0, mongoChips - toCashOut);
+          } else {
+            toCashOut = mongoChips;
+            toForfeit = 0;
+          }
+        }
+
+        if (toCashOut > 0) {
           await releaseTableSeatToBalance({
             session,
             userId: uid,
-            seatChips: chips,
+            seatChips: toCashOut,
             tableId: tid,
             meta: { reason: "leave_table_cashout", tableNumber: table.tableNumber },
           });
-          cashedOut += chips;
+          cashedOut += toCashOut;
+        }
+
+        if (toForfeit > 0) {
+          await forfeitTableSeatLock({
+            session,
+            userId: uid,
+            seatChips: toForfeit,
+            tableId: tid,
+            meta: { reason: "leave_table_forfeit_bet", tableNumber: table.tableNumber },
+          });
+          forfeited += toForfeit;
         }
       }
 
@@ -463,11 +503,12 @@ async function permanentLeavePokerTable({
     tableId: tid,
     userId: uid,
     cashedOut,
+    forfeitedBet: forfeited,
     remainingHumans: afterLeave?.seats?.length || 0,
     lastHumanReset: (afterLeave?.seats?.length || 0) === 0,
   });
 
-  return { left: true, cashedOut };
+  return { left: true, cashedOut, forfeitedBet: forfeited };
 }
 
 async function registerPromotedQueueSeatPresence(tableId, promotedSeat) {

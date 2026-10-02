@@ -1459,101 +1459,39 @@ exports.leaveTable = asyncHandler(async (req, res, next) => {
     return next(new ApiError("You are already seated at this table", 409));
   }
 
-  if (await isTableSettlementBlocked(id)) {
-    if (table.gameType === "poker") {
-      // Never strand the player: let them leave to the lobby now and cash out
-      // (safely, to balance) once the brief settlement clears. We do NOT touch
-      // seat chips mid-settlement (chip race) — the deferred retry uses the
-      // existing safe cash-out path.
-      await markPendingPermanentLeave({ tableId: id, userId: req.user._id });
-      scheduleDeferredPermanentLeave({
-        tableId: id,
-        userId: req.user._id,
-        clientIp: String(req.headers["x-forwarded-for"] || req.socket?.remoteAddress || ""),
-        deviceId: String(req.body?.deviceId || req.headers["x-device-id"] || "") || null,
-      });
-      void trackJoinLeaveEvent(req.user._id, "leave_table");
-      emitTablesUpdated({ gameType: "poker", reason: "leave_deferred", tableId: String(id) });
-      return res.status(200).json({
-        status: "success",
-        message: "Leaving — your cash-out completes right after the current hand settles",
-        data: { permanentLeave: true, deferred: true, rtcRoom: { roomId: table._id, type: "table" } },
-      });
+  if (table.gameType === "poker") {
+    // If settlement is active, briefly wait up to 500ms so settlement can complete.
+    if (await isTableSettlementBlocked(id)) {
+      for (let i = 0; i < 5; i++) {
+        await new Promise((r) => setTimeout(r, 100));
+        if (!(await isTableSettlementBlocked(id))) break;
+      }
     }
-    return next(
-      new ApiError("Settlement in progress — leaving is temporarily blocked", 409)
-    );
-  }
 
-  // A table seat holds its start-of-hand stack until the pot is settled. A
-  // voluntary exit while playing therefore becomes an in-engine fold plus a
-  // deferred, idempotent cash-out. lastHuman no longer bypasses: mid-hand
-  // Mongo seat.chips still includes chips committed to the pot.
-  const livePoker = table.gameType === "poker"
-    ? getTableGameDebugSnapshot(String(id))
-    : null;
-  const pokerHandInProgress = table.gameType === "poker" && (
-    (livePoker?.running === true && String(livePoker?.round || "idle") !== "idle") ||
-    (!livePoker && table.status === "playing")
-  );
-  if (pokerHandInProgress) {
-    const handClientIp = String(
+    const clientIp = String(
       req.headers["x-forwarded-for"] || req.socket?.remoteAddress || ""
     );
-    const handDeviceId = String(req.body?.deviceId || req.headers["x-device-id"] || "");
-    await markPendingPermanentLeave({ tableId: id, userId: req.user._id });
-    await requestLivePokerLeave(String(id), req.user._id);
-    scheduleDeferredPermanentLeave({
-      tableId: id,
-      userId: req.user._id,
-      clientIp: handClientIp,
-      deviceId: handDeviceId || null,
-    });
-    void trackJoinLeaveEvent(req.user._id, "leave_table");
-    emitTablesUpdated({ gameType: "poker", reason: "leave_deferred_hand", tableId: String(id) });
-    return res.status(200).json({
-      status: "success",
-      message: "Leaving — your hand is settling and your cash-out will follow automatically",
-      data: { permanentLeave: true, deferred: true, handInProgress: true, rtcRoom: { roomId: table._id, type: "table" } },
-    });
-  }
+    const deviceId = String(req.body?.deviceId || req.headers["x-device-id"] || "");
 
-  const clientIp = String(
-    req.headers["x-forwarded-for"] || req.socket?.remoteAddress || ""
-  );
-  const deviceId = String(req.body?.deviceId || req.headers["x-device-id"] || "");
+    // Immediately fold the human in live engine (forfeiting any bet in pot) and replace with bot.
+    let engineRes = null;
+    try {
+      engineRes = await requestLivePokerLeave(String(id), req.user._id);
+    } catch (_) {}
 
-  if (table.gameType === "poker") {
     const result = await permanentLeavePokerTable({
       tableId: id,
       userId: req.user._id,
       clientIp,
       deviceId: deviceId || null,
+      force: true,
+      uncommittedChips: engineRes?.uncommittedChips,
+      forfeitedBet: engineRes?.forfeitedBet,
     });
+
     if (!result.left) {
       if (result.reason === "NOT_SEATED") {
         return next(new ApiError("You are not seated at this table", 400));
-      }
-      if (result.reason === "SETTLEMENT_IN_PROGRESS" || result.reason === "HAND_IN_PROGRESS") {
-        // Settlement started between the gate above and here — defer + free the
-        // player to the lobby (deferred cash-out, no chip race / forfeiture).
-        await markPendingPermanentLeave({ tableId: id, userId: req.user._id });
-        scheduleDeferredPermanentLeave({
-          tableId: id,
-          userId: req.user._id,
-          clientIp,
-          deviceId: deviceId || null,
-        });
-        if (result.reason === "HAND_IN_PROGRESS") {
-          await requestLivePokerLeave(String(id), req.user._id);
-        }
-        void trackJoinLeaveEvent(req.user._id, "leave_table");
-        emitTablesUpdated({ gameType: "poker", reason: "leave_deferred", tableId: String(id) });
-        return res.status(200).json({
-          status: "success",
-          message: "Leaving — your cash-out completes right after the current hand settles",
-          data: { permanentLeave: true, deferred: true, rtcRoom: { roomId: table._id, type: "table" } },
-        });
       }
       return next(new ApiError("Could not leave table", 400));
     }
@@ -1567,10 +1505,17 @@ exports.leaveTable = asyncHandler(async (req, res, next) => {
       message: "Left table successfully",
       data: {
         cashedOut: result.cashedOut,
+        forfeitedBet: result.forfeitedBet || 0,
         permanentLeave: true,
         rtcRoom: { roomId: table._id, type: "table" },
       },
     });
+  }
+
+  if (await isTableSettlementBlocked(id)) {
+    return next(
+      new ApiError("Settlement in progress — leaving is temporarily blocked", 409)
+    );
   }
 
   // Intentional leave frees the Mongo seat completely (cash-out waiting /

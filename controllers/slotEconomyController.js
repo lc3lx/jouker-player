@@ -27,17 +27,17 @@ exports.forGame = game => asyncHandler(async (req, res) => {
   const amounts = {};
   for (const [symbol, bands] of Object.entries(c.PAYTABLE)) {
     bands.forEach((raw, i) => {
-      let value = game === "poseidon" ? Math.round(raw * 0.78 * 1000) / 1000 : raw;
+      let value = game === "poseidon" && version < 3 ? Math.round(raw * 0.78 * 1000) / 1000 : raw;
       if (version === 1 && bonusMode && game === "poseidon") value *= c.BONUS_CLUSTER_SCALE;
       amounts[raw.toFixed(6)] = value * scale;
     });
   }
   const rules = (zeus || game === "poseidon") && version >= 3 ? {
-    ...(zeus ? {
-      payoutRows: Object.entries(c.PAYTABLE).map(([symbol, bands]) => ({ symbol: Number(symbol),
-        values: [c.PAY_RULES[symbol].start, c.PAY_RULES[symbol].increment] })),
-      payoutColumns: ["8", "additional"],
-    } : {}),
+    payoutRows: Object.entries(c.PAYTABLE).map(([symbol, bands]) => ({
+      symbol: typeof symbol === "string" && isNaN(symbol) ? symbol : Number(symbol),
+      values: [c.PAY_RULES[symbol].start, c.PAY_RULES[symbol].increment]
+    })),
+    payoutColumns: ["8", "additional"],
     multiplierValues: c.MULTIPLIER_VALUES,
     multiplierProbabilities: { base: c.BASE_MULTIPLIER_WEIGHTS, bonus: c.BONUS_MULTIPLIER_WEIGHTS, super: c.SUPER_MULTIPLIER_WEIGHTS },
     probabilityUnit: "per_spin", jackpotAppearanceProbability: c.JACKPOT_APPEARANCE_PROBABILITY,
