@@ -12,12 +12,41 @@ const { MongoMemoryReplSet } = require("mongodb-memory-server");
 let server;
 before(async () => {
   server = await MongoMemoryReplSet.create({ binary: { version: "7.0.9", systemBinary: process.env.MONGOMS_SYSTEM_BINARY || (process.platform === "win32" ? "C:/Program Files/MongoDB/Server/7.0/bin/mongod.exe" : undefined) }, replSet: { count: 1, storageEngine: "wiredTiger" } });
-  await mongoose.connect(server.getUri());
+  await mongoose.connect(server.getUri(), { autoCreate: false, autoIndex: false });
+  await require("../services/slotProductionSchemaService").ensureSlotProductionIndexes();
   await require("../models/walletModel").init();
   await require("../models/slotOperationModel").init();
   for (const folder of ["poseidon","zenobia","goldenTree"]) await require(`../models/${folder}BonusSessionModel`).init();
   await require("../models/kingArthBonusSessionModel").init();
   await require("../models/poseidonJackpotRoundModel").init();
+});
+
+test("local replica set is detected even with a localhost URI and stale standalone hint", async () => {
+  const ledger = require("../services/walletLedgerService");
+  const names = ["APP_MODE", "REQUIRE_MONGO_TRANSACTIONS", "ALLOW_NON_TRANSACTION_FALLBACK", "MONGO_STANDALONE", "DB_URI"];
+  const saved = Object.fromEntries(names.map(name => [name, process.env[name]]));
+  Object.assign(process.env, { APP_MODE: "beta", REQUIRE_MONGO_TRANSACTIONS: "false",
+    ALLOW_NON_TRANSACTION_FALLBACK: "true", MONGO_STANDALONE: "true", DB_URI: "mongodb://127.0.0.1/game" });
+  ledger.resetMongoTransactionProbeForTests();
+  try {
+    assert.equal(await ledger.probeMongoTransactions(), "supported");
+    await ledger.withMongoTransaction(async session => assert.ok(session));
+  } finally {
+    for (const name of names) {
+      if (saved[name] === undefined) delete process.env[name]; else process.env[name] = saved[name];
+    }
+    ledger.resetMongoTransactionProbeForTests();
+  }
+});
+
+test("production startup creates slot collections and unique constraints with autoIndex disabled", async () => {
+  const Receipt = require("../models/slotOperationModel");
+  const indexes = await Receipt.collection.indexes();
+  assert.ok(indexes.some(i => i.unique && i.key.userId === 1 && i.key.game === 1 && i.key.requestId === 1));
+  const collections = await mongoose.connection.db.listCollections({}, { nameOnly: true }).toArray();
+  for (const name of ["golden_tree_bonus_sessions", "king_arth_bonus_sessions", "slot_operations"]) {
+    assert.ok(collections.some(c => c.name === name));
+  }
 });
 
 test("Zeus: failed money transaction cannot advance a durable bonus session", async () => {

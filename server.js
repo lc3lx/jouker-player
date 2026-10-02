@@ -389,6 +389,7 @@ async function startServer() {
     ensurePokerProductionIndexes,
   } = require("./services/pokerProductionSchemaService");
   await ensurePokerProductionIndexes();
+  await require("./services/slotProductionSchemaService").ensureSlotProductionIndexes();
   const {
     ensureFriendshipIndexes,
   } = require("./services/friendSchemaService");

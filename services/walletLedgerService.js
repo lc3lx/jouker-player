@@ -54,17 +54,6 @@ function allowNonTransactionFallback() {
   );
 }
 
-function isLikelyStandaloneMongoUri() {
-  const uri =
-    process.env.DB_URI ||
-    process.env.MONGO_URI ||
-    process.env.MONGODB_URI ||
-    "mongodb://127.0.0.1:27017/game";
-  if (/replicaSet=/i.test(uri)) return false;
-  if (/mongos/i.test(uri)) return false;
-  return /localhost|127\.0\.0\.1/i.test(uri);
-}
-
 /**
  * Probe once whether this Mongo deployment supports multi-document transactions.
  * Standalone dev instances do not; replica sets and mongos do.
@@ -74,23 +63,17 @@ async function probeMongoTransactions() {
   if (!_mongoTxnProbePromise) {
     _mongoTxnProbePromise = _runMongoTransactionProbe();
   }
-  return _mongoTxnProbePromise;
+  try {
+    return await _mongoTxnProbePromise;
+  } catch (err) {
+    _mongoTxnProbePromise = null; // a transient connection error must permit retry
+    throw err;
+  }
 }
 
 async function _runMongoTransactionProbe() {
-  if (
-    allowNonTransactionFallback() &&
-    (String(process.env.MONGO_STANDALONE || "").toLowerCase() === "true" ||
-      isLikelyStandaloneMongoUri())
-  ) {
-    _mongoTxnCapability = "unsupported";
-    logger.info("mongo_standalone_mode", {
-      mode: "non_transaction_wallet",
-      hint: "Wallet ops run without Mongo transactions on local dev. Use a replica set in production.",
-    });
-    return _mongoTxnCapability;
-  }
-
+  // A localhost URI (even without ?replicaSet=) can point to a real replica set.
+  // Probe the connected server rather than treating a URI/env hint as topology.
   const session = await mongoose.startSession();
   try {
     // Empty callbacks can falsely pass on standalone; touch the DB inside the txn.
@@ -897,4 +880,3 @@ module.exports = {
   applyHouseSettlementDelta,
   assertHouseWalletReady,
 };
-
