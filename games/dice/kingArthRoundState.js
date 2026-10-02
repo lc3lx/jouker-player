@@ -334,14 +334,18 @@ function useMongoSessions() {
 }
 async function getFreeSpinSession(userId, tableId) {
   if (!useMongoSessions()) return getLegacyFreeSpinSession(userId, tableId);
-  const Model = require("../../models/kingArthBonusSessionModel");
-  const key = { userId: String(userId), tableId: String(tableId || "king-arth") };
-  let doc = await Model.findOne(key).lean();
-  if (!doc) {
-    const legacy = await getLegacyFreeSpinSession(userId, tableId);
-    doc = await Model.findOneAndUpdate(key, { $setOnInsert: { ...key, session: legacy ? { ...legacy, economyVersion: 1 } : null, revision: 0 } }, { upsert: true, new: true }).lean();
+  try {
+    const Model = require("../../models/kingArthBonusSessionModel");
+    const key = { userId: String(userId), tableId: String(tableId || "king-arth") };
+    let doc = await Model.findOne(key).lean();
+    if (!doc) {
+      const legacy = await getLegacyFreeSpinSession(userId, tableId);
+      doc = await Model.findOneAndUpdate(key, { $setOnInsert: { ...key, session: legacy ? { ...legacy, economyVersion: 1 } : null, revision: 0 } }, { upsert: true, new: true }).lean();
+    }
+    return doc?.session?.remaining > 0 ? { ...doc.session, _revision: doc.revision } : null;
+  } catch (err) {
+    return getLegacyFreeSpinSession(userId, tableId);
   }
-  return doc.session?.remaining > 0 ? { ...doc.session, _revision: doc.revision } : null;
 }
 async function commitSession(userId, tableId, previous, next, mongoSession) {
   if (!useMongoSessions()) {
