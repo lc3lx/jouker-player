@@ -10,7 +10,7 @@ const Ledger = require("../models/walletTransactionModel");
 const walletLedger = require("../services/walletLedgerService");
 const { offerRebuy, confirmRebuy } = require("../services/pokerRebuyService");
 const { POKER_STAKES, maximumBuyIn, validBuyIn } = require("../utils/poker/buyInPolicy");
-const { PokerTable } = require("../sockets/tableGame");
+const { PokerTable, GameRegistry } = require("../sockets/tableGame");
 const { canBeDealtIntoHand } = require("../utils/poker/playerState");
 let repl;
 test.before(async () => {
@@ -253,4 +253,33 @@ test("a superseded owner's rebuy cannot debit after ownership moves", async () =
   await Table.updateOne({ _id: f.tableId }, { $set: { pokerOwnerFence: 2 } });
   await assert.rejects(confirmRebuy({ ...req, ownerFence: 1 }), /POKER_FENCE_LOST/);
   assert.equal((await Wallet.findOne({ user: f.userId })).balance, 2000000);
+});
+
+test("rebuy after a local registry restart uses a durable fence and debits once", async (t) => {
+  const f = await fixture();
+  await Table.updateOne({ _id: f.tableId }, { $set: { pokerOwnerFence: 40 } });
+  const nsp = { in: () => ({ fetchSockets: async () => [] }) };
+  // Keep this test focused on registry ownership and the real rebuy transaction.
+  t.mock.method(PokerTable.prototype, "bootstrapLobbyStart", async () => {});
+  t.mock.method(PokerTable.prototype, "applyCosmeticsToSeats", async () => {});
+  const firstRegistry = new GameRegistry(nsp);
+  const first = await firstRegistry.get(f.tableId);
+  t.after(() => first.disposeTimers());
+  assert.equal(first.ownershipFence, 41);
+  first.disposeTimers();
+  const restartedRegistry = new GameRegistry(nsp);
+  const current = await restartedRegistry.get(f.tableId);
+  t.after(() => current.disposeTimers());
+  assert.equal(current.ownershipFence, 42);
+  const offer = await offerRebuy(f.tableId, f.userId);
+  const payload = { offerId: offer.offerId, actionId: "restart-rebuy", amount: 545821 };
+  first.running = current.running = true;
+  current.broadcastState = async () => {};
+  const stale = await first.handleRebuy(String(f.userId), payload);
+  assert.equal(stale.reason, "POKER_FENCE_LOST");
+  assert.equal((await Wallet.findOne({ user: f.userId })).balance, 2000000);
+  assert.equal((await current.handleRebuy(String(f.userId), payload)).status, "accepted");
+  assert.equal((await current.handleRebuy(String(f.userId), payload)).duplicate, true);
+  assert.equal((await Wallet.findOne({ user: f.userId })).balance, 2000000 - 545821);
+  assert.equal(await Ledger.countDocuments({ userId: f.userId, type: "transfer_to_locked" }), 1);
 });

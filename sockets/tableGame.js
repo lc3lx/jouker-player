@@ -6260,11 +6260,24 @@ class GameRegistry {
   }
 
   async _recordFence(tableId, fence) {
-    if (!fence || fence <= 0) return;
+    if (!this.ownershipEnabled) {
+      // Process-local counters restart at 1; Mongo retains the old fence.
+      // Allocate durably so a restarted single-instance owner can mutate the
+      // table without weakening the checks that reject its predecessor.
+      const table = await Table.findOneAndUpdate(
+        { _id: tableId, gameType: "poker" },
+        { $inc: { pokerOwnerFence: 1 } },
+        { new: true }
+      ).select("pokerOwnerFence").lean();
+      if (!table) throw new Error("POKER_TABLE_NOT_FOUND");
+      return toSafeInt(table.pokerOwnerFence, 0);
+    }
+    if (!fence || fence <= 0) throw new Error("POKER_FENCE_MISSING");
     await Table.updateOne(
       { _id: tableId, gameType: "poker" },
       { $max: { pokerOwnerFence: toSafeInt(fence, 0) } }
     );
+    return fence;
   }
 
   /** Renew leases we own; demote any table whose lease we have lost. */
@@ -6315,7 +6328,7 @@ class GameRegistry {
     gt.isOwner = true;
     gt.ownershipFence = own.fence || 0;
     try {
-      await this._recordFence(tid, gt.ownershipFence);
+      gt.ownershipFence = await this._recordFence(tid, gt.ownershipFence);
       const snapshot = await this.stateStore.load(tid);
       const table = await Table.findById(tid).populate({
         path: "seats.user",
@@ -6339,7 +6352,7 @@ class GameRegistry {
       logger.info("poker_ownership_promoted", {
         tableId: tid,
         instanceId: this.instanceId,
-        fence: own.fence,
+        fence: gt.ownershipFence,
       });
     } catch (e) {
       logger.error("poker_ownership_promote_failed", {
@@ -6441,7 +6454,7 @@ class GameRegistry {
     }
     gt.isOwner = isOwner;
     gt.ownershipFence = own.fence || 0;
-    if (isOwner) await this._recordFence(tid, gt.ownershipFence);
+    if (isOwner) gt.ownershipFence = await this._recordFence(tid, gt.ownershipFence);
 
     // Crash/restart recovery: restore from Redis snapshot if exists.
     const snapshot = await this.stateStore.load(tid);
