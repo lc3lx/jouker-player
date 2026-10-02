@@ -3609,6 +3609,7 @@ class PokerTable {
   }
 
   everyoneSettled() {
+    if (this.bettingIsClosed()) return true;
     // Everyone matched currentBet AND completed a voluntary action this street (BB option).
     return this.seats.every((s) => {
       if (!s.inHand || s.folded) return true;
@@ -3641,6 +3642,21 @@ class PokerTable {
     return this.seats.filter((s) => s.inHand && !s.folded).length;
   }
 
+  bettingIsClosed() {
+    const actors = this.seats.filter((s) => s.inHand && !s.folded && !s.allIn && s.chips > 0);
+    return actors.length === 0 ||
+      (actors.length === 1 && actors[0].bet >= this.currentBet);
+  }
+
+  maximumContestablePayment(seatIndex) {
+    const seat = this.seats[seatIndex];
+    if (!seat) return 0;
+    const opponents = this.seats.filter((s, i) => i !== seatIndex && s.inHand && !s.folded);
+    const coveredTotal = opponents.reduce((max, s) =>
+      Math.max(max, toSafeInt(s.invested, 0) + toSafeInt(s.chips, 0)), 0);
+    return Math.min(seat.chips, Math.max(0, coveredTotal - toSafeInt(seat.invested, 0)));
+  }
+
   /**
    * Returns the turn-player-only action spec for the architecture contract.
    * minRaise/maxRaise are EXTRA amount above callAmount.
@@ -3654,7 +3670,7 @@ class PokerTable {
     const isAllInOnly = callAmount > 0 && seat.chips < callAmount;
 
     const minRaise = this.computeMinRaiseExtra(seatIndex);
-    const maxRaise = Math.max(0, seat.chips - callAmount); // extra above call
+    const maxRaise = Math.max(0, this.maximumContestablePayment(seatIndex) - callAmount);
 
     const allowed = ["fold"];
     if (canCheck) {
@@ -3890,6 +3906,8 @@ class PokerTable {
     this._turnTransition = false;
     this.clearActionScheduling();
     if (!this.running) return;
+
+    if (this.bettingIsClosed()) this.currentIndex = -1;
 
     const seat = this.seats[this.currentIndex];
     if (!seat || !seat.inHand || seat.folded || seat.allIn) {
@@ -4150,7 +4168,7 @@ class PokerTable {
   applyBetOrRaise(i, amount) {
     const need = Math.max(0, this.currentBet - this.seats[i].bet);
     const toPut = need + amount; // amount is raise size (for bet, currentBet==0, need is 0)
-    const pay = Math.min(toPut, this.seats[i].chips);
+    const pay = Math.min(toPut, this.maximumContestablePayment(i));
     const prevCurrentBet = this.currentBet;
     const prevLastRaise = this.lastRaiseAmount;
 
@@ -4166,7 +4184,7 @@ class PokerTable {
 
       // Real-money rule: short all-in raise does NOT reopen action and does
       // NOT change lastRaiseAmount/minRaise. Only full raises do.
-      const wasAllIn = this.seats[i].chips === 0;
+      const wasAllIn = this.seats[i].chips === 0 || this.maximumContestablePayment(i) === 0;
       const isFullRaise = diff >= prevLastRaise;
       if (!wasAllIn || isFullRaise) {
         this.lastRaiseAmount = diff;
@@ -6077,7 +6095,7 @@ class PokerTable {
         }
         const v = toSafeInt(parsed, 0);
         const raiseSeat = this.seats[idx];
-        const isAllInRaise = raiseSeat.chips <= spec.callAmount + v;
+        const isAllInRaise = this.maximumContestablePayment(idx) <= spec.callAmount + v;
         if (v > spec.maxRaise || (v < spec.minRaise && !isAllInRaise)) {
           this.logSuspicious("raise_amount_out_of_bounds", {
             userId,
