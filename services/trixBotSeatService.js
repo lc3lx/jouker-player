@@ -169,15 +169,18 @@ async function tryClaimTrixBotSeat({
 
   const table = await Table.findById(tid).populate({
     path: "seats.user",
-    select: "name",
+    select: "name profileImg",
   });
   const seat = table?.seats?.find((s) => s.user && String(s.user._id || s.user) === uid);
-  if (seat?.user && typeof seat.user === "object" && seat.user.name) {
-    resolvedName = String(seat.user.name);
+  let resolvedAvatar = null;
+  if (seat?.user && typeof seat.user === "object") {
+    if (seat.user.name) resolvedName = String(seat.user.name);
+    resolvedAvatar = seat.user.profileImg || null;
   }
 
   const ok = await game.replaceBotWithHuman(seatIndex, userId, socketId, resolvedName, {
     chips: buyIn,
+    avatar: resolvedAvatar,
     allowTakeover: !isRestore,
   });
   if (!ok) {

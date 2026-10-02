@@ -34,7 +34,7 @@ router.post("/jackpot/reveal", authService.protect, jackpotReveal);
 router.post("/jackpot/revealed", authService.protect, jackpotReveal);
 router.post("/jackpot/settle", authService.protect, jackpotSettle);
 
-router.get("/economy", authService.protect, require("../controllers/slotEconomyController").forGame("zeus"));
+router.get("/economy", authService.optionalProtect, require("../controllers/slotEconomyController").forGame("zeus"));
 router.get("/session", authService.protect, require("express-async-handler")(async (req, res) => {
   const session = await require("../games/dice/kingArthRoundState").getFreeSpinSession(String(req.user._id || req.user.id), "king-arth");
   res.json({ status: "success", data: session ? {

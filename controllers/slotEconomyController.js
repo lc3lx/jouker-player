@@ -3,15 +3,27 @@ const economy = require("../games/utils/slotEconomy");
 const edge = require("../games/utils/houseEdgeController");
 
 exports.forGame = game => asyncHandler(async (req, res) => {
-  const userId = String(req.user._id || req.user.id);
-  let bonus;
-  if (game === "zeus") {
-    bonus = await require("../games/dice/kingArthRoundState").getFreeSpinSession(userId, "king-arth");
-  } else {
-    const folder = game === "golden-tree" ? "goldenTree" : game;
-    const manager = require(`../games/${folder}/roundManager`);
-    await manager.ensureLoaded(userId);
-    bonus = manager.getBonusSession(userId);
+  const userId = req.user ? String(req.user._id || req.user.id || "") : null;
+  let bonus = null;
+  if (userId) {
+    try {
+      if (game === "zeus") {
+        bonus = await Promise.race([
+          require("../games/dice/kingArthRoundState").getFreeSpinSession(userId, "king-arth"),
+          new Promise((_, reject) => setTimeout(() => reject(new Error("timeout")), 1500))
+        ]).catch(() => null);
+      } else {
+        const folder = game === "golden-tree" ? "goldenTree" : game;
+        const manager = require(`../games/${folder}/roundManager`);
+        await Promise.race([
+          manager.ensureLoaded(userId),
+          new Promise((_, reject) => setTimeout(() => reject(new Error("timeout")), 1500))
+        ]).catch(() => null);
+        bonus = manager.getBonusSession(userId);
+      }
+    } catch (_) {
+      bonus = null;
+    }
   }
   const bonusMode = !!bonus, superBonus = !!bonus?.superBonus;
   const zeus = game === "zeus" ? require("../games/dice/DiceEngine") : null;

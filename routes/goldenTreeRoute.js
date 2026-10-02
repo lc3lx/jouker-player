@@ -18,6 +18,8 @@ const router = express.Router();
 
 // Public: deployed win-rules metadata only
 router.get("/win-rules", winRules);
+// Public paytable / rules — optional auth to attach user's active bonus state if logged in
+router.get("/economy", authService.optionalProtect, require("../controllers/slotEconomyController").forGame("golden-tree"));
 
 router.use(authService.protect);
 
@@ -31,7 +33,5 @@ router.get("/jackpot", jackpotRecover);
 router.post("/jackpot/reveal", jackpotReveal);
 router.post("/jackpot/revealed", jackpotReveal);
 router.post("/jackpot/settle", jackpotSettle);
-
-router.get("/economy", authService.protect, require("../controllers/slotEconomyController").forGame("golden-tree"));
 
 module.exports = router;

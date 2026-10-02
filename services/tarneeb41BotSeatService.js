@@ -175,15 +175,18 @@ async function tryClaimTarneeb41BotSeat({
 
   const table = await Table.findById(tid).populate({
     path: "seats.user",
-    select: "name",
+    select: "name profileImg",
   });
-  const seat = table?.seats?.[seatIndex];
-  if (seat?.user && typeof seat.user === "object" && seat.user.name) {
-    resolvedName = String(seat.user.name);
+  const seat = (table?.seats || []).find((s) => String(s.user?._id || s.user) === uid) || table?.seats?.[seatIndex];
+  let resolvedAvatar = null;
+  if (seat?.user && typeof seat.user === "object") {
+    if (seat.user.name) resolvedName = String(seat.user.name);
+    resolvedAvatar = seat.user.profileImg || null;
   }
 
   const ok = await game.replaceBotWithHuman(seatIndex, userId, socketId, resolvedName, {
     chips: buyIn,
+    avatar: resolvedAvatar,
     allowTakeover: !isRestore,
   });
   if (!ok) {

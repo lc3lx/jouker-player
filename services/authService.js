@@ -258,6 +258,40 @@ exports.protect = asyncHandler(async (req, res, next) => {
   next();
 });
 
+// @desc   Optional authentication: extracts user if token is valid, continues as guest if not
+exports.optionalProtect = asyncHandler(async (req, res, next) => {
+  let token;
+  if (
+    req.headers.authorization &&
+    req.headers.authorization.startsWith("Bearer")
+  ) {
+    token = req.headers.authorization.split(" ")[1];
+  }
+  if (!token || token === "null" || token === "undefined") {
+    req.user = null;
+    return next();
+  }
+
+  try {
+    const decoded = jwt.verify(token, process.env.JWT_SECRET_KEY);
+    if (!decoded || !decoded.userId) {
+      req.user = null;
+      return next();
+    }
+    const currentUser = await User.findById(decoded.userId);
+    if (currentUser && currentUser.active !== false) {
+      const tokenSession = Math.floor(Number(decoded.sessionVersion) || 0);
+      const userSession = Math.floor(Number(currentUser.sessionVersion) || 0);
+      if (tokenSession === userSession) {
+        req.user = currentUser;
+      }
+    }
+  } catch (_) {
+    req.user = null;
+  }
+  next();
+});
+
 // @desc    Authorization (User Permissions)
 // ["admin", "manager"] — superadmin passes any staff gate; support only when listed.
 exports.allowedTo = (...roles) =>

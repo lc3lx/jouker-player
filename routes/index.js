@@ -129,7 +129,10 @@ const mountRoutes = (app) => {
   app.use("/api-docs", openapiRoute);
   app.use("/api/game", goldenTreeRoute);
   app.use("/api/poseidon", poseidonRoute);
+  app.use("/api/v1/poseidon", poseidonRoute);
   app.use("/api/zenobia", zenobiaRoute);
+  app.use("/api/v1/zenobia", zenobiaRoute);
+  app.use("/api/king-arth", kingArthRoute);
 };
 
 module.exports = mountRoutes;

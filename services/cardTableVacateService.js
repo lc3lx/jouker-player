@@ -8,6 +8,7 @@ const logger = require("../utils/logger");
 const { lifecycleAudit } = require("../utils/lifecycleAudit");
 const { emitTablesUpdated } = require("../utils/lobbyRealtime");
 const { abandonTrixTableIfNoHumans } = require("./trixRecoveryService");
+const { emptyCosmetics } = require("./playerPublicCosmeticsService");
 
 const VACATE_MS = Math.max(
   5000,
@@ -309,6 +310,9 @@ async function finalizeCardTableVacate({ gameType, tableId, userId, nsp, intenti
     player.userId = `bot_vacate_${Date.now()}_${player.seatIndex ?? 0}`;
     player.socketId = null;
     player.displayName = "بوت";
+    player.avatar = null;
+    player.vipLevel = null;
+    player.cosmetics = emptyCosmetics();
     player.reconnectDeadline = null;
   }
 
@@ -497,6 +501,33 @@ async function intentionalLeaveCardTable({ gameType, tableId, userId, nsp }) {
     } else {
       roomManager.userToTarneeb41TableId.delete(uid);
       roomManager.tarneeb41UserSocket.delete(uid);
+    }
+
+    if (midHand) {
+      try {
+        const { withMongoTransaction, forfeitTableSeatLock } = require("./walletLedgerService");
+        await withMongoTransaction(async (session) => {
+          const table = await Table.findById(tid).session(session);
+          if (!table) return;
+          const idx = (table.seats || []).findIndex((s) => s.user && String(s.user) === uid);
+          if (idx !== -1) {
+            const chips = Number(table.seats[idx].chips) || 0;
+            table.seats.splice(idx, 1);
+            if (chips > 0) {
+              await forfeitTableSeatLock({
+                session,
+                userId: uid,
+                tableId: table._id,
+                seatChips: chips,
+                meta: { reason: `${gameType}_midhand_intentional_leave_forfeit` },
+              });
+            }
+            await table.save({ session });
+          }
+        });
+      } catch (err) {
+        logger.warn(`${gameType}_midhand_forfeit_failed`, { tableId: tid, userId: uid, reason: err?.message });
+      }
     }
 
     let abandonResult = null;

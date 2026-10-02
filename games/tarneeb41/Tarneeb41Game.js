@@ -90,6 +90,7 @@ class Tarneeb41Game extends BaseGameEngine {
   constructor(roomId, options = {}) {
     super(roomId, "tarneeb41", options);
     this.maxPlayers = 4;
+    this.tableBuyIn = Number(options.tableBuyIn || options.buyIn) || 0;
     /**
      * Identity of this *table session* — the stretch of time one group of
      * people occupies the table.
@@ -263,7 +264,7 @@ class Tarneeb41Game extends BaseGameEngine {
         p.userId = keepSeatKey || id.userId;
         p.botUserId = id.userId; // real bot User id for profile clicks
         p.displayName = id.name || fallbackName;
-        p.avatar = id.avatar || p.avatar || null;
+        p.avatar = id.avatar || null;
         p.botPersonality = id.personality;
         p.botSkill = id.skill;
         p.botTuning = id.tuning;
@@ -271,6 +272,7 @@ class Tarneeb41Game extends BaseGameEngine {
         return;
       }
     } catch (_) { /* pool unavailable */ }
+    p.avatar = null;
     if (!p.displayName) p.displayName = fallbackName;
   }
 
@@ -285,6 +287,7 @@ class Tarneeb41Game extends BaseGameEngine {
     p.userId = `bot_vacate_${Date.now()}_${p.seatIndex ?? 0}`;
     p.socketId = null;
     p.displayName = "بوت";
+    p.avatar = null;
     p.reconnectDeadline = null;
     p.cosmetics = emptyCosmetics();
     p.vipLevel = null;
@@ -293,8 +296,9 @@ class Tarneeb41Game extends BaseGameEngine {
   }
 
   /** Restore a human who was replaced by a vacate-bot at the same Mongo seat index. */
-  async restoreHumanAtSeat(seatIndex, userId, socketId, displayName) {
+  async restoreHumanAtSeat(seatIndex, userId, socketId, displayName, opts = {}) {
     return this.replaceBotWithHuman(seatIndex, userId, socketId, displayName, {
+      ...opts,
       allowTakeover: false,
     });
   }
@@ -303,6 +307,7 @@ class Tarneeb41Game extends BaseGameEngine {
    * Replace a bot at [seatIndex] with a human.
    * @param {object} [opts]
    * @param {number} [opts.chips]
+   * @param {string} [opts.avatar]
    * @param {boolean} [opts.allowTakeover] — false: only vacatedFromUserId may return
    */
   async replaceBotWithHuman(seatIndex, userId, socketId, displayName, opts = {}) {
@@ -327,6 +332,31 @@ class Tarneeb41Game extends BaseGameEngine {
     p.reconnectDeadline = null;
     delete p.vacatedFromUserId;
 
+    if (opts.avatar !== undefined) {
+      p.avatar = opts.avatar;
+    } else {
+      try {
+        const mongoose = require("mongoose");
+        if (
+          mongoose.connection &&
+          mongoose.connection.readyState === 1 &&
+          mongoose.Types?.ObjectId?.isValid(userId) &&
+          !String(userId).startsWith("bot_")
+        ) {
+          const User = require("../../models/userModel");
+          const u = await User.findById(userId).select("profileImg name").lean();
+          if (u) {
+            p.avatar = u.profileImg || null;
+            if (!displayName && u.name) p.displayName = u.name;
+          }
+        } else {
+          p.avatar = null;
+        }
+      } catch (_) {
+        p.avatar = null;
+      }
+    }
+
     if (
       (this.state === "bidding_syrian" || this.state === "playing") &&
       this.currentPlayerIndex === seatIndex
@@ -339,10 +369,14 @@ class Tarneeb41Game extends BaseGameEngine {
 
   /** Adopt the table's bot policy. See the note on `botsEnabled`. */
   applyTablePolicy(tableDoc) {
-    if (!tableDoc || typeof tableDoc.settings !== "object" || tableDoc.settings === null) {
-      return;
+    if (!tableDoc) return;
+    if (typeof tableDoc.settings === "object" && tableDoc.settings !== null) {
+      this.botsEnabled = tableDoc.settings.botsEnabled !== false;
     }
-    this.botsEnabled = tableDoc.settings.botsEnabled !== false;
+    const buyIn = Number(tableDoc.minBuyIn || tableDoc.buyIn);
+    if (Number.isFinite(buyIn) && buyIn > 0) {
+      this.tableBuyIn = buyIn;
+    }
   }
 
   async syncLobbyFromTable(tableDoc, resolveSocket) {
@@ -397,6 +431,14 @@ class Tarneeb41Game extends BaseGameEngine {
    * bot-replace, syncLobbyFromTable) before building outgoing state.
    */
   async applyCosmeticsToPlayers() {
+    const mongoose = require("mongoose");
+    if (!mongoose.connection || mongoose.connection.readyState !== 1) {
+      for (const p of this.players) {
+        if (!p.cosmetics) p.cosmetics = emptyCosmetics();
+      }
+      return;
+    }
+
     const seatsForResolve = this.players.map((p, index) => ({
       userId: p.userId,
       isBot: !!p.isBot,
@@ -692,7 +734,7 @@ class Tarneeb41Game extends BaseGameEngine {
           seatIndex: p.seatIndex,
           isBot: true,
           displayName: "بوت",
-          chips: 0,
+          chips: this.tableBuyIn || 0,
         };
         this._applyBotIdentity(bot);
         this.players[i] = bot;
@@ -712,7 +754,7 @@ class Tarneeb41Game extends BaseGameEngine {
         chair: freeChairs.shift() ?? seatIndex,
         isBot: true,
         displayName: "بوت",
-        chips: 0,
+        chips: this.tableBuyIn || 0,
       };
       this._applyBotIdentity(bot);
       this.players.push(bot);

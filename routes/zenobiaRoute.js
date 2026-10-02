@@ -12,6 +12,9 @@ const {
 
 const router = express.Router();
 
+// Public paytable / rules — optional auth to attach user's active bonus state if logged in
+router.get("/economy", authService.optionalProtect, require("../controllers/slotEconomyController").forGame("zenobia"));
+
 router.use(authService.protect);
 
 router.get("/session", requireUserId, session);
@@ -21,7 +24,5 @@ router.get("/jackpot", requireUserId, jackpotRecover);
 router.post("/jackpot/reveal", requireUserId, jackpotReveal);
 router.post("/jackpot/revealed", requireUserId, jackpotReveal);
 router.post("/jackpot/settle", requireUserId, jackpotSettle);
-
-router.get("/economy", authService.protect, require("../controllers/slotEconomyController").forGame("zenobia"));
 
 module.exports = router;

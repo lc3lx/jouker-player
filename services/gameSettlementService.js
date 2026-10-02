@@ -27,6 +27,9 @@ function getRakePercent(gameType) {
   const envKey = `GAME_RAKE_PERCENT_${String(gameType || "").toUpperCase()}`;
   const specific = parseFloat(process.env[envKey]);
   if (Number.isFinite(specific) && specific >= 0 && specific <= 100) return specific;
+  if (gameType === "trix" || gameType === "tarneeb41") {
+    return 0;
+  }
   const global = parseFloat(process.env.GAME_RAKE_PERCENT || "5");
   return Number.isFinite(global) ? Math.max(0, Math.min(100, global)) : 5;
 }
@@ -266,27 +269,81 @@ function buildIdempotencyKey({ tableId, gameType, sessionId, gameResult }) {
 }
 
 function participantsFromTableAndGame(table, gamePlayers) {
+  const tableBuyIn = toSafeInt(table?.minBuyIn || table?.buyIn, 0);
+
   const playerBySeat = new Map();
   if (Array.isArray(gamePlayers)) {
     for (const p of gamePlayers) {
-      playerBySeat.set(toSafeInt(p.seatIndex, playerBySeat.size), p);
+      if (p.seatIndex != null) {
+        playerBySeat.set(toSafeInt(p.seatIndex, playerBySeat.size), p);
+      }
     }
   }
 
-  return table.seats.map((seat, idx) => {
-    const uid = seat.user && seat.user._id ? seat.user._id : seat.user;
+  const humanSeatByUserId = new Map();
+  if (Array.isArray(table?.seats)) {
+    for (const s of table.seats) {
+      const uid = s.user && s.user._id ? String(s.user._id) : String(s.user);
+      humanSeatByUserId.set(uid, s);
+    }
+  }
+
+  const seatCount = (Array.isArray(gamePlayers) && gamePlayers.length > 0)
+    ? gamePlayers.length
+    : Math.max(table?.capacity || 4, table?.seats?.length || 0);
+
+  const participants = [];
+  for (let idx = 0; idx < seatCount; idx++) {
     const gp = playerBySeat.get(idx);
-    const isBot = gp ? !!gp.isBot : false;
-    return {
-      userId: isBot ? null : uid,
-      seatIndex: idx,
-      buyIn: toSafeInt(seat.chips, 0),
-      isBot,
-      // Seat converted to a bot mid-game (engine marks vacatedFromUserId) — the
-      // vacated human's locked buy-in is forfeited during settlement (never paid out).
-      vacatedUserId: isBot && gp?.vacatedFromUserId ? gp.vacatedFromUserId : null,
-    };
-  });
+    if (gp) {
+      const isBot = !!gp.isBot;
+      let uid = null;
+      let buyIn = toSafeInt(gp.chips, tableBuyIn);
+
+      if (!isBot && gp.userId) {
+        uid = gp.userId && gp.userId._id ? gp.userId._id : gp.userId;
+        const mongoSeat = humanSeatByUserId.get(String(uid)) || table?.seats?.[idx];
+        if (mongoSeat && mongoSeat.chips != null) {
+          buyIn = toSafeInt(mongoSeat.chips, buyIn);
+        }
+      } else if (isBot) {
+        const mongoSeat = table?.seats?.[idx];
+        const seatChips = toSafeInt(mongoSeat?.chips, 0);
+        const fallbackChips = seatChips || toSafeInt(table?.seats?.[0]?.chips, 0);
+        buyIn = toSafeInt(gp.chips, 0) || tableBuyIn || fallbackChips;
+      }
+
+      participants.push({
+        userId: isBot ? null : uid,
+        seatIndex: idx,
+        buyIn,
+        isBot,
+        vacatedUserId: isBot && gp.vacatedFromUserId ? gp.vacatedFromUserId : null,
+      });
+    } else {
+      const mongoSeat = table?.seats?.[idx];
+      if (mongoSeat) {
+        const uid = mongoSeat.user && mongoSeat.user._id ? mongoSeat.user._id : mongoSeat.user;
+        participants.push({
+          userId: uid,
+          seatIndex: idx,
+          buyIn: toSafeInt(mongoSeat.chips, tableBuyIn),
+          isBot: false,
+          vacatedUserId: null,
+        });
+      } else {
+        participants.push({
+          userId: null,
+          seatIndex: idx,
+          buyIn: tableBuyIn,
+          isBot: true,
+          vacatedUserId: null,
+        });
+      }
+    }
+  }
+
+  return participants;
 }
 
 async function participantSettlementAlreadyApplied(settlementId, userId, session) {
@@ -471,8 +528,10 @@ async function applySettlementLedger({ session, tableId, settlementId, plan }) {
         });
       }
     } else {
-      const seat = table.seats[p.seatIndex];
-      if (seat && String(seat.user) === String(p.userId)) {
+      const seat = (table?.seats || []).find(
+        (s) => String(s.user?._id || s.user) === String(p.userId)
+      ) || table?.seats?.[p.seatIndex];
+      if (seat && String(seat.user?._id || seat.user) === String(p.userId)) {
         seat.chips = p.payout;
         await setTableLockAmount({
           session,

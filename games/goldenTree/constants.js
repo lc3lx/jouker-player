@@ -110,15 +110,15 @@ const PAYLINES = Object.freeze([
  * Seven has a payout at index 2 (2-match rule).
  */
 const PAYTABLE = Object.freeze({
-  [SYMBOLS.SEVEN]: [0, 0, 0.756, 2.16, 9.72, 81],
-  [SYMBOLS.GRAPES]: [0, 0, 0, 1.89, 4.86, 17.28],
-  [SYMBOLS.WATERMELON]: [0, 0, 0, 1.89, 4.86, 17.28],
-  [SYMBOLS.BELL]: [0, 0, 0, 1.08, 2.97, 10.8],
-  [SYMBOLS.BANANA]: [0, 0, 0, 0.81, 2.16, 5.94],
-  [SYMBOLS.CHERRY]: [0, 0, 0, 0.81, 2.16, 5.94],
-  [SYMBOLS.ORANGE]: [0, 0, 0, 0.81, 2.16, 5.94],
-  [SYMBOLS.PINEAPPLE]: [0, 0, 0, 0.81, 2.16, 5.94],
-  [SYMBOLS.PLUM]: [0, 0, 0, 0.81, 2.16, 5.94],
+  [SYMBOLS.SEVEN]: [0, 0, 1, 6, 35, 200],
+  [SYMBOLS.BELL]: [0, 0, 0, 3, 15, 60],
+  [SYMBOLS.GRAPES]: [0, 0, 0, 2, 8, 40],
+  [SYMBOLS.WATERMELON]: [0, 0, 0, 2, 8, 40],
+  [SYMBOLS.BANANA]: [0, 0, 0, 0.55, 2.5, 12],
+  [SYMBOLS.PINEAPPLE]: [0, 0, 0, 0.55, 2.5, 12],
+  [SYMBOLS.CHERRY]: [0, 0, 0, 0.5, 2, 10],
+  [SYMBOLS.ORANGE]: [0, 0, 0, 0.5, 2, 10],
+  [SYMBOLS.PLUM]: [0, 0, 0, 0.5, 2, 10],
 });
 
 /**

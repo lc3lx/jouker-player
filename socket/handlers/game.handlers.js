@@ -851,18 +851,34 @@ function registerGameHandlers(nsp, jwtVerify) {
           if (mongoSeatIdx >= 0) {
             const seat = table.seats[mongoSeatIdx];
             let nm = `لاعب ${mongoSeatIdx + 1}`;
-            if (seat.user && typeof seat.user === "object" && seat.user.name) {
-              nm = String(seat.user.name);
+            let avatar = null;
+            if (seat.user && typeof seat.user === "object") {
+              if (seat.user.name) nm = String(seat.user.name);
+              avatar = seat.user.profileImg || null;
+            }
+            let targetSeatIndex = -1;
+            const vacatedPlayer = (game.players || []).find(
+              (p) => p && p.isBot && p.vacatedFromUserId && String(p.vacatedFromUserId) === userIdStr
+            );
+            if (vacatedPlayer != null) {
+              targetSeatIndex = vacatedPlayer.seatIndex;
+            } else {
+              const chair = Number.isInteger(Number(seat?.seatPosition)) && Number(seat?.seatPosition) >= 0
+                ? Number(seat.seatPosition)
+                : mongoSeatIdx;
+              const seatByChair = (game.players || []).find((p) => p && p.chair === chair);
+              targetSeatIndex = seatByChair ? seatByChair.seatIndex : mongoSeatIdx;
             }
             if (
               await game.restoreHumanAtSeat(
-                mongoSeatIdx,
+                targetSeatIndex,
                 userId,
                 socket.id,
-                nm
+                nm,
+                { avatar }
               )
             ) {
-              seatIndex = mongoSeatIdx;
+              seatIndex = targetSeatIndex;
               await game.applyCosmeticsToPlayers();
             }
           }
@@ -985,18 +1001,34 @@ function registerGameHandlers(nsp, jwtVerify) {
           if (mongoSeatIdx >= 0) {
             const seat = table.seats[mongoSeatIdx];
             let nm = `لاعب ${mongoSeatIdx + 1}`;
-            if (seat.user && typeof seat.user === "object" && seat.user.name) {
-              nm = String(seat.user.name);
+            let avatar = null;
+            if (seat.user && typeof seat.user === "object") {
+              if (seat.user.name) nm = String(seat.user.name);
+              avatar = seat.user.profileImg || null;
+            }
+            let targetSeatIndex = -1;
+            const vacatedPlayer = (game.players || []).find(
+              (p) => p && p.isBot && p.vacatedFromUserId && String(p.vacatedFromUserId) === userIdStr
+            );
+            if (vacatedPlayer != null) {
+              targetSeatIndex = vacatedPlayer.seatIndex;
+            } else {
+              const chair = Number.isInteger(Number(seat?.seatPosition)) && Number(seat?.seatPosition) >= 0
+                ? Number(seat.seatPosition)
+                : mongoSeatIdx;
+              const seatByChair = (game.players || []).find((p) => p && p.chair === chair);
+              targetSeatIndex = seatByChair ? seatByChair.seatIndex : mongoSeatIdx;
             }
             if (
               await game.restoreHumanAtSeat(
-                mongoSeatIdx,
+                targetSeatIndex,
                 userId,
                 socket.id,
-                nm
+                nm,
+                { avatar }
               )
             ) {
-              seatIndex = mongoSeatIdx;
+              seatIndex = targetSeatIndex;
               roomManager.setUserTarneeb41Table(String(userId), String(table._id));
               await game.applyCosmeticsToPlayers();
             }

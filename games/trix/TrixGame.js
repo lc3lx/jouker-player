@@ -141,6 +141,7 @@ class TrixGame extends BaseGameEngine {
 
     /** @type {'solo'|'partnership'} */
     this.gameMode = normalizeTrixMode(options.gameMode);
+    this.tableBuyIn = Number(options.tableBuyIn || options.buyIn) || 0;
     /**
      * Bots may fill this table at all. Tournament tables set it false; a normal
      * cash table leaves it true. Only ever changed from a table document that
@@ -445,7 +446,7 @@ class TrixGame extends BaseGameEngine {
         p.userId = keepSeatKey || id.userId;
         p.botUserId = id.userId;
         p.displayName = id.name || fallbackName;
-        p.avatar = id.avatar || p.avatar || null;
+        p.avatar = id.avatar || null;
         p.botPersonality = id.personality;
         p.botSkill = id.skill;
         p.botTuning = id.tuning;
@@ -453,6 +454,7 @@ class TrixGame extends BaseGameEngine {
         return;
       }
     } catch (_) { /* pool unavailable */ }
+    p.avatar = null;
     if (!p.displayName) p.displayName = fallbackName;
   }
 
@@ -482,6 +484,7 @@ class TrixGame extends BaseGameEngine {
     p.userId = `bot_vacate_${Date.now()}_${p.seatIndex ?? 0}`;
     p.socketId = null;
     p.displayName = "بوت";
+    p.avatar = null;
     p.reconnectDeadline = null;
     p.cosmetics = emptyCosmetics();
     p.vipLevel = null;
@@ -490,8 +493,9 @@ class TrixGame extends BaseGameEngine {
     return true;
   }
 
-  async restoreHumanAtSeat(seatIndex, userId, socketId, displayName) {
+  async restoreHumanAtSeat(seatIndex, userId, socketId, displayName, opts = {}) {
     return this.replaceBotWithHuman(seatIndex, userId, socketId, displayName, {
+      ...opts,
       allowTakeover: false,
     });
   }
@@ -517,6 +521,32 @@ class TrixGame extends BaseGameEngine {
     if (opts.chips != null) p.chips = opts.chips;
     p.reconnectDeadline = null;
     delete p.vacatedFromUserId;
+
+    if (opts.avatar !== undefined) {
+      p.avatar = opts.avatar;
+    } else {
+      try {
+        const mongoose = require("mongoose");
+        if (
+          mongoose.connection &&
+          mongoose.connection.readyState === 1 &&
+          mongoose.Types?.ObjectId?.isValid(userId) &&
+          !String(userId).startsWith("bot_")
+        ) {
+          const User = require("../../models/userModel");
+          const u = await User.findById(userId).select("profileImg name").lean();
+          if (u) {
+            p.avatar = u.profileImg || null;
+            if (!displayName && u.name) p.displayName = u.name;
+          }
+        } else {
+          p.avatar = null;
+        }
+      } catch (_) {
+        p.avatar = null;
+      }
+    }
+
     this._syncGameStateSeat(seatIndex, false, p.displayName);
 
     if (
@@ -555,10 +585,14 @@ class TrixGame extends BaseGameEngine {
    * one is how a deliberately humans-only table quietly gets bots again.
    */
   applyTablePolicy(tableDoc) {
-    if (!tableDoc || typeof tableDoc.settings !== 'object' || tableDoc.settings === null) {
-      return;
+    if (!tableDoc) return;
+    if (typeof tableDoc.settings === 'object' && tableDoc.settings !== null) {
+      this.botsEnabled = tableDoc.settings.botsEnabled !== false;
     }
-    this.botsEnabled = tableDoc.settings.botsEnabled !== false;
+    const buyIn = Number(tableDoc.minBuyIn || tableDoc.buyIn);
+    if (Number.isFinite(buyIn) && buyIn > 0) {
+      this.tableBuyIn = buyIn;
+    }
   }
 
   async syncLobbyFromTable(tableDoc, resolveSocket) {
@@ -621,7 +655,7 @@ class TrixGame extends BaseGameEngine {
         isBot: true,
         displayName: 'بوت',
         avatar: null,
-        chips: 0,
+        chips: this.tableBuyIn || 0,
         vipLevel: null,
         cosmetics: emptyCosmetics(),
       };
@@ -638,6 +672,14 @@ class TrixGame extends BaseGameEngine {
    * bot-replace, syncLobbyFromTable) before building outgoing state.
    */
   async applyCosmeticsToPlayers() {
+    const mongoose = require("mongoose");
+    if (!mongoose.connection || mongoose.connection.readyState !== 1) {
+      for (const p of this.players) {
+        if (!p.cosmetics) p.cosmetics = emptyCosmetics();
+      }
+      return;
+    }
+
     const seatsForResolve = this.players.map((p, index) => ({
       userId: p.userId,
       isBot: !!p.isBot,
@@ -847,7 +889,8 @@ class TrixGame extends BaseGameEngine {
         chair: freeChairs.shift() ?? this.players.length,
         isBot: true,
         displayName: 'بوت',
-        chips: 0,
+        avatar: null,
+        chips: this.tableBuyIn || 0,
         vipLevel: null,
         cosmetics: emptyCosmetics(),
       };
