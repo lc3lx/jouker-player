@@ -225,7 +225,7 @@ function resolveSpin({
   if (economyVersion === 1) return require("./spinEngine.v1").resolveSpin({ bonusMode, superBonus, rng, edgeParams });
   if (economyVersion === 2) return require("./spinEngine.v2").resolveSpin({ bonusMode, superBonus, rng, edgeParams });
 
-  const scale = payScale ?? (bonusMode ? (superBonus ? 0.62 : 0.62) : 1);
+  const scale = payScale ?? 1;
   const matrix = generateGrid(rng, { bonus: bonusMode, superBonus: !!superBonus && bonusMode });
   const initialMatrix = matrix.map((col) => [...col]);
 

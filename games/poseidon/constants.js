@@ -82,7 +82,7 @@ const MULTIPLIER_VALUES = Object.freeze([2, 5, 10, 20, 50, 100, 200, 500, 1000])
 const BASE_MULTIPLIER_WEIGHTS = Object.freeze([10, 6, 2.5, 0.8, 0.15, 0.05, 0.02, 0.005, 0.001]);
 
 /** Buy-bonus / free-spins — calibrated weights (Zeus v3 clone). */
-const BONUS_MULTIPLIER_WEIGHTS = Object.freeze([14, 9, 5, 1.8, 0.7, 0.3, 0.12, 0.04, 0.01]);
+const BONUS_MULTIPLIER_WEIGHTS = Object.freeze([12.5, 12.5, 10, 10, 5, 4, 2, 1, 0.5]);
 
 /** Super buy-bonus multiplier weights (Zeus v3 clone). */
 const SUPER_MULTIPLIER_WEIGHTS = Object.freeze([0, 0, 0, 15, 7, 5, 3, 2, 1]);

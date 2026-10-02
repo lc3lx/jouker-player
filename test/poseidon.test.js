@@ -107,7 +107,7 @@ test("winTierFor maps bet multiples to banners", () => {
 test("calibrated multiplier probabilities follow Zeus cloned rules (rare 50+)", () => {
   const modes = [
     { name: "base", bonus: false, superBonus: false, weights: [10, 6, 2.5, 0.8, 0.15, 0.05, 0.02, 0.005, 0.001] },
-    { name: "bonus", bonus: true, superBonus: false, weights: [14, 9, 5, 1.8, 0.7, 0.3, 0.12, 0.04, 0.01] },
+    { name: "bonus", bonus: true, superBonus: false, weights: [12.5, 12.5, 10, 10, 5, 4, 2, 1, 0.5] },
     { name: "super", bonus: true, superBonus: true, weights: [0, 0, 0, 15, 7, 5, 3, 2, 1] },
   ];
   for (const mode of modes) {
@@ -685,9 +685,9 @@ test("seeded RTP simulation stays in the tuned band", () => {
   }
 
   const rtp = totalWon / totalBet;
-  // Tuned to Zeus economy v3 calibrated return band (~40% - 66%).
+  // Calibrated return band with full bonus multiplier accumulation.
   assert.ok(
-    rtp > 0.35 && rtp < 0.75,
+    rtp > 0.70 && rtp < 1.30,
     `RTP out of band: ${(rtp * 100).toFixed(1)}% — re-tune with tool/atlantisRtp.js`,
   );
 });

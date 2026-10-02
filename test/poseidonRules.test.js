@@ -8,7 +8,7 @@ const { rngFor } = require("../tool/zeusRulesAudit");
 
 const modes = [
   { name: "base", bonus: false, superBonus: false, weights: [10, 6, 2.5, 0.8, 0.15, 0.05, 0.02, 0.005, 0.001] },
-  { name: "bonus", bonus: true, superBonus: false, weights: [14, 9, 5, 1.8, 0.7, 0.3, 0.12, 0.04, 0.01] },
+  { name: "bonus", bonus: true, superBonus: false, weights: [12.5, 12.5, 10, 10, 5, 4, 2, 1, 0.5] },
   { name: "super", bonus: true, superBonus: true, weights: [0, 0, 0, 15, 7, 5, 3, 2, 1] },
 ];
 
@@ -82,6 +82,6 @@ test("public paytable reflects active Poseidon v3 rules and per-spin rates", asy
   assert.equal(fresh.jackpotWinProbability, 0.0001);
   assert.equal(fresh.naturalBonusProbability, 0.004);
   assert.deepEqual(fresh.multiplierProbabilities.base, [10, 6, 2.5, 0.8, 0.15, 0.05, 0.02, 0.005, 0.001]);
-  assert.deepEqual(fresh.multiplierProbabilities.bonus, [14, 9, 5, 1.8, 0.7, 0.3, 0.12, 0.04, 0.01]);
+  assert.deepEqual(fresh.multiplierProbabilities.bonus, [12.5, 12.5, 10, 10, 5, 4, 2, 1, 0.5]);
   assert.deepEqual(fresh.multiplierProbabilities.super, [0, 0, 0, 15, 7, 5, 3, 2, 1]);
 });

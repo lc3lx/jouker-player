@@ -71,7 +71,7 @@ const FREESPIN_WEIGHTS = [
 // Absolute percentages PER SPIN, not per cell or conditional on winning.
 // The joint x2/x5 allowance is divided equally. Remaining mass means no plaque.
 const BASE_MULTIPLIER_WEIGHTS = Object.freeze([10, 6, 2.5, 0.8, 0.15, 0.05, 0.02, 0.005, 0.001]);
-const BONUS_MULTIPLIER_WEIGHTS = Object.freeze([14, 9, 5, 1.8, 0.7, 0.3, 0.12, 0.04, 0.01]);
+const BONUS_MULTIPLIER_WEIGHTS = Object.freeze([12.5, 12.5, 10, 10, 5, 4, 2, 1, 0.5]);
 const SUPER_MULTIPLIER_WEIGHTS = Object.freeze([0, 0, 0, 15, 7, 5, 3, 2, 1]);
 // Pay exactly the published per-symbol formula in every mode.
 const BASE_PAY_SCALE = 1;

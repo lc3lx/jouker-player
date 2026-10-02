@@ -76,7 +76,7 @@ async function executeSpinInternal(userId, betAmountInput) {
       }
     }
 
-    const economyVersion = isFreeSpin ? (bonusSession.economyVersion || 1) : 3;
+    const economyVersion = isFreeSpin ? (bonusSession.economyVersion || 3) : 3;
     const superBonus = !!(isFreeSpin && bonusSession.superBonus);
     const edgeParams = economyVersion >= 2 && isFreeSpin ? null : houseEdgeController.calculateEdge({
       game: "poseidon",

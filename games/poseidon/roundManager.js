@@ -85,7 +85,7 @@ function sessionSnapshot(session) {
     totalWon: session.totalWon,
     superBonus: !!session.superBonus,
     bonusMultiplier: Number(session.bonusMultiplier || 0),
-    economyVersion: session.economyVersion || 1,
+    economyVersion: session.economyVersion || 3,
     createdAt: session.createdAt,
   };
 }
@@ -106,7 +106,7 @@ async function persistSession(session) {
         totalWon: session.totalWon,
         superBonus: !!session.superBonus,
         bonusMultiplier: Number(session.bonusMultiplier || 0),
-        economyVersion: session.economyVersion || 1,
+        economyVersion: session.economyVersion || 3,
     createdAt: session.createdAt,
         updatedAt: now,
       },
@@ -153,7 +153,7 @@ async function ensureLoaded(userId) {
       totalWon: roundMoney(doc.totalWon || 0),
       superBonus: !!doc.superBonus,
       bonusMultiplier: Number(doc.bonusMultiplier || 0),
-      economyVersion: doc.economyVersion || 1,
+      economyVersion: doc.economyVersion || 3,
       createdAt: doc.createdAt || Date.now(),
     };
     if (session.freeSpinsRemaining <= 0) return null;
