@@ -138,19 +138,14 @@ function matrixHasMultiplier(matrix) {
 }
 
 function generateGrid(rng, { bonus = false, superBonus = false } = {}) {
-  let face = pickMultiplierValue(rng, { bonus, superBonus });
-  if (superBonus && face === null) {
-    face = 20;
-  }
+  const face = pickMultiplierValue(rng, { bonus, superBonus });
 
   const jackpotRoll = rng();
-  const jackpotCount = bonus
-    ? 0
-    : (jackpotRoll < JACKPOT_WIN_PROBABILITY
-        ? 3
-        : jackpotRoll < JACKPOT_APPEARANCE_PROBABILITY
-            ? (rng() < 0.5 ? 1 : 2)
-            : 0);
+  const jackpotCount = jackpotRoll < JACKPOT_WIN_PROBABILITY
+    ? 3
+    : jackpotRoll < JACKPOT_APPEARANCE_PROBABILITY
+        ? (rng() < 0.5 ? 1 : 2)
+        : 0;
 
   const naturalBonus = !bonus && rng() < NATURAL_BONUS_PROBABILITY;
 
