@@ -150,7 +150,19 @@ function generateGrid(rng, { bonus = false, superBonus = false } = {}) {
   const naturalBonus = !bonus && rng() < NATURAL_BONUS_PROBABILITY;
 
   const special = [];
-  if (face !== null) special.push(`x${face}`);
+  if (face !== null) {
+    special.push(`x${face}`);
+    if (rng() < (bonus ? 0.30 : 0.15)) {
+      const face2 = pickMultiplierValue(rng, { bonus, superBonus });
+      if (face2 !== null) {
+        special.push(`x${face2}`);
+        if (rng() < (bonus ? 0.10 : 0.03)) {
+          const face3 = pickMultiplierValue(rng, { bonus, superBonus });
+          if (face3 !== null) special.push(`x${face3}`);
+        }
+      }
+    }
+  }
   if (jackpotCount > 0) special.push(...Array(jackpotCount).fill("jackpot"));
   if (naturalBonus) special.push(...Array(4).fill(SCATTER));
 
@@ -159,16 +171,38 @@ function generateGrid(rng, { bonus = false, superBonus = false } = {}) {
     const j = Math.floor(rng() * (i + 1));
     [positions[i], positions[j]] = [positions[j], positions[i]];
   }
-  const scheduled = new Map(special.map((s, i) => [positions[i], s]));
 
-  const matrix = Array.from({ length: REEL_COUNT }, () => Array(ROW_COUNT));
+  const matrix = Array.from({ length: REEL_COUNT }, () => Array(ROW_COUNT).fill(null));
+  let posIdx = 0;
+  for (const s of special) {
+    const pos = positions[posIdx++];
+    const c = Math.floor(pos / ROW_COUNT);
+    const r = pos % ROW_COUNT;
+    matrix[c][r] = s;
+  }
+
+  // Hit rate booster: target ~32-35% overall win rate on base spins
+  const hasMult = face !== null;
+  const hitRoll = rng();
+  const shouldSeedWin = !bonus && (hitRoll < 0.14 || (hasMult && hitRoll < 0.25));
+  if (shouldSeedWin) {
+    const royals = [SYMBOLS.A, SYMBOLS.E, SYMBOLS.N, SYMBOLS.S];
+    const highs = [SYMBOLS.CORAL, SYMBOLS.STARFISH, SYMBOLS.PEARL, SYMBOLS.FISH, SYMBOLS.CROWN];
+    const winSym = rng() < 0.82 ? royals[Math.floor(rng() * 4)] : highs[Math.floor(rng() * 5)];
+    const cRoll = rng();
+    const clusterSize = cRoll < 0.82 ? 8 : (cRoll < 0.96 ? 9 : 10);
+    for (let k = 0; k < clusterSize && posIdx < positions.length; k++) {
+      const pos = positions[posIdx++];
+      const c = Math.floor(pos / ROW_COUNT);
+      const r = pos % ROW_COUNT;
+      matrix[c][r] = winSym;
+    }
+  }
+
   let heads = naturalBonus ? 4 : 0;
   for (let c = 0; c < REEL_COUNT; c++) {
     for (let r = 0; r < ROW_COUNT; r++) {
-      const s = scheduled.get(c * ROW_COUNT + r);
-      if (s !== undefined) {
-        matrix[c][r] = s;
-      } else {
+      if (matrix[c][r] === null) {
         const sym = pickRegularSymbol(rng, bonus, bonus || heads < 3);
         if (sym === SCATTER) heads++;
         matrix[c][r] = sym;
