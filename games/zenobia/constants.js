@@ -93,7 +93,7 @@ const SUPPRESSED_MULTIPLIER_WEIGHTS = Object.freeze([
 /** Plaques at/above this face count as "big" for stacking suppression. */
 const BIG_MULTIPLIER_THRESHOLD = 20;
 /** Super buy-bonus: every plaque face is at least this. */
-const SUPER_MULTIPLIER_MIN = 10;
+const SUPER_MULTIPLIER_MIN = 30;
 
 const PAYING_SYMBOLS = Object.freeze([
   SYMBOLS.QUEEN,
@@ -159,7 +159,24 @@ const BONUS_WEIGHTS = Object.freeze([
   [SYMBOLS.NECKLACE, 6.5],
   [SYMBOLS.THRONE, 5],
   [SYMBOLS.QUEEN, 4],
-  ["mult", 3.75],
+  ["mult", 6.5],
+  [SCATTER, 1.01],
+  [JACKPOT, 0.61],
+]);
+
+/** Super bonus: extra heavy multiplier plaque frequency and royal values only. */
+const SUPER_BONUS_WEIGHTS = Object.freeze([
+  [SYMBOLS.S, 20],
+  [SYMBOLS.N, 20],
+  [SYMBOLS.E, 20],
+  [SYMBOLS.A, 20],
+  [SYMBOLS.RING, 12],
+  [SYMBOLS.SPEAR, 10],
+  [SYMBOLS.POT, 8],
+  [SYMBOLS.NECKLACE, 6.5],
+  [SYMBOLS.THRONE, 5],
+  [SYMBOLS.QUEEN, 4],
+  ["mult", 9.0],
   [SCATTER, 1.01],
   [JACKPOT, 0.61],
 ]);
@@ -272,6 +289,7 @@ module.exports = {
   PAYTABLE,
   BASE_WEIGHTS,
   BONUS_WEIGHTS,
+  SUPER_BONUS_WEIGHTS,
   WIN_TIERS,
   isMultiplier,
   multiplierValue,

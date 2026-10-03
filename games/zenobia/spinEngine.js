@@ -18,6 +18,7 @@ const {
   ROW_COUNT,
   BASE_WEIGHTS,
   BONUS_WEIGHTS,
+  SUPER_BONUS_WEIGHTS,
   MULTIPLIER_VALUES,
   BASE_MULTIPLIER_WEIGHTS,
   BONUS_MULTIPLIER_WEIGHTS,
@@ -204,7 +205,9 @@ function scattersInRefills(refills) {
  * }
  */
 function resolveSpin({ bonusMode = false, superBonus = false, rng = secureRandom, edgeParams = null } = {}) {
-  let weights = bonusMode ? BONUS_WEIGHTS : BASE_WEIGHTS;
+  let weights = bonusMode
+    ? (superBonus && SUPER_BONUS_WEIGHTS ? SUPER_BONUS_WEIGHTS : BONUS_WEIGHTS)
+    : BASE_WEIGHTS;
   if (edgeParams?.modulateSymbolWeights) {
     weights = edgeParams.modulateSymbolWeights(weights);
   }

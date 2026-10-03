@@ -128,6 +128,8 @@ const mountRoutes = (app) => {
   app.use("/api/v1/history", historyRoute);
   app.use("/api-docs", openapiRoute);
   app.use("/api/game", goldenTreeRoute);
+  app.use("/api/golden-tree", goldenTreeRoute);
+  app.use("/api/v1/golden-tree", goldenTreeRoute);
   app.use("/api/poseidon", poseidonRoute);
   app.use("/api/v1/poseidon", poseidonRoute);
   app.use("/api/zenobia", zenobiaRoute);

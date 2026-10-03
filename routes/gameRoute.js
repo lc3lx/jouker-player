@@ -144,4 +144,11 @@ router.post(
   unlockAchievement
 );
 
+// Paytable alias for golden-tree when requested as /api/v1/game/economy
+router.get(
+  "/economy",
+  authService.optionalProtect,
+  require("../controllers/slotEconomyController").forGame("golden-tree")
+);
+
 module.exports = router;

@@ -115,7 +115,7 @@ const SUPPRESSED_MULTIPLIER_WEIGHTS = Object.freeze([
 /** Plaques at/above this face count as "big" for stacking suppression. */
 const BIG_MULTIPLIER_THRESHOLD = 20;
 /** Super buy-bonus: every plaque face is at least this. */
-const SUPER_MULTIPLIER_MIN = 10;
+const SUPER_MULTIPLIER_MIN = 30;
 
 const PAYING_SYMBOLS = Object.freeze([
   SYMBOLS.QUEEN,

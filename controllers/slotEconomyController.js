@@ -10,14 +10,14 @@ exports.forGame = game => asyncHandler(async (req, res) => {
       if (game === "zeus") {
         bonus = await Promise.race([
           require("../games/dice/kingArthRoundState").getFreeSpinSession(userId, "king-arth"),
-          new Promise((_, reject) => setTimeout(() => reject(new Error("timeout")), 1500))
+          new Promise((_, reject) => setTimeout(() => reject(new Error("timeout")), 350))
         ]).catch(() => null);
       } else {
         const folder = game === "golden-tree" ? "goldenTree" : game;
         const manager = require(`../games/${folder}/roundManager`);
         await Promise.race([
           manager.ensureLoaded(userId),
-          new Promise((_, reject) => setTimeout(() => reject(new Error("timeout")), 1500))
+          new Promise((_, reject) => setTimeout(() => reject(new Error("timeout")), 350))
         ]).catch(() => null);
         bonus = manager.getBonusSession(userId);
       }

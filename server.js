@@ -197,6 +197,14 @@ app.use(
   }),
 );
 
+// Safeguard against clients appending /api/ paths to /api/v1 baseUrl
+app.use((req, res, next) => {
+  if (req.url && req.url.startsWith("/api/v1/api/")) {
+    req.url = req.url.replace(/^\/api\/v1\/api\//, "/api/");
+  }
+  next();
+});
+
 // Mount Routes
 mountRoutes(app);
 
