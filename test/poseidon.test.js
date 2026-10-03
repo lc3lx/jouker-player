@@ -106,9 +106,9 @@ test("winTierFor maps bet multiples to banners", () => {
 
 test("calibrated multiplier probabilities follow Zeus cloned rules (rare 50+)", () => {
   const modes = [
-    { name: "base", bonus: false, superBonus: false, weights: [24, 6, 0.8, 0.15, 0.04, 0.01, 0.005, 0.002, 0.001] },
-    { name: "bonus", bonus: true, superBonus: false, weights: [18, 10, 4, 1.2, 0.4, 0.15, 0.05, 0.01, 0.005] },
-    { name: "super", bonus: true, superBonus: true, weights: [0, 0, 0, 30, 18, 10, 5, 2.5, 1] },
+    { name: "base", bonus: false, superBonus: false, weights: [10, 6, 2.5, 0.8, 0.15, 0.05, 0.02, 0.005, 0.001] },
+    { name: "bonus", bonus: true, superBonus: false, weights: [12.5, 12.5, 10, 10, 5, 4, 2, 1, 0.5] },
+    { name: "super", bonus: true, superBonus: true, weights: [0, 0, 0, 15, 7, 5, 3, 2, 1] },
   ];
   for (const mode of modes) {
     const counts = new Map(), draws = 100000;

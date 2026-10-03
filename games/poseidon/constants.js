@@ -78,14 +78,14 @@ const SYMBOLS = Object.freeze({
  */
 const MULTIPLIER_VALUES = Object.freeze([2, 5, 10, 20, 50, 100, 200, 500, 1000]);
 
-/** Base-game plaque value weights — generous hit rate and exciting multipliers. */
-const BASE_MULTIPLIER_WEIGHTS = Object.freeze([24, 6, 0.8, 0.15, 0.04, 0.01, 0.005, 0.002, 0.001]);
+/** Base-game plaque value weights — calibrated with rare 50+ (Zeus v3 clone). */
+const BASE_MULTIPLIER_WEIGHTS = Object.freeze([10, 6, 2.5, 0.8, 0.15, 0.05, 0.02, 0.005, 0.001]);
 
-/** Buy-bonus / free-spins — calibrated weights. */
-const BONUS_MULTIPLIER_WEIGHTS = Object.freeze([18, 10, 4, 1.2, 0.4, 0.15, 0.05, 0.01, 0.005]);
+/** Buy-bonus / free-spins — calibrated weights (Zeus v3 clone). */
+const BONUS_MULTIPLIER_WEIGHTS = Object.freeze([12.5, 12.5, 10, 10, 5, 4, 2, 1, 0.5]);
 
-/** Super buy-bonus multiplier weights (min x20). */
-const SUPER_MULTIPLIER_WEIGHTS = Object.freeze([0, 0, 0, 30, 18, 10, 5, 2.5, 1]);
+/** Super buy-bonus multiplier weights (Zeus v3 clone). */
+const SUPER_MULTIPLIER_WEIGHTS = Object.freeze([0, 0, 0, 15, 7, 5, 3, 2, 1]);
 
 /**
  * When a mid/big plaque (x20+) is already on screen, further draws retain

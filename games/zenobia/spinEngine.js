@@ -1,4 +1,3 @@
-const economy = require("../utils/slotEconomy");
 /**
  * Zenobia spin engine — deals the board and resolves the whole tumble sequence
  * server-side. The client only replays the presentation it is handed.
@@ -71,20 +70,37 @@ function pickFromWeights(weights, rng, values) {
   return values[0];
 }
 
-function pickMultiplierValue(rng, opts = {}) {
-  return economy.pickFace(MULTIPLIER_VALUES, opts.bonus ? BONUS_MULTIPLIER_WEIGHTS : BASE_MULTIPLIER_WEIGHTS,
-    { rng, superBonus: opts.superBonus });
+function plaqueTable({ bonus = false, bigAlready = false, superBonus = false } = {}) {
+  const weights = bigAlready
+    ? SUPPRESSED_MULTIPLIER_WEIGHTS
+    : bonus || superBonus
+      ? BONUS_MULTIPLIER_WEIGHTS
+      : BASE_MULTIPLIER_WEIGHTS;
+  if (!superBonus) return { values: MULTIPLIER_VALUES, weights };
+  const start = MULTIPLIER_VALUES.findIndex((v) => v >= SUPER_MULTIPLIER_MIN);
+  return {
+    values: MULTIPLIER_VALUES.slice(start),
+    weights: weights.slice(start),
+  };
 }
 
+/**
+ * Weighted plaque face. Free spins use a richer table, super buy-bonus never
+ * deals below [SUPER_MULTIPLIER_MIN], and once a royal face is already on the
+ * board further draws collapse toward the gold end.
+ */
+function pickMultiplierValue(rng, opts = {}) {
+  let { values, weights } = plaqueTable(opts);
+  if (opts.edgeParams?.modulateMultiplierWeights) {
+    weights = opts.edgeParams.modulateMultiplierWeights(values, weights);
+  }
+  return pickFromWeights(weights, rng, values);
+}
+
+/** Draw one cell; the "mult" placeholder resolves to a concrete `x<value>`. */
 function drawCell(pick, rng, opts = {}) {
   const symbol = pick();
-  if (symbol !== "mult") return symbol;
-  const value = pickMultiplierValue(rng, opts);
-  if (value !== null) return `x${value}`;
-  // A failed super opportunity produces a regular paying symbol, never x0.
-  let regular;
-  do { regular = pick(); } while (regular === "mult" || regular === "jackpot" || regular === "bonus" || regular === "head");
-  return regular;
+  return symbol === "mult" ? `x${pickMultiplierValue(rng, opts)}` : symbol;
 }
 
 function isBigPlaque(cell) {
@@ -187,10 +203,7 @@ function scattersInRefills(refills) {
  *   scatters, scatterCount,
  * }
  */
-function resolveSpin({ bonusMode = false, superBonus = false, rng = secureRandom, edgeParams = null, economyVersion = economy.VERSION, payScale = null } = {}) {
-  if (economyVersion === 1) return require("./spinEngine.v1").resolveSpin({ bonusMode, superBonus, rng, edgeParams });
-  if (bonusMode) edgeParams = null;
-  const scale = payScale ?? economy.payScale("zenobia", { bonusMode, superBonus, tierName: edgeParams?.tierName });
+function resolveSpin({ bonusMode = false, superBonus = false, rng = secureRandom, edgeParams = null } = {}) {
   let weights = bonusMode ? BONUS_WEIGHTS : BASE_WEIGHTS;
   if (edgeParams?.modulateSymbolWeights) {
     weights = edgeParams.modulateSymbolWeights(weights);
@@ -204,7 +217,7 @@ function resolveSpin({ bonusMode = false, superBonus = false, rng = secureRandom
   const steps = [];
   let baseWin = 0;
   for (let i = 0; i < MAX_TUMBLES; i += 1) {
-    const wins = findWins(matrix).map(w => ({ ...w, payout: w.payout * scale }));
+    const wins = findWins(matrix);
     if (wins.length === 0) break;
 
     const stepWin = wins.reduce((sum, w) => sum + w.payout, 0);

@@ -19,9 +19,9 @@ test("each symbol pays the requested formula from 8 through 30, at multiple stak
 });
 
 const modes = [
-  { name: "base", bonus: false, superBonus: false, weights: [24, 6, 0.8, 0.15, 0.04, 0.01, 0.005, 0.002, 0.001] },
-  { name: "bonus", bonus: true, superBonus: false, weights: [18, 10, 4, 1.2, 0.4, 0.15, 0.05, 0.01, 0.005] },
-  { name: "super", bonus: true, superBonus: true, weights: [0, 0, 0, 30, 18, 10, 5, 2.5, 1] },
+  { name: "base", bonus: false, superBonus: false, weights: [10, 6, 2.5, 0.8, 0.15, 0.05, 0.02, 0.005, 0.001] },
+  { name: "bonus", bonus: true, superBonus: false, weights: [12.5, 12.5, 10, 10, 5, 4, 2, 1, 0.5] },
+  { name: "super", bonus: true, superBonus: true, weights: [0, 0, 0, 15, 7, 5, 3, 2, 1] },
 ];
 for (const mode of modes) {
   test(`${mode.name}: complete unit interval gives the exact specified per-spin probabilities`, () => {
@@ -39,16 +39,15 @@ for (const mode of modes) {
     let appearances = 0, jackpots = 0, natural = 0;
     for (let i = 0; i < draws; i++) {
       const out = e.spin(10000, { rng, isFreeSpin: mode.bonus, superBonus: mode.superBonus });
-      const plaques = out.initialGrid.flat().filter(s => s >= e.MULTIPLIER && s < e.JACKPOT);
-      const face = plaques.length > 0 ? e.MULTIPLIER_VALUES[plaques[0] - e.MULTIPLIER] : null;
+      const face = out.multipliers.collected || null;
       counts.set(face, (counts.get(face) || 0) + 1);
       appearances += Number(out.jackpotSymbolCount > 0);
       jackpots += Number(out.jackpotTriggered);
       natural += Number(out.freeSpinsAwarded > 0);
       for (const grid of [out.initialGrid, out.finalGrid, ...out.cascadeSteps.map(s => s.afterGrid)]) {
         const plaques = grid.flat().filter(s => s >= e.MULTIPLIER && s < e.JACKPOT);
-        assert.ok(plaques.length >= (face === null ? 0 : 1));
-        if (face !== null) assert.ok(plaques.length >= 1);
+        assert.equal(plaques.length, face === null ? 0 : 1);
+        if (face !== null) assert.equal(e.MULTIPLIER_VALUES[plaques[0] - e.MULTIPLIER], face);
         assert.equal(e.countJackpotSymbols(grid), out.jackpotSymbolCount);
       }
       assert.equal(out.totalWin, Math.min(Math.round(out.baseWin * out.multipliers.applied * 100) / 100, out.maxWin));
@@ -102,7 +101,7 @@ test("the public paytable reflects the active version, fixed payouts and per-spi
     assert.equal(fresh.bonusRtp, null);
     assert.equal(fresh.probabilityUnit, "per_spin");
     assert.deepEqual(fresh.payoutRows.find(row => row.symbol === 6).values, [1.1, .2]);
-    assert.deepEqual(fresh.multiplierProbabilities.super, [0, 0, 0, 30, 18, 10, 5, 2.5, 1]);
+    assert.deepEqual(fresh.multiplierProbabilities.super, [0,0,0,15,7,5,3,2,1]);
     await states.startFreeSpinSession(id, "king-arth", { lockedBaseBet: 10000, economyVersion: 2 });
     const old = (await read()).data;
     assert.equal(old.economyVersion, 2);

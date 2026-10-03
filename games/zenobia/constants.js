@@ -1,38 +1,16 @@
-const economy = require("../utils/slotEconomy");
 /**
  * Zenobia — Queen of the East (زنوبيا ملكة الشرق) — core game constants.
  *
- * Matrix: 6 reels (columns) × 5 rows — the same board shape and symbol
- * distribution style as Poseidon, but the win rule is a hybrid of the two
- * existing slots and belongs to neither:
+ * Matrix: 6 reels (columns) × 5 rows. Scatter-pays: a symbol pays whenever a
+ * continuous unbroken route across adjacent columns reaches length 4, 5, or 6
+ * (routes do not have to start on reel 0). Multiplier plaques land on any cell
+ * and bank into the Bonus Box; when a cascade finishes with a win, the box
+ * multiplier multiplies it.
  *
- *   "Caravan Route" — Golden Tree's connected adjacent-path rule generalised
- *   to a 6-reel board, then resolved inside Poseidon's tumble loop.
- *
- *   • A win is a route of [MIN_ROUTE]+ consecutive reels *anywhere* on the
- *     board — it does not have to touch reel 0. Each step moves one reel right
- *     and touches the previous cell (|Δrow| ≤ 1); all cells share one symbol.
- *   • Only maximal routes pay: a run that can be extended at either end is not
- *     a win of its own, so a 6-reel route never also pays as the 4 and 5 inside
- *     it. Every geometrically distinct maximal route pays (zig-zags included).
- *   • Winning routes shatter, survivors fall, the board refills from the top,
- *     and the whole thing re-evaluates until no route forms.
- *
- *   Dropping the reel-0 anchor multiplies the number of paying start positions
- *   by four, so [MIN_ROUTE] is 4 of the 6 reels and the pay bands and strip
- *   weights below are re-fitted around that — see the RTP sim in the tests.
- *
- * "Bonus Box" multipliers — the plaque board Zenobia holds beside the reels.
- * Every plaque that lands at any point during a tumble sequence banks into the
- * box (Poseidon only counts the final screen; here the box visibly fills as the
- * cascade runs). When the sequence ends on a win, the banked total multiplies
- * it. Base game: the box empties every spin. Free spins: the box carries
- * across spins and only grows on winning spins.
+ * Free spins: the box carries across spins and only grows on winning spins.
+ * Any win during free spins is multiplied by the carried pool.
  *
  * Free spins are driven by the BONUS coin scatter, not by plaque count.
- *
- * RTP is enforced by the seeded simulation in test/zenobia.test.js — re-run it
- * after touching any weight or paytable entry.
  */
 
 const REEL_COUNT = 6;
@@ -57,10 +35,9 @@ const FREE_SPINS_NATURAL = 10;
 const FREE_SPINS_BOUGHT = 10;
 const RETRIGGER_AWARD = 5;
 
-/** Buy bonus cost in bet multiples (EV-matched by the sim). */
-const BUY_BONUS_COST = 40.7;
-/** Super buy bonus — richer plaque table, never below [SUPER_MULTIPLIER_MIN]. */
-const SUPER_BUY_BONUS_COST = 407;
+/** Buy bonus cost in bet multiples. Standard: 100× bet, Super: 1000× bet (10× standard). */
+const BUY_BONUS_COST = 100;
+const SUPER_BUY_BONUS_COST = 1000;
 
 const SYMBOLS = Object.freeze({
   // low pays — carved stone letters (all pay the same)
@@ -96,25 +73,27 @@ const MULTIPLIER_VALUES = Object.freeze([
 const ROYAL_MULTIPLIER_MIN = 10;
 
 /** Base-game plaque faces — heavily skewed to the small gold end. */
-const BASE_MULTIPLIER_WEIGHTS = Object.freeze(economy.faceWeights(MULTIPLIER_VALUES, [
+const BASE_MULTIPLIER_WEIGHTS = Object.freeze([
   30, 21, 15, 11, 7.5, 5, 3.4, 2.4, 1.9, 1.0, 0.62, 0.3, 0.14, 0.08, 0.04, 0.012, 0.004,
-]));
+]);
 
 /** Free spins — the royal end opens up, x200/x500/x1000 stay rare. */
-const BONUS_MULTIPLIER_WEIGHTS = Object.freeze(economy.faceWeights(MULTIPLIER_VALUES, [
+const BONUS_MULTIPLIER_WEIGHTS = Object.freeze([
   22, 17, 13.5, 11, 8.5, 6.5, 5, 4, 3.6, 2.5, 1.7, 1.0, 0.55, 0.16, 0.07, 0.055, 0.018,
-]));
+]);
 
 /**
  * Once a royal plaque (x20+) is already banked this sequence, later draws
- * retain the same published face probabilities.
+ * collapse toward the gold end so several huge faces rarely stack.
  */
-const SUPPRESSED_MULTIPLIER_WEIGHTS = BASE_MULTIPLIER_WEIGHTS;
+const SUPPRESSED_MULTIPLIER_WEIGHTS = Object.freeze([
+  36, 24, 16, 10, 6, 3.4, 1.9, 1.1, 0.75, 0.32, 0.15, 0.06, 0.025, 0.012, 0.005, 0.0015, 0.0005,
+]);
 
 /** Plaques at/above this face count as "big" for stacking suppression. */
 const BIG_MULTIPLIER_THRESHOLD = 20;
 /** Super buy-bonus: every plaque face is at least this. */
-const SUPER_MULTIPLIER_MIN = 20;
+const SUPER_MULTIPLIER_MIN = 10;
 
 const PAYING_SYMBOLS = Object.freeze([
   SYMBOLS.QUEEN,
@@ -133,9 +112,6 @@ const PAYING_SYMBOLS = Object.freeze([
  * Route paytable in bet multiples, indexed by route length.
  * Index 0..[MIN_ROUTE]-1 are unreachable; 4 / 5 / 6 are the real bands.
  * Ranking: queen > throne > necklace > pot > spear > ring > letters.
- *
- * The bands are deliberately modest — a route is the *entry* to a win here, and
- * the Bonus Box plaque total is what turns one into a big one.
  */
 const LETTER_PAYS = Object.freeze([0, 0, 0, 0, 0.143, 0.432, 1.44]);
 const PAYTABLE = Object.freeze({
@@ -153,10 +129,7 @@ const PAYTABLE = Object.freeze({
 
 /**
  * Per-cell draw weights — independent weighted draws per cell, not physical
- * strips. The letters carry the concentration that keeps a 4-reel route
- * reachable now that routes are not anchored to reel 0; the plaque / coin /
- * jackpot cells hold the same share of the strip as before the change.
- * Tuned for a ~31% win rate.
+ * strips.
  */
 const BASE_WEIGHTS = Object.freeze([
   [SYMBOLS.S, 22],
@@ -246,8 +219,8 @@ function appliedMultiplierFor(sum) {
  * Box arithmetic for one spin.
  *
  * Base game: the box holds only this sequence's plaques and empties after.
- * Free spins: the box carries across spins, but a losing spin banks nothing —
- * its plaques are still counted for presentation, just not added to the total.
+ * Free spins: the box carries across spins, and grows on winning spins.
+ * In free spins, any winning spin is multiplied by the carried pool.
  */
 function resolvePayoutMultiplier({
   baseWin = 0,
@@ -259,9 +232,8 @@ function resolvePayoutMultiplier({
   const plaques = won ? Math.max(0, Number(plaqueSum) || 0) : 0;
   const prev = Math.max(0, Number(carried) || 0);
   const nextCarried = isFreeSpin ? prev + plaques : 0;
-  // The bank is retained, but a win needs a NEW plaque to activate it.
   const pool = isFreeSpin ? nextCarried : plaques;
-  const applied = won && plaques > 0 && pool > 0 ? appliedMultiplierFor(pool) : 1;
+  const applied = won && pool > 0 ? appliedMultiplierFor(pool) : 1;
   return { applied, nextCarried, plaques };
 }
 

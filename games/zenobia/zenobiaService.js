@@ -72,21 +72,10 @@ async function executeSpinInternal(userId, betAmountInput) {
       }
     }
 
-    const economyVersion = isFreeSpin ? (bonusSession.economyVersion || 1) : 2;
     const superBonus = !!(isFreeSpin && bonusSession.superBonus);
-    const edgeParams = economyVersion === 2 && isFreeSpin ? null : houseEdgeController.calculateEdge({
-      game: "zenobia",
-      betAmount,
-      betMin: BET_MIN,
-      userId: userKey,
-      isBonusSpin: isFreeSpin,
-      economyVersion,
-    });
     const spin = spinEngine.resolveSpin({
       bonusMode: isFreeSpin,
       superBonus,
-      edgeParams,
-      economyVersion,
     });
 
     // --- Bonus Box math (bet multiples) ---
@@ -95,34 +84,16 @@ async function executeSpinInternal(userId, betAmountInput) {
     // winning spin adds to it. Total is still hard-capped by MAX_WIN_MULTIPLIER.
     const carried = isFreeSpin ? Number(bonusSession.bonusMultiplier || 0) : 0;
     const freshPlaques = Math.max(0, Number(spin.multiplierSum) || 0);
-    const resolveMultiplier = economyVersion === 1 ? require("./constants.v1").resolvePayoutMultiplier : resolvePayoutMultiplier;
-    let { applied: appliedMultiplier, nextCarried } = resolveMultiplier({
+    let { applied: appliedMultiplier, nextCarried } = resolvePayoutMultiplier({
       baseWin: spin.baseWin,
       plaqueSum: freshPlaques,
       carried,
       isFreeSpin,
     });
-    // A bought/free-spin bank never multiplies a win that has no new plaque.
-    if (!(freshPlaques > 0)) appliedMultiplier = 1;
 
-
-    if (economyVersion === 1 && edgeParams?.highMultiplierDampening < 1.0 && appliedMultiplier > 1) {
-      appliedMultiplier = Math.max(
-        1,
-        Math.round(1 + (appliedMultiplier - 1) * edgeParams.highMultiplierDampening)
-      );
-    }
-
-    const activeCapMultiplier = Math.min(
-      MAX_WIN_MULTIPLIER,
-      edgeParams?.winCapMultiplier || MAX_WIN_MULTIPLIER
-    );
     let totalWinX = spin.baseWin * appliedMultiplier;
-    if (economyVersion === 1 && edgeParams?.modulateWinMultiple) {
-      totalWinX = edgeParams.modulateWinMultiple(totalWinX);
-    }
-    const winCapped = totalWinX > activeCapMultiplier;
-    if (winCapped) totalWinX = activeCapMultiplier;
+    const winCapped = totalWinX > MAX_WIN_MULTIPLIER;
+    if (winCapped) totalWinX = MAX_WIN_MULTIPLIER;
 
     const totalWin = roundMoney(totalWinX * betAmount);
 
@@ -238,7 +209,7 @@ async function executeSpinInternal(userId, betAmountInput) {
       baseWinAmount: roundMoney(spin.baseWin * betAmount),
       totalWin,
       winCapped,
-      maxWinCap: roundMoney(activeCapMultiplier * betAmount),
+      maxWinCap: roundMoney(MAX_WIN_MULTIPLIER * betAmount),
       winTier: winTierFor(totalWinX),
       isFreeSpin,
       superBonus,

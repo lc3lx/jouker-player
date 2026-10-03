@@ -70,9 +70,9 @@ const FREESPIN_WEIGHTS = [
 ];
 // Absolute percentages PER SPIN, not per cell or conditional on winning.
 // The joint x2/x5 allowance is divided equally. Remaining mass means no plaque.
-const BASE_MULTIPLIER_WEIGHTS = Object.freeze([24, 6, 0.8, 0.15, 0.04, 0.01, 0.005, 0.002, 0.001]);
-const BONUS_MULTIPLIER_WEIGHTS = Object.freeze([18, 10, 4, 1.2, 0.4, 0.15, 0.05, 0.01, 0.005]);
-const SUPER_MULTIPLIER_WEIGHTS = Object.freeze([0, 0, 0, 30, 18, 10, 5, 2.5, 1]);
+const BASE_MULTIPLIER_WEIGHTS = Object.freeze([10, 6, 2.5, 0.8, 0.15, 0.05, 0.02, 0.005, 0.001]);
+const BONUS_MULTIPLIER_WEIGHTS = Object.freeze([12.5, 12.5, 10, 10, 5, 4, 2, 1, 0.5]);
+const SUPER_MULTIPLIER_WEIGHTS = Object.freeze([0, 0, 0, 15, 7, 5, 3, 2, 1]);
 // Pay exactly the published per-symbol formula in every mode.
 const BASE_PAY_SCALE = 1;
 const FREESPIN_PAY_SCALE = 1;
@@ -135,21 +135,7 @@ function generateGrid(rng, volatility, doubleChance = false, isFreeSpin = false,
     : jackpotRoll < JACKPOT_APPEARANCE_PROBABILITY ? (rng() < 0.5 ? 1 : 2) : 0;
   const naturalBonus = !isFreeSpin && rng() < NATURAL_BONUS_PROBABILITY;
   const special = [];
-  if (face !== null) {
-    special.push(MULTIPLIER + MULTIPLIER_VALUES.indexOf(face));
-    if (rng() < (isFreeSpin ? 0.30 : 0.15)) {
-      const face2 = pickMultiplierValue(rng, volatility, { bonus: isFreeSpin, superBonus: isFreeSpin && superBonus });
-      if (face2 !== null) {
-        special.push(MULTIPLIER + MULTIPLIER_VALUES.indexOf(face2));
-        if (rng() < (isFreeSpin ? 0.10 : 0.03)) {
-          const face3 = pickMultiplierValue(rng, volatility, { bonus: isFreeSpin, superBonus: isFreeSpin && superBonus });
-          if (face3 !== null) {
-            special.push(MULTIPLIER + MULTIPLIER_VALUES.indexOf(face3));
-          }
-        }
-      }
-    }
-  }
+  if (face !== null) special.push(MULTIPLIER + MULTIPLIER_VALUES.indexOf(face));
   special.push(...Array(jackpotCount).fill(JACKPOT));
   if (naturalBonus) special.push(...Array(4).fill(HEAD));
   // Sample positions without replacement, before drawing regular symbols.
@@ -158,39 +144,16 @@ function generateGrid(rng, volatility, doubleChance = false, isFreeSpin = false,
     const j = Math.floor(rng() * (i + 1));
     [positions[i], positions[j]] = [positions[j], positions[i]];
   }
-  const grid = Array.from({ length: COLS }, () => Array(ROWS).fill(null));
+  const scheduled = new Map(special.map((symbol, i) => [positions[i], symbol]));
+  const grid = Array.from({ length: COLS }, () => Array(ROWS));
   let heads = naturalBonus ? 4 : 0;
-  let posIdx = 0;
-  for (const s of special) {
-    const pos = positions[posIdx++];
-    const c = Math.floor(pos / ROWS);
-    const r = pos % ROWS;
-    grid[c][r] = s;
-  }
-
-  // Target hit booster (~32-35% overall win rate on base spins)
-  const hasMult = face !== null;
-  const hitRoll = rng();
-  const shouldSeedWin = !isFreeSpin && (hitRoll < 0.14 || (hasMult && hitRoll < 0.25));
-  if (shouldSeedWin) {
-    const winSym = rng() < 0.85 ? Math.floor(rng() * 4) : 4 + Math.floor(rng() * 4);
-    const cRoll = rng();
-    const clusterSize = cRoll < 0.82 ? 8 : (cRoll < 0.96 ? 9 : 10);
-    for (let k = 0; k < clusterSize && posIdx < positions.length; k++) {
-      const pos = positions[posIdx++];
-      const c = Math.floor(pos / ROWS);
-      const r = pos % ROWS;
-      grid[c][r] = winSym;
-    }
-  }
-
-  for (let c = 0; c < COLS; c++) {
-    for (let r = 0; r < ROWS; r++) {
-      if (grid[c][r] === null) {
-        const symbol = pickSymbol(rng, isFreeSpin, isFreeSpin || heads < 3);
-        if (isHead(symbol)) heads++;
-        grid[c][r] = symbol;
-      }
+  for (let c = 0; c < COLS; c++) for (let r = 0; r < ROWS; r++) {
+    const scheduledSymbol = scheduled.get(c * ROWS + r);
+    if (scheduledSymbol !== undefined) grid[c][r] = scheduledSymbol;
+    else {
+      const symbol = pickSymbol(rng, isFreeSpin, isFreeSpin || heads < 3);
+      if (isHead(symbol)) heads++;
+      grid[c][r] = symbol;
     }
   }
   return grid;
