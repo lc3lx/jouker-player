@@ -1285,6 +1285,8 @@ class PokerTable {
     this.reconnectTimers.clear();
     for (const t of this.vacateTimers.values()) clearTimeout(t);
     this.vacateTimers.clear();
+    for (const t of this._inactiveEvictionTimers?.values() || []) clearTimeout(t);
+    this._inactiveEvictionTimers?.clear();
     // Free any persistent bot identities this table was holding.
     try {
       for (const s of this.seats || []) {
@@ -2532,6 +2534,10 @@ class PokerTable {
     if (!this.isOwner) return;
     for (const seat of this.seats) this.armRebuyExpiry(seat.userId, seat.rebuyOffer);
     for (const seat of this.seats) {
+      if (!seat?.isBot && toSafeInt(seat.inactiveHands, 0) >= 2 && !this.frozen) {
+        this.evictInactivePlayer(seat);
+        continue;
+      }
       if (!seat?.isBot && seat.playerState === PLAYER_STATE.DISCONNECTED) {
         seat.reconnectDeadline = Number(seat.reconnectDeadline) ||
           ((Number(seat.disconnectedAt) || Date.now()) + POKER_TIMINGS.RECONNECT_WINDOW_MS);
@@ -2566,7 +2572,7 @@ class PokerTable {
     seat.disconnectedAt = null;
     seat.reconnectDeadline = null;
     this.abandoningUserIds.add(uid);
-    await this.abandonHumanSeat(uid);
+    return this.abandonHumanSeat(uid);
   }
 
   onPlayerSocketConnected(userId) {
@@ -2747,8 +2753,10 @@ class PokerTable {
 
     try {
       const leaveRes = await this.leavePlayerImmediately(uid);
+      // A busy action lock is not permission to cash out a still-live seat.
+      if (!leaveRes && this.findSeatIndexByUser(uid) >= 0) return false;
       const { permanentLeavePokerTable } = require("../services/pokerVacateService");
-      await permanentLeavePokerTable({
+      const result = await permanentLeavePokerTable({
         tableId: this.tableId,
         userId: uid,
         force: true,
@@ -2756,12 +2764,14 @@ class PokerTable {
         forfeitedBet: leaveRes?.forfeitedBet,
       });
       await this.broadcastState();
+      return result?.left === true || result?.reason === "NOT_SEATED";
     } catch (err) {
       logger.warn("poker_abandon_seat_failed", {
         tableId: this.tableId,
         userId: uid,
         reason: err?.message || "unknown",
       });
+      return false;
     }
   }
 
@@ -4933,18 +4943,44 @@ class PokerTable {
     if (!this.isOwner || !this.currentHandId || this.frozen) return;
     const actions = this.currentHandActions || [];
     for (const seat of this.seats) {
-      if (seat.isBot || seat.inactivityHandId === this.currentHandId) continue;
+      if (seat.isBot) continue;
+      if (toSafeInt(seat.inactiveHands, 0) >= 2) {
+        this.evictInactivePlayer(seat);
+        continue;
+      }
+      if (seat.inactivityHandId === this.currentHandId) continue;
       const own = actions.filter((a) => String(a.playerId) === String(seat.userId));
       const manual = own.some((a) => ["fold", "check", "call", "raise"].includes(a.type));
       const timedOut = own.some((a) => a.type === "timeout_fold" || a.type === "timeout_call");
-      // Blinds, waiting seats and automatic all-ins are not missed turns.
-      if (!manual && !timedOut) continue;
+      const absent = [PLAYER_STATE.DISCONNECTED, PLAYER_STATE.SITTING_OUT].includes(seat.playerState);
+      // Disconnected/sitting-out humans still occupy a paid chair even though
+      // they are excluded from new deals and never get a timeout action.
+      // Mid-hand waiters and automatic all-ins are not missed turns.
+      if (!manual && !timedOut && !absent) continue;
       seat.inactivityHandId = this.currentHandId;
       seat.inactiveHands = manual ? 0 : toSafeInt(seat.inactiveHands, 0) + 1;
       if (seat.inactiveHands >= 2) {
-        // Marks LEAVE_PENDING synchronously; removal waits for the action lock
-        // held by settlement. Never await it from inside that same lock.
-        void this.leavePlayerPermanently(seat.userId).then(async () => {
+        this.evictInactivePlayer(seat);
+      }
+    }
+  }
+
+  evictInactivePlayer(seat) {
+    if (!this.isOwner || this.frozen || seat.isBot) return;
+    this._inactiveEvictions ||= new Set();
+    const uid = String(seat.userId);
+    if (this._inactiveEvictions.has(uid)) return;
+    clearTimeout(this._inactiveEvictionTimers?.get(uid));
+    this._inactiveEvictionTimers?.delete(uid);
+    this._inactiveEvictions.add(uid);
+    let retry = false;
+    // Do not await the action lock from inside settlement. A previous failed
+    // removal or owner recovery must retry LEAVE_PENDING rather than skip it.
+    const removal = seat.playerState === PLAYER_STATE.LEAVE_PENDING
+      ? this.abandonHumanSeat(uid)
+      : this.leavePlayerPermanently(uid);
+    void removal.then(async (removed) => {
+          if (removed === false) { retry = true; return; }
           if (this.findSeatIndexByUser(seat.userId) >= 0) return;
           const sockets = await this.nsp.in(`tg:${this.tableId}`).fetchSockets();
           for (const socket of sockets) {
@@ -4953,12 +4989,25 @@ class PokerTable {
             }
           }
         }).catch((err) => {
+          retry = true;
           logger.warn("poker_inactive_leave_failed", {
             tableId: this.tableId, userId: seat.userId, reason: err?.message,
           });
+        }).finally(() => {
+          this._inactiveEvictions.delete(uid);
+          if (!retry || !this.isOwner || this.frozen) return;
+          // The table may have stopped dealing after the last human left.
+          // Retry failed cleanup without requiring another completed hand.
+          this._inactiveEvictionTimers ||= new Map();
+          const timer = setTimeout(() => {
+            this._inactiveEvictionTimers.delete(uid);
+            const current = this.seats[this.findSeatIndexByUser(uid)];
+            if (current && toSafeInt(current.inactiveHands, 0) < 2) return;
+            this.evictInactivePlayer(current || seat);
+          }, 1000);
+          timer.unref?.();
+          this._inactiveEvictionTimers.set(uid, timer);
         });
-      }
-    }
   }
 
   async applyJackpotContribution() {

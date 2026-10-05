@@ -95,3 +95,59 @@ test("inactive eviction waits for the settlement lock and cashes out the settled
   assert.equal(g.findSeatIndexByUser("human"), -1);
   assert.equal(g.seats[0].userId, "active");
 });
+
+test("disconnected and sitting-out seats expire after two completed table hands without being dealt", t => {
+  for (const state of ["DISCONNECTED", "SITTING_OUT"]) {
+    const g = game(t);
+    Object.assign(g.seats[0], { playerState: state, inHand: false });
+    finish(g, "one", []);
+    assert.equal(g.seats[0].inactiveHands, 1);
+    finish(g, "two", []);
+    assert.deepEqual(g.leaves, ["human"]);
+    assert.equal(g.seats[0].playerState, "LEAVE_PENDING");
+  }
+});
+
+test("a busy eviction retries a pending seat on the next completed hand", async t => {
+  const g = game(t);
+  g.abandonHumanSeat = async uid => { g.leaves.push(uid); return false; };
+  finish(g, "one", ["timeout_fold"]);
+  finish(g, "two", ["timeout_fold"]);
+  await new Promise(resolve => setImmediate(resolve));
+  finish(g, "three", []);
+  assert.deepEqual(g.leaves, ["human", "human"]);
+});
+
+test("owner recovery resumes an inactive leave-pending seat", t => {
+  const g = game(t);
+  Object.assign(g.seats[0], { playerState: "LEAVE_PENDING", inactiveHands: 2 });
+  const restored = game(t);
+  restored.restoreFromSnapshot(g.serializeSnapshot());
+  assert.deepEqual(restored.leaves, ["human"]);
+});
+
+test("failed engine lock does not force a cash-out of a live chair", async t => {
+  const g = game(t);
+  g.leavePlayerImmediately = async () => null;
+  t.mock.method(require("../services/pokerVacateService"), "permanentLeavePokerTable", async () => {
+    assert.fail("cash-out while the engine still owns the chair");
+  });
+  assert.equal(await PokerTable.prototype.abandonHumanSeat.call(g, "human"), false);
+  assert.equal(g.findSeatIndexByUser("human"), 0);
+});
+
+test("inactive cleanup retries even when the table no longer deals hands", { timeout: 3000 }, async t => {
+  const g = game(t);
+  let retried;
+  const retry = new Promise(resolve => { retried = resolve; });
+  g.abandonHumanSeat = async uid => {
+    g.leaves.push(uid);
+    if (g.leaves.length === 1) return false;
+    retried();
+    return true;
+  };
+  finish(g, "one", ["timeout_fold"]);
+  finish(g, "two", ["timeout_fold"]);
+  await retry;
+  assert.deepEqual(g.leaves, ["human", "human"]);
+});
