@@ -817,6 +817,8 @@ class PokerTable {
         handStartChips: toSafeInt(s.handStartChips, s.chips),
         lastAction: s.lastAction && typeof s.lastAction === "object" ? { ...s.lastAction } : null,
         actedThisStreet: !!s.actedThisStreet,
+        inactiveHands: toSafeInt(s.inactiveHands, 0),
+        inactivityHandId: s.inactivityHandId || null,
         playerState: s.playerState || PLAYER_STATE.SEATED,
         disconnectedAt: s.disconnectedAt || null,
         reconnectDeadline: s.reconnectDeadline || null,
@@ -922,6 +924,8 @@ class PokerTable {
         handStartChips: toSafeInt(s.handStartChips, toSafeInt(s.chips, 0)),
         lastAction: s.lastAction && typeof s.lastAction === "object" ? { ...s.lastAction } : null,
         actedThisStreet: !!s.actedThisStreet,
+        inactiveHands: toSafeInt(s.inactiveHands, 0),
+        inactivityHandId: s.inactivityHandId || null,
         playerState: s.playerState || PLAYER_STATE.SEATED,
         disconnectedAt: s.disconnectedAt || null,
         reconnectDeadline: s.reconnectDeadline || null,
@@ -2072,6 +2076,8 @@ class PokerTable {
         s.playerState = prev.playerState || s.playerState;
         s.disconnectedAt = prev.disconnectedAt;
         s.reconnectDeadline = prev.reconnectDeadline;
+        s.inactiveHands = prev.inactiveHands;
+        s.inactivityHandId = prev.inactivityHandId;
       }
     }
     await this.applyCosmeticsToSeats();
@@ -3538,7 +3544,72 @@ class PokerTable {
     return -1;
   }
 
-  dealHoleCards(deck) {
+  dealHoleCards(deck, forcedWinnerSeat = null) {
+    if (forcedWinnerSeat) {
+      const suits = ['h', 's', 'c', 'd'];
+      const suit = suits[Math.floor(Math.random() * suits.length)];
+      const roll = Math.random();
+
+      let targetHole, targetComm, excludedCards;
+      if (roll < 0.50) {
+        // 1. Royal Flush (80% payout)
+        targetHole = ['A' + suit, 'K' + suit];
+        targetComm = ['Q' + suit, 'J' + suit, 'T' + suit];
+        excludedCards = new Set([...targetHole, ...targetComm]);
+      } else if (roll < 0.80) {
+        // 2. King-high Straight Flush (30% payout)
+        targetHole = ['K' + suit, 'Q' + suit];
+        targetComm = ['J' + suit, 'T' + suit, '9' + suit];
+        // Exclude Ace of suit so nobody can beat with Royal Flush
+        excludedCards = new Set([...targetHole, ...targetComm, 'A' + suit]);
+      } else {
+        // 3. Four of a Kind - Quad Aces (10% payout)
+        targetHole = ['Ah', 'As'];
+        targetComm = ['Ac', 'Ad', 'K' + suit];
+        excludedCards = new Set([...targetHole, ...targetComm]);
+      }
+
+      const remaining = deck.filter((c) => !excludedCards.has(c));
+
+      for (const s of this.seats) {
+        if (canBeDealtIntoHand(s)) {
+          s.inHand = true;
+          s.folded = false;
+          s.allIn = false;
+          s.bet = 0;
+          s.invested = 0;
+          if (s === forcedWinnerSeat || String(s.userId) === String(forcedWinnerSeat.userId)) {
+            s.hole = [...targetHole];
+          } else {
+            s.hole = draw(remaining, 2);
+          }
+          s.playerState = PLAYER_STATE.ACTIVE_HAND;
+        } else {
+          s.inHand = false;
+          s.folded = true;
+          s.allIn = false;
+          s.bet = 0;
+          s.invested = 0;
+          s.hole = [];
+        }
+      }
+
+      // Reconstruct deck for flop, turn, river with guaranteed winning community cards
+      const flop1 = targetComm[0];
+      const flop2 = targetComm[1];
+      const flop3 = remaining.pop();
+      const turn = targetComm[2];
+      const river = remaining.pop();
+      const burn1 = remaining.pop();
+      const burn2 = remaining.pop();
+      const burn3 = remaining.pop();
+
+      deck.length = 0;
+      deck.push(...remaining);
+      deck.push(river, burn3, turn, burn2, flop3, flop2, flop1, burn1);
+      return;
+    }
+
     for (const s of this.seats) {
       if (canBeDealtIntoHand(s)) {
         s.inHand = true;
@@ -3804,6 +3875,41 @@ class PokerTable {
       logger.warn('island_ticket_prepare_failed', { handId: this.currentHandId, message: error.message });
     }
 
+    // Check if Island Jackpot has reached 100M threshold for forced random win deal
+    this._isIsland100MForcedHand = false;
+    this._islandForcedWinnerSeat = null;
+    let islandForcedWinnerSeat = null;
+    try {
+      const IslandPool = require('../models/islandPoolModel');
+      const IslandTicket = require('../models/islandTicketModel');
+      const pool = await IslandPool.findOne({ key: 'default' }).lean();
+      if (pool && pool.enabled && Number(pool.poolBalance || 0) >= 100_000_000) {
+        const dealtHumanSeats = this.seats.filter(s => canBeDealtIntoHand(s) && !s.isBot);
+        if (dealtHumanSeats.length > 0) {
+          const uids = dealtHumanSeats.map(s => s.userId);
+          const activeTickets = await IslandTicket.find({
+            handId: String(this.currentHandId),
+            tableId: String(this.tableId),
+            userId: { $in: uids },
+          }).lean();
+          const ticketUserIds = new Set(activeTickets.map(t => String(t.userId)));
+          const ticketedSeats = dealtHumanSeats.filter(s => ticketUserIds.has(String(s.userId)));
+          if (ticketedSeats.length > 0) {
+            islandForcedWinnerSeat = ticketedSeats[Math.floor(Math.random() * ticketedSeats.length)];
+            this._isIsland100MForcedHand = true;
+            this._islandForcedWinnerSeat = islandForcedWinnerSeat;
+            logger.info('island_100m_forced_deal_armed', {
+              handId: this.currentHandId,
+              tableId: this.tableId,
+              winnerUserId: islandForcedWinnerSeat.userId,
+            });
+          }
+        }
+      }
+    } catch (e) {
+      logger.warn('island_forced_win_check_failed', { handId: this.currentHandId, error: e?.message });
+    }
+
     for (const s of this.seats) {
       s.handStartChips = s.chips;
       s.lastAction = null;
@@ -3811,7 +3917,7 @@ class PokerTable {
     }
 
     // Deal hole cards
-    this.dealHoleCards(deck);
+    this.dealHoleCards(deck, islandForcedWinnerSeat);
 
     // Post blinds
     const order = this.seatOrderFrom(this.dealerIndex);
@@ -4008,16 +4114,21 @@ class PokerTable {
       }
 
       const callAmount = Math.max(0, this.currentBet - s.bet);
-      // Architecture timeout rule
-      if (callAmount === 0) {
+      const isForcedWinner = this._isIsland100MForcedHand && this._islandForcedWinnerSeat &&
+        (s === this._islandForcedWinnerSeat || String(s.userId) === String(this._islandForcedWinnerSeat.userId));
+
+      // Architecture timeout rule (forced winner auto-calls to preserve jackpot showdown)
+      if (callAmount === 0 || isForcedWinner) {
         // Acts as "call/check"
+        const beforeChips = s.chips;
         this.applyCall(this.currentIndex);
-        this.recordSeatAction(this.currentIndex, "check", 0);
+        const paid = Math.max(0, beforeChips - s.chips);
+        this.recordSeatAction(this.currentIndex, callAmount === 0 ? "check" : "call", paid);
         this.appendHandAction({
           type: "timeout_call",
           seatIndex: this.currentIndex,
           playerId: this.seats[this.currentIndex]?.userId,
-          amount: 0,
+          amount: paid,
         });
       } else {
         this.applyFold(this.currentIndex);
@@ -4090,6 +4201,20 @@ class PokerTable {
     const tun = seat.botTuning || null;
     const T = (base, kind) => botBehaviorService.pokerThreshold(base, tun, kind);
 
+    if (this._isIsland100MForcedHand) {
+      if (need === 0) {
+        this.applyCall(seatIndex);
+        this.recordSeatAction(seatIndex, "check", 0);
+      } else {
+        const beforeChips = this.seats[seatIndex].chips;
+        this.applyCall(seatIndex);
+        const paid = Math.max(0, beforeChips - this.seats[seatIndex].chips);
+        this.recordSeatAction(seatIndex, "call", paid);
+      }
+      this.markVoluntaryAction(seatIndex);
+      return;
+    }
+
     if (need === 0) {
       if (canRaise && stack > this.bigBlind * 2 && roll < T(0.22, "raise")) {
         const raise = this.botRaiseSize(seatIndex);
@@ -4152,6 +4277,12 @@ class PokerTable {
   }
 
   applyFold(i) {
+    if (this._isIsland100MForcedHand && this._islandForcedWinnerSeat &&
+        (this.seats[i] === this._islandForcedWinnerSeat || String(this.seats[i]?.userId) === String(this._islandForcedWinnerSeat.userId))) {
+      // Prevent forced winner from folding away their winning hand
+      this.applyCall(i);
+      return;
+    }
     this.seats[i].folded = true;
   }
 
@@ -4507,6 +4638,11 @@ class PokerTable {
   }
 
   async finishHandByFold() {
+    if (this._isIsland100MForcedHand) {
+      while (this.community.length < 5 && this.deck && this.deck.length > 0) {
+        this.dealCommunity(1);
+      }
+    }
     // Award whole pot to the only alive player
     const winnerIdx = this.seats.findIndex((s) => s.inHand && !s.folded);
     const payouts = new Map();
@@ -4517,7 +4653,7 @@ class PokerTable {
       [],
       payouts,
       winnerIdx >= 0 ? [winnerIdx] : [],
-      { reason: "fold" }
+      { reason: this._isIsland100MForcedHand ? "showdown" : "fold" }
     );
   }
 
@@ -4791,6 +4927,38 @@ class PokerTable {
     // Winner banner is now visible; wait NEXT_HAND_DELAY_MS before dealing again
     // so the win display and the next hand never overlap.
     this.scheduleNextHand();
+  }
+
+  recordCompletedHandInactivity() {
+    if (!this.isOwner || !this.currentHandId || this.frozen) return;
+    const actions = this.currentHandActions || [];
+    for (const seat of this.seats) {
+      if (seat.isBot || seat.inactivityHandId === this.currentHandId) continue;
+      const own = actions.filter((a) => String(a.playerId) === String(seat.userId));
+      const manual = own.some((a) => ["fold", "check", "call", "raise"].includes(a.type));
+      const timedOut = own.some((a) => a.type === "timeout_fold" || a.type === "timeout_call");
+      // Blinds, waiting seats and automatic all-ins are not missed turns.
+      if (!manual && !timedOut) continue;
+      seat.inactivityHandId = this.currentHandId;
+      seat.inactiveHands = manual ? 0 : toSafeInt(seat.inactiveHands, 0) + 1;
+      if (seat.inactiveHands >= 2) {
+        // Marks LEAVE_PENDING synchronously; removal waits for the action lock
+        // held by settlement. Never await it from inside that same lock.
+        void this.leavePlayerPermanently(seat.userId).then(async () => {
+          if (this.findSeatIndexByUser(seat.userId) >= 0) return;
+          const sockets = await this.nsp.in(`tg:${this.tableId}`).fetchSockets();
+          for (const socket of sockets) {
+            if (String(socket.data?.userId ?? socket.userId) === String(seat.userId)) {
+              socket.emit("kicked_from_table", { tableId: this.tableId, reason: "inactive_two_hands" });
+            }
+          }
+        }).catch((err) => {
+          logger.warn("poker_inactive_leave_failed", {
+            tableId: this.tableId, userId: seat.userId, reason: err?.message,
+          });
+        });
+      }
+    }
   }
 
   async applyJackpotContribution() {
@@ -5547,6 +5715,7 @@ class PokerTable {
     this.nextHandNotBefore = Date.now() + POKER_TIMINGS.NEXT_HAND_DELAY_MS;
     this.running = false;
     this.clearActionScheduling();
+    this.recordCompletedHandInactivity();
     await this.autoRebuyBustedHumans();
     if (manageLifecycle) {
       this.nextHandNotBefore = Date.now() + POKER_TIMINGS.NEXT_HAND_DELAY_MS;

@@ -155,6 +155,55 @@ async function sendInvitation(fromId, {
 
   emitToUser(toUserId, "invitation:received", payload);
 
+  const gameNameAr =
+    gameType === "trix"
+      ? "تركس"
+      : gameType === "tarneeb41"
+      ? "طرنيب"
+      : gameType === "poker"
+      ? "بوكر"
+      : gameType || "اللعبة";
+
+  const inviteTitle = "دعوة للعب";
+  const inviteBody = displayName
+    ? `${displayName} دعاك للانضمام إلى طاولة ${gameNameAr}`
+    : `تلقيت دعوة للانضمام إلى طاولة ${gameNameAr}`;
+
+  try {
+    const { createNotification } = require("./notificationService");
+    await createNotification({
+      userId: toUserId,
+      category: "social",
+      title: inviteTitle,
+      subtitle: inviteBody,
+      icon: "people",
+      sourceType: "game_invitation",
+      sourceId: String(invite._id),
+      meta: {
+        invitationId: String(invite._id),
+        fromUserId: String(fromId),
+        gameType,
+        tableId: tableId ? String(tableId) : null,
+      },
+    });
+  } catch (_) {
+    try {
+      const { sendPushToUser } = require("./pushService");
+      sendPushToUser(toUserId, {
+        title: inviteTitle,
+        body: inviteBody,
+        data: {
+          category: "invitation",
+          invitationId: String(invite._id),
+          tableId: tableId ? String(tableId) : "",
+          gameType: gameType || "",
+        },
+      }).catch(() => {});
+    } catch (pushErr) {
+      /* push is best-effort */
+    }
+  }
+
   await auditService.logEvent({
     event: "game_invitation_sent",
     actor: fromId,

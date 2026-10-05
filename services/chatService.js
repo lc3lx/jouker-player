@@ -88,6 +88,27 @@ async function sendMessage({
     if (channel === "private" || channel === "friend") {
       io.to(`user:${String(senderId)}`).emit("chat:message", payload);
       io.to(`user:${String(recipientId)}`).emit("chat:message", payload);
+
+      if (recipientId && String(senderId) !== String(recipientId)) {
+        (async () => {
+          try {
+            const User = require("../models/userModel");
+            const sender = await User.findById(senderId).select("name").lean();
+            const senderName = sender?.name?.trim() || "رسالة خاصة";
+            const { sendPushToUser } = require("./pushService");
+            await sendPushToUser(recipientId, {
+              title: senderName,
+              body: text || "أرسل لك رمزاً تعبيرياً",
+              data: {
+                category: "chat",
+                channel,
+                channelId: String(channelId),
+                senderId: String(senderId),
+              },
+            });
+          } catch (_) {}
+        })().catch(() => {});
+      }
     } else {
       io.to(roomForChannel(channel, channelId)).emit("chat:message", payload);
     }

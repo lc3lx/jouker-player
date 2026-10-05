@@ -54,8 +54,8 @@ const islandPoolSchema = new mongoose.Schema(
   {
     key: { type: String, default: "default", unique: true, index: true },
     enabled: { type: Boolean, default: true },
-    poolBalance: { type: Number, default: 0, min: 0 },
-    minTriggerAmount: { type: Number, default: 120_000_000, min: 0 },
+    poolBalance: { type: Number, default: 50_000_000, min: 0 },
+    minTriggerAmount: { type: Number, default: 100_000_000, min: 0 },
     entryFee: { type: Number, default: 50_000, min: 0 },
     payoutPercentages: { type: payoutPercentagesSchema, default: () => ({}) },
     payoutPolicy: { type: payoutPolicySchema, default: () => ({}) },
@@ -68,6 +68,7 @@ const islandPoolSchema = new mongoose.Schema(
     lastWinner: lastWinnerSchema,
     /** UTC calendar day (YYYY-MM-DD) of the last house daily fill. */
     lastDailyFillDayUtc: { type: String, default: "" },
+    lastWeeklyFillWeekUtc: { type: String, default: "" },
   },
   { timestamps: true }
 );

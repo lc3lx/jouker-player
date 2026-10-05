@@ -2,6 +2,7 @@
 const { AsyncLocalStorage } = require("node:async_hooks");
 const crypto = require("node:crypto");
 const ApiError = require("../../utils/apiError");
+const logger = require("../../utils/logger");
 const context = new AsyncLocalStorage();
 const receipts = new Map();
 
@@ -23,7 +24,8 @@ async function run({ game, userId, wallet, manager, modelName, requestId, input 
   if (requestId != null && (typeof requestId !== "string" || !/^[A-Za-z0-9_-]{8,128}$/.test(requestId))) throw new ApiError("Invalid requestId", 400);
   const fingerprint = crypto.createHash("sha256").update(JSON.stringify(input)).digest("hex");
   const key = JSON.stringify([game, user, requestId]);
-  return wallet.withUserLock(user, async () => {
+  const startedAt = Date.now();
+  const completed = await wallet.withUserLock(user, async () => {
     const mongo = wallet.MODE === "mongo";
     async function execute(session) {
       const Receipt = mongo ? require("../../models/slotOperationModel") : null;
@@ -81,11 +83,26 @@ async function run({ game, userId, wallet, manager, modelName, requestId, input 
       throw err;
     }
     }
-    for (const job of completed.jobs) {
-      try { await job(); } catch (err) { console.error("slot post-commit telemetry failed", err.message); }
-    }
-    return completed.response;
+    return completed;
+  }).catch((err) => {
+    logger.warn("slot_operation_failed", {
+      game, userId: user, requestId, elapsedMs: Date.now() - startedAt,
+      reason: err?.message || "unknown",
+    });
+    throw err;
   });
+  // Settlement and its receipt are committed. Notifications/telemetry must
+  // neither retain the wallet lock nor delay delivery of the paid result.
+  for (const job of completed.jobs) {
+    try {
+      Promise.resolve(job()).catch((err) => {
+        console.error("slot post-commit telemetry failed", err.message);
+      });
+    } catch (err) {
+      console.error("slot post-commit telemetry failed", err.message);
+    }
+  }
+  return completed.response;
 }
 
 function clearForTests() { receipts.clear(); }

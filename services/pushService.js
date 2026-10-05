@@ -9,6 +9,7 @@
  * in disabled mode: every call is a silent no-op so the app never breaks.
  */
 const fs = require("fs");
+const path = require("path");
 const logger = require("../utils/logger");
 const DeviceToken = require("../models/deviceTokenModel");
 
@@ -27,6 +28,10 @@ function readServiceAccount() {
   if (pathEnv && fs.existsSync(pathEnv)) {
     return JSON.parse(fs.readFileSync(pathEnv, "utf8"));
   }
+  const fallbackPath = path.resolve(__dirname, "../secrets/firebase-service-account.json");
+  if (fs.existsSync(fallbackPath)) {
+    return JSON.parse(fs.readFileSync(fallbackPath, "utf8"));
+  }
   return null;
 }
 
@@ -41,12 +46,17 @@ function getMessaging() {
     }
     // eslint-disable-next-line global-require
     const admin = require("firebase-admin");
-    if (!admin.apps.length) {
-      admin.initializeApp({
-        credential: admin.credential.cert(serviceAccount),
-      });
+    const { getMessaging: getFcmMessaging } = require("firebase-admin/messaging");
+
+    const apps = admin.getApps ? admin.getApps() : (admin.apps || []);
+    let app = apps.length ? apps[0] : null;
+    if (!app) {
+      const credential = typeof admin.cert === "function"
+        ? admin.cert(serviceAccount)
+        : (admin.credential?.cert ? admin.credential.cert(serviceAccount) : null);
+      app = admin.initializeApp({ credential });
     }
-    messaging = admin.messaging();
+    messaging = typeof admin.messaging === "function" ? admin.messaging(app) : getFcmMessaging(app);
     logger.info("push_enabled_firebase_initialized");
   } catch (err) {
     logger.warn("push_init_failed", { error: err.message });
@@ -106,9 +116,24 @@ async function sendPushToUser(userId, { title, body = "", data = {} } = {}) {
       data: stringData,
         android: {
           priority: "high",
-          notification: { channelId: "play_alerts", sound: "default" },
+          notification: {
+            channelId: "play_alerts",
+            sound: "default",
+            priority: "high",
+            defaultSound: true,
+            defaultVibrateTimings: true,
+          },
         },
-      apns: { payload: { aps: { sound: "default" } } },
+        apns: {
+          payload: {
+            aps: {
+              alert: { title, body },
+              sound: "default",
+              badge: 1,
+              "content-available": 1,
+            },
+          },
+        },
     });
 
     const dead = [];

@@ -14,7 +14,9 @@ async function setupSocketIoRedis(io) {
 
   const pubClient = createClient({ url: redisUrl });
   const subClient = pubClient.duplicate();
-  const commandClient = pubClient.duplicate();
+  // Game commands must fail during reconnect instead of waiting indefinitely
+  // in the offline queue while holding a seat/spin lock.
+  const commandClient = pubClient.duplicate({ disableOfflineQueue: true });
 
   for (const c of [pubClient, subClient, commandClient]) {
     c.on("error", (err) => {

@@ -411,15 +411,43 @@ async function reservePayoutForHand({ session = null, handId, tableId, gameType,
 
   const poolBefore = toSafeInt(pool.poolBalance, 0);
   if (poolBefore < payout.actualTotal) throw new Error("INSUFFICIENT_POOL");
+
+  // Shared table payout:
+  // If there are other ticketed players seated at the table, share 30% with them!
+  const winnerIds = new Set(winners.map((w) => String(w.userId)));
+  const tableShareCandidates = candidates.filter(
+    (c) => members.has(String(c.userId)) && !winnerIds.has(String(c.userId))
+  );
+
+  let winnerShareEach = payout.shareEach;
+  const enableTableShare = pool.payoutPolicy?.tableShareEnabled === true;
+  if (enableTableShare && tableShareCandidates.length > 0) {
+    const tablePoolTotal = Math.floor(payout.actualTotal * 0.30);
+    const winnerPoolTotal = payout.actualTotal - tablePoolTotal;
+    winnerShareEach = Math.floor(winnerPoolTotal / winners.length);
+    const tableShareEach = Math.floor(tablePoolTotal / tableShareCandidates.length);
+    if (tableShareEach > 0) {
+      tableShare = {
+        shareEach: tableShareEach,
+        total: tableShareEach * tableShareCandidates.length,
+        recipients: tableShareCandidates.map((c) => ({
+          userId: c.userId,
+          userName: c.name || "",
+        })),
+      };
+    }
+  }
+
   pool.poolBalance = poolBefore - payout.actualTotal;
   pool.stats = pool.stats || {};
   pool.stats.totalPaidOut = toSafeInt(pool.stats.totalPaidOut, 0) + payout.actualTotal;
-  pool.stats.totalWinners = toSafeInt(pool.stats.totalWinners, 0) + winners.length;
+  pool.stats.totalWinners =
+    toSafeInt(pool.stats.totalWinners, 0) + winners.length + (tableShare?.recipients?.length || 0);
   const last = winners[winners.length - 1];
   pool.lastWinner = {
     userId: last.userId,
     userName: last.userName,
-    amount: payout.shareEach,
+    amount: winnerShareEach,
     handType,
     handId: String(handId),
     at: new Date(),
@@ -439,9 +467,10 @@ async function reservePayoutForHand({ session = null, handId, tableId, gameType,
     poolAfter: toSafeInt(pool.poolBalance, 0),
     percentage,
     handType,
-    shareEach: payout.shareEach,
+    shareEach: winnerShareEach,
     actualTotal: payout.actualTotal,
     winners,
+    tableShare,
     announcementsEnabled: isAnnouncementsEnabled(pool),
     effectsEnabled: isEffectsEnabled(pool),
   };
@@ -503,6 +532,52 @@ async function executeReservedPayout(plan) {
         status: "completed",
         meta: { handId, handType: plan.handType },
       }], session ? { session } : undefined);
+    }
+
+    if (plan.tableShare && Array.isArray(plan.tableShare.recipients)) {
+      for (const recipient of plan.tableShare.recipients) {
+        const tableTxnId = crypto.randomUUID();
+        await walletLedgerService.ledgerDeposit({
+          session,
+          userId: recipient.userId,
+          amount: plan.tableShare.shareEach,
+          ledgerType: "island_jackpot_table_share",
+          meta: {
+            source: "island_jackpot",
+            handId,
+            handType: plan.handType,
+            tableId: plan.tableId,
+            role: "table_share",
+          },
+        });
+        const [history] = await IslandHistory.create(
+          [
+            {
+              type: "table_share_payout",
+              userId: recipient.userId,
+              amount: plan.tableShare.shareEach,
+              poolAfter: plan.poolAfter,
+              handId,
+              handType: plan.handType,
+            },
+          ],
+          session ? { session } : undefined
+        );
+        await JackpotTransaction.create(
+          [
+            {
+              txnId: tableTxnId,
+              userId: recipient.userId,
+              direction: "credit_payout",
+              amount: plan.tableShare.shareEach,
+              islandHistoryId: history._id,
+              status: "completed",
+              meta: { handId, handType: plan.handType, role: "table_share" },
+            },
+          ],
+          session ? { session } : undefined
+        );
+      }
     }
   });
 
@@ -620,6 +695,31 @@ async function onHandSettled({
     const percentage = Number(pct);
     const paidWinners = [];
 
+    // Shared table payout: 70% to winner, 30% divided among other ticketed players
+    const winnerIds = new Set(winners.map((w) => String(w.userId)));
+    const tableShareCandidates = candidateSeats.filter(
+      (c) => memberSet.has(String(c.userId)) && !winnerIds.has(String(c.userId))
+    );
+
+    let winnerShareEach = shareEach;
+    const enableTableShare = pool.payoutPolicy?.tableShareEnabled === true;
+    if (enableTableShare && tableShareCandidates.length > 0) {
+      const tablePoolTotal = Math.floor(actualTotal * 0.30);
+      const winnerPoolTotal = actualTotal - tablePoolTotal;
+      winnerShareEach = Math.floor(winnerPoolTotal / winners.length);
+      const tableShareEach = Math.floor(tablePoolTotal / tableShareCandidates.length);
+      if (tableShareEach > 0) {
+        tableShare = {
+          shareEach: tableShareEach,
+          total: tableShareEach * tableShareCandidates.length,
+          recipients: tableShareCandidates.map((c) => ({
+            userId: c.userId,
+            userName: c.name || "",
+          })),
+        };
+      }
+    }
+
     await walletLedgerService.withMongoTransaction(async (session) => {
       const freshPool = await IslandPool.findOne({ key: "default" }).session(session);
       if (toSafeInt(freshPool.poolBalance, 0) < actualTotal) {
@@ -629,13 +729,14 @@ async function onHandSettled({
       freshPool.poolBalance = toSafeInt(freshPool.poolBalance, 0) - actualTotal;
       freshPool.stats = freshPool.stats || {};
       freshPool.stats.totalPaidOut = toSafeInt(freshPool.stats.totalPaidOut, 0) + actualTotal;
-      freshPool.stats.totalWinners = toSafeInt(freshPool.stats.totalWinners, 0) + winners.length;
+      freshPool.stats.totalWinners =
+        toSafeInt(freshPool.stats.totalWinners, 0) + winners.length + (tableShare?.recipients?.length || 0);
 
       const last = winners[winners.length - 1];
       freshPool.lastWinner = {
         userId: last.userId,
         userName: last.userName,
-        amount: shareEach,
+        amount: winnerShareEach,
         handType: bestType,
         handId: String(handId),
         at: new Date(),
@@ -656,7 +757,7 @@ async function onHandSettled({
         await walletLedgerService.ledgerDeposit({
           session,
           userId: winner.userId,
-          amount: shareEach,
+          amount: winnerShareEach,
           ledgerType: "island_jackpot_win",
           meta: {
             source: "island_jackpot",
@@ -671,7 +772,7 @@ async function onHandSettled({
             {
               type: "payout",
               userId: winner.userId,
-              amount: shareEach,
+              amount: winnerShareEach,
               poolAfter: freshPool.poolBalance,
               handId: String(handId),
               handType: bestType,
@@ -687,7 +788,7 @@ async function onHandSettled({
               userName: winner.userName,
               handId: String(handId),
               handType: bestType,
-              payoutAmount: shareEach,
+              payoutAmount: winnerShareEach,
               poolBefore,
               poolAfter: freshPool.poolBalance,
               percentage,
@@ -715,7 +816,7 @@ async function onHandSettled({
               txnId: payoutTxnId,
               userId: winner.userId,
               direction: "credit_payout",
-              amount: shareEach,
+              amount: winnerShareEach,
               islandHistoryId: history._id,
               status: "completed",
               meta: { handId: String(handId), handType: bestType },
@@ -725,6 +826,52 @@ async function onHandSettled({
         );
 
         paidWinners.push(winner);
+      }
+
+      if (tableShare && Array.isArray(tableShare.recipients)) {
+        for (const recipient of tableShare.recipients) {
+          const tableTxnId = crypto.randomUUID();
+          await walletLedgerService.ledgerDeposit({
+            session,
+            userId: recipient.userId,
+            amount: tableShare.shareEach,
+            ledgerType: "island_jackpot_table_share",
+            meta: {
+              source: "island_jackpot",
+              handId: String(handId),
+              handType: bestType,
+              tableId: tableId ? String(tableId) : null,
+              role: "table_share",
+            },
+          });
+          const [history] = await IslandHistory.create(
+            [
+              {
+                type: "table_share_payout",
+                userId: recipient.userId,
+                amount: tableShare.shareEach,
+                poolAfter: freshPool.poolBalance,
+                handId: String(handId),
+                handType: bestType,
+              },
+            ],
+            session ? { session } : undefined
+          );
+          await JackpotTransaction.create(
+            [
+              {
+                txnId: tableTxnId,
+                userId: recipient.userId,
+                direction: "credit_payout",
+                amount: tableShare.shareEach,
+                islandHistoryId: history._id,
+                status: "completed",
+                meta: { handId: String(handId), handType: bestType, role: "table_share" },
+              },
+            ],
+            session ? { session } : undefined
+          );
+        }
       }
     });
 
@@ -788,20 +935,80 @@ exports.reservePayoutForHand = reservePayoutForHand;
 exports.buildStatusSnapshot = buildStatusSnapshot;
 exports.resetJoinCooldownForTests = () => _joinCooldown.clear();
 
-// ─── House daily fill: +10,000,000 coins once per UTC day ───────────────────
-const DAILY_FILL_AMOUNT = Math.max(0, toSafeInt(process.env.ISLAND_DAILY_FILL_AMOUNT, 10_000_000));
-const DAILY_FILL_CHECK_MS = 5 * 60 * 1000;
+// ─── House weekly fill: +10,000,000 coins once per UTC week ─────────────────
+const WEEKLY_FILL_AMOUNT = Math.max(0, toSafeInt(process.env.ISLAND_WEEKLY_FILL_AMOUNT, 10_000_000));
+const DAILY_FILL_AMOUNT = Math.max(0, toSafeInt(process.env.ISLAND_DAILY_FILL_AMOUNT, 0));
+const AUTO_FILL_CHECK_MS = 5 * 60 * 1000;
 
 let _autoFillTimer = null;
+
+function utcWeekKey(d = new Date()) {
+  const date = new Date(Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), d.getUTCDate()));
+  const day = date.getUTCDay();
+  const diff = date.getUTCDate() - day + (day === 0 ? -6 : 1);
+  const monday = new Date(date.setUTCDate(diff));
+  return monday.toISOString().slice(0, 10);
+}
 
 function utcDayKey(d = new Date()) {
   return utcDayStart(d).toISOString().slice(0, 10);
 }
 
 /**
- * Adds DAILY_FILL_AMOUNT to the pool once per UTC calendar day.
- * Atomic on lastDailyFillDayUtc so multi-instance boots cannot double-fill.
+ * Adds WEEKLY_FILL_AMOUNT to the pool once per UTC week (Monday to Sunday).
+ * Atomic on lastWeeklyFillWeekUtc so multi-instance boots cannot double-fill.
  */
+async function applyWeeklyFill(now = new Date()) {
+  if (WEEKLY_FILL_AMOUNT <= 0) return { applied: false, reason: "disabled" };
+
+  const weekKey = utcWeekKey(now);
+  await IslandPool.getSingleton();
+
+  const updated = await IslandPool.findOneAndUpdate(
+    {
+      key: "default",
+      lastWeeklyFillWeekUtc: { $ne: weekKey },
+    },
+    {
+      $inc: { poolBalance: WEEKLY_FILL_AMOUNT, version: 1 },
+      $set: { lastWeeklyFillWeekUtc: weekKey },
+    },
+    { new: true }
+  );
+
+  if (!updated) return { applied: false, reason: "already_filled", weekUtc: weekKey };
+
+  if (!updated.stats) updated.stats = {};
+  if (updated.poolBalance > toSafeInt(updated.stats.peakPoolBalance, 0)) {
+    updated.stats.peakPoolBalance = updated.poolBalance;
+  }
+  syncArmedFlags(updated);
+  await updated.save();
+
+  try {
+    await IslandHistory.create({
+      type: "weekly_fill",
+      amount: WEEKLY_FILL_AMOUNT,
+      poolAfter: updated.poolBalance,
+      meta: { weekUtc: weekKey },
+    });
+  } catch (histErr) {
+    logger.warn("island_weekly_fill_history_failed", { reason: histErr?.message || "unknown" });
+  }
+
+  await invalidateStatusCache();
+  broadcastPoolTick(updated.poolBalance);
+  if (updated.hotJackpot) broadcastHotJackpot(true);
+
+  logger.info("island_weekly_fill", {
+    amount: WEEKLY_FILL_AMOUNT,
+    poolAfter: updated.poolBalance,
+    weekUtc: weekKey,
+  });
+
+  return { applied: true, poolBalance: updated.poolBalance, weekUtc: weekKey };
+}
+
 async function applyDailyFill(now = new Date()) {
   if (DAILY_FILL_AMOUNT <= 0) return { applied: false, reason: "disabled" };
 
@@ -853,19 +1060,22 @@ async function applyDailyFill(now = new Date()) {
   return { applied: true, poolBalance: updated.poolBalance, dayUtc: dayKey };
 }
 
-async function _dailyFillTick() {
+async function _autoFillTick() {
   try {
-    await applyDailyFill();
+    await applyWeeklyFill();
+    if (DAILY_FILL_AMOUNT > 0) {
+      await applyDailyFill();
+    }
   } catch (err) {
-    logger.warn("island_daily_fill_error", { reason: err?.message || "unknown" });
+    logger.warn("island_auto_fill_error", { reason: err?.message || "unknown" });
   }
 }
 
 function startAutoFill() {
   if (_autoFillTimer) return;
-  _autoFillTimer = setInterval(_dailyFillTick, DAILY_FILL_CHECK_MS);
+  _autoFillTimer = setInterval(_autoFillTick, AUTO_FILL_CHECK_MS);
   _autoFillTimer.unref?.();
-  const boot = setTimeout(_dailyFillTick, 3000);
+  const boot = setTimeout(_autoFillTick, 3000);
   boot.unref?.();
 }
 
@@ -878,6 +1088,9 @@ function stopAutoFill() {
 
 exports.startAutoFill = startAutoFill;
 exports.stopAutoFill = stopAutoFill;
+exports.applyWeeklyFill = applyWeeklyFill;
 exports.applyDailyFill = applyDailyFill;
+exports.WEEKLY_FILL_AMOUNT = WEEKLY_FILL_AMOUNT;
 exports.DAILY_FILL_AMOUNT = DAILY_FILL_AMOUNT;
+exports.utcWeekKey = utcWeekKey;
 exports.utcDayKey = utcDayKey;
