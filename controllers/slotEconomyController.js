@@ -34,7 +34,7 @@ exports.forGame = game => asyncHandler(async (req, res) => {
   const scale = (zeus || game === "poseidon") && version >= 3 ? 1 : economy.payScale(game, { bonusMode, superBonus, tierName: params?.tierName, economyVersion: version });
   const folder = game === "golden-tree" ? "goldenTree" : game === "zeus" ? "dice" : game;
   const name = game === "zeus" ? "DiceEngine" : "constants";
-  const suffix = version === 1 ? ".v1" : (zeus || game === "poseidon") && version === 2 ? ".v2" : "";
+  const suffix = zeus && version === 3 ? ".v3" : version === 1 ? ".v1" : (zeus || game === "poseidon") && version === 2 ? ".v2" : "";
   const c = require(`../games/${folder}/${name}${suffix}`);
   const amounts = {};
   for (const [symbol, bands] of Object.entries(c.PAYTABLE)) {
@@ -59,7 +59,9 @@ exports.forGame = game => asyncHandler(async (req, res) => {
       values: bands.map(n => n * scale) })),
     payoutColumns: ["8-9", "10-11", "12+"],
   } : {});
-  res.json({ status: "success", data: { economyVersion: version, bonusMode, superBonus, bonusRtp: (zeus || game === "poseidon") && version >= 3 ? null : economy.BONUS_RTP,
+  res.json({ status: "success", data: { economyVersion: version, bonusMode, superBonus,
+    bonusRtp: zeus && version >= 4 ? c.TARGET_RTP.bonus : (zeus || game === "poseidon") && version >= 3 ? null : economy.BONUS_RTP,
+    ...(zeus && version >= 4 ? { targetRtp: c.TARGET_RTP } : {}),
     buyCostMultiplier: c.BUY_BONUS_COST || c.BUY_COST_MULT,
     superBuyCostMultiplier: c.SUPER_BUY_BONUS_COST || c.SUPER_BUY_COST_MULT || null,
     amounts, ...rules } });

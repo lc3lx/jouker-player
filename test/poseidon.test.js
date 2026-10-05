@@ -106,20 +106,20 @@ test("winTierFor maps bet multiples to banners", () => {
 
 test("calibrated multiplier probabilities follow Zeus cloned rules (rare 50+)", () => {
   const modes = [
-    { name: "base", bonus: false, superBonus: false, weights: [10, 6, 2.5, 0.8, 0.15, 0.05, 0.02, 0.005, 0.001] },
-    { name: "bonus", bonus: true, superBonus: false, weights: [12.5, 12.5, 10, 10, 5, 4, 2, 1, 0.5] },
-    { name: "super", bonus: true, superBonus: true, weights: [0, 0, 0, 15, 7, 5, 3, 2, 1] },
+    { name: "base", bonus: false, superBonus: false, weights: [5, 3, 1.25, 0.4, 0.075, 0.025, 0.002, 0.0005, 0.0001] },
+    { name: "bonus", bonus: true, superBonus: false, weights: [6.25, 6.25, 5, 5, 2.5, 2, 0.2, 0.1, 0.05] },
+    { name: "super", bonus: true, superBonus: true, weights: [0, 0, 0, 7.5, 3.5, 2.5, 0.3, 0.2, 0.1] },
   ];
   for (const mode of modes) {
-    const counts = new Map(), draws = 100000;
+    const counts = new Map(), draws = 1000000;
     for (let i = 0; i < draws; i++) {
       const face = pickMultiplierValue(() => (i + 0.5) / draws, { ...mode, bigAlready: true });
       counts.set(face, (counts.get(face) || 0) + 1);
     }
     for (const [i, face] of MULTIPLIER_VALUES.entries()) {
-      assert.equal(counts.get(face) || 0, Math.round(mode.weights[i] * 1000));
+      assert.equal(counts.get(face) || 0, Math.round(mode.weights[i] * draws / 100));
     }
-    assert.equal(counts.get(null), Math.round((100 - mode.weights.reduce((a, b) => a + b, 0)) * 1000));
+    assert.equal(counts.get(null), Math.round((100 - mode.weights.reduce((a, b) => a + b, 0)) * draws / 100));
   }
 });
 

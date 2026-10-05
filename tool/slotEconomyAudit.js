@@ -115,10 +115,10 @@ function main() {
   const version = baseline ? 1 : 2, profiles = JSON.parse(fs.readFileSync(calibrationPath)), results = [];
   for (const game of selected ? [selected] : ["zeus", "poseidon", "zenobia", "golden-tree"]) {
     if (game === "zeus" && !baseline) {
-      if (calibrate) throw new Error("Zeus v3 has fixed published rules; pay scaling is disabled. Select another game for calibration.");
+      if (calibrate) throw new Error("Zeus uses fixed payouts. Use tool/calibrateZeusV4.js to calibrate probabilities, not pay scaling.");
       const modes = process.argv.includes("--base-only") ? ["base"] : bonusOnly ? ["bonus", "super"] : ["base", "bonus", "super"];
       for (const bet of bonusBets) for (const mode of modes) {
-        const report = require("./zeusRulesAudit").measure({ mode, bet, version: 3, rounds, seeds });
+        const report = require("./zeusRulesAudit").measure({ mode, bet, version: require("../games/dice/DiceEngine").ECONOMY_VERSION, rounds, seeds });
         results.push(report); console.log(JSON.stringify(report));
       }
       continue;

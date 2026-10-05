@@ -1,6 +1,4 @@
-const calibration = require("./zeusEconomyV4.json");
-const ECONOMY_VERSION = 4;
-const TARGET_RTP = Object.freeze({ ...calibration.targets });
+const ECONOMY_VERSION = 3;
 /**
  * King Earth slot engine.
  *
@@ -33,8 +31,7 @@ const FREE_SPINS_AWARD = 10;
 const FREE_SPINS_BOUGHT = 10;
 const RETRIGGER_AWARD = 5;
 const RETRIGGER_MIN_SCATTER = 3;
-// Existing purchase prices. V4 calibrates symbol-generation probabilities;
-// the published payout formulas are never scaled down.
+// Existing purchase prices; v3 uses fixed rules rather than a target return.
 const BUY_COST_MULT = 154;
 const SUPER_BUY_COST_MULT = BUY_COST_MULT * 10;
 const SUPER_MULTIPLIER_MIN = 20;
@@ -72,18 +69,10 @@ const FREESPIN_WEIGHTS = [
   6.2, 5.4, 4.4, 3.2,
 ];
 // Absolute percentages PER SPIN, not per cell or conditional on winning.
-// Static, independently calibrated mode tables. Remaining mass means no plaque.
-const BASE_MULTIPLIER_WEIGHTS = Object.freeze([...calibration.multiplierWeights.base]);
-const BONUS_MULTIPLIER_WEIGHTS = Object.freeze([...calibration.multiplierWeights.bonus]);
-const SUPER_MULTIPLIER_WEIGHTS = Object.freeze([...calibration.multiplierWeights.super]);
-if (calibration.version !== ECONOMY_VERSION || SUPER_MULTIPLIER_WEIGHTS.slice(0,3).some(w => w !== 0)) {
-  throw new Error("INVALID_ZEUS_V4_PROFILE");
-}
-for (const weights of [BASE_MULTIPLIER_WEIGHTS, BONUS_MULTIPLIER_WEIGHTS, SUPER_MULTIPLIER_WEIGHTS]) {
-  if (weights.length !== MULTIPLIER_VALUES.length || weights.some(w => !Number.isFinite(w) || w < 0) || weights.reduce((a,b) => a+b,0) > 100) {
-    throw new Error("INVALID_ZEUS_V4_PROBABILITIES");
-  }
-}
+// The joint x2/x5 allowance is divided equally. Remaining mass means no plaque.
+const BASE_MULTIPLIER_WEIGHTS = Object.freeze([5, 3, 1.25, 0.4, 0.075, 0.025, 0.002, 0.0005, 0.0001]);
+const BONUS_MULTIPLIER_WEIGHTS = Object.freeze([6.25, 6.25, 5, 5, 2.5, 2, 0.2, 0.1, 0.05]);
+const SUPER_MULTIPLIER_WEIGHTS = Object.freeze([0, 0, 0, 7.5, 3.5, 2.5, 0.3, 0.2, 0.1]);
 // Pay exactly the published per-symbol formula in every mode.
 const BASE_PAY_SCALE = 1;
 const FREESPIN_PAY_SCALE = 1;
@@ -244,7 +233,6 @@ function calculateWins(grid, stake, freeSpinMultiplier = 0) { const { wins, winn
 function spin(baseBet, options = {}) {
   if (options.economyVersion === 1) return require("./DiceEngine.v1").spin(baseBet, options);
   if (options.economyVersion === 2) return require("./DiceEngine.v2").spin(baseBet, options);
-  if (options.economyVersion === 3) return require("./DiceEngine.v3").spin(baseBet, options);
   const rng = options.rng || createSeededRng(options.serverSeed, options.clientSeed, options.nonce), isFreeSpin = !!options.isFreeSpin, superBonus = !!(isFreeSpin && options.superBonus), stake = roundMoney(baseBet);
   const initialGrid = generateGrid(rng, options.volatility, false, isFreeSpin, superBonus);
   const tumble = runTumbles(initialGrid, rng, { stake, volatility: normalizeVolatility(options.volatility), doubleChance: false, isFreeSpin, superBonus, freeSpinMultiplier: options.freeSpinMultiplier, payScale: 1 });
@@ -253,4 +241,4 @@ function spin(baseBet, options = {}) {
   const jackpotSymbolCount = countJackpotSymbols(tumble.finalGrid);
   return { economyVersion: ECONOMY_VERSION, grid: initialGrid, initialGrid, finalGrid: tumble.finalGrid, stake, baseBet: stake, doubleChance: false, isFreeSpin, freeSpinPayoutMult: 1, volatility: normalizeVolatility(options.volatility), nearMiss: false, almostBonus: !isFreeSpin && scatterCount === 3, capped: tumble.multipliedWin > winCap, maxWin: winCap, totalWin, baseWin: tumble.baseWin, winningCells: [...tumble.winningCells].map((key) => { const [col, row] = key.split(",").map(Number); return { col, row }; }), lineWins: tumble.lineWins, scatterCount, jackpotSymbolCount, jackpotTriggered: jackpotSymbolCount >= JACKPOT_MIN_SYMBOLS, winType: classifyWinType(totalWin, stake), cascadeSteps: tumble.cascadeSteps, multipliers: { collected: tumble.collectedMultiplier, applied: tumble.appliedMultiplier, freeSpinTotal: tumble.nextFreeSpinMultiplier }, freeSpinsAwarded: !isFreeSpin && scatterCount >= 4 ? FREE_SPINS_AWARD : 0 };
 }
-module.exports = { TARGET_RTP, ECONOMY_VERSION, PAY_RULES, SUPER_MULTIPLIER_WEIGHTS, JACKPOT_APPEARANCE_PROBABILITY, JACKPOT_WIN_PROBABILITY, NATURAL_BONUS_PROBABILITY, COLS, ROWS, MIN_MATCH, REGULAR_SYMBOLS, SYMBOL_COUNT, SCATTER, HEAD, HEAD_WEIGHT_BASE, HEAD_WEIGHT_BONUS, MULTIPLIER, JACKPOT, JACKPOT_MIN_SYMBOLS, GEM_SYMBOLS, FREE_SPINS_AWARD, FREE_SPINS_BOUGHT, RETRIGGER_AWARD, RETRIGGER_MIN_SCATTER, BUY_COST_MULT, SUPER_BUY_COST_MULT, SUPER_MULTIPLIER_MIN, MAX_WIN_MULTIPLIER, BET_MIN, BET_MAX, PAYTABLE, MULTIPLIER_VALUES, BASE_WEIGHTS, FREESPIN_WEIGHTS, BASE_PAY_SCALE, FREESPIN_PAY_SCALE, BONUS_BANK_CAP, SUPER_BONUS_BANK_CAP, BASE_MULTIPLIER_WEIGHTS, BONUS_MULTIPLIER_WEIGHTS, APPLIED_MULTIPLIER_CAP_BASE, APPLIED_MULTIPLIER_CAP_BONUS, appliedMultiplierFor, resolvePayoutMultiplier, normalizeVolatility, pickMultiplierValue, symbolMultiplier, isJackpot, isHead, countJackpotSymbols, generateGrid, calculateWins, spin, classifyWinType };
+module.exports = { ECONOMY_VERSION, PAY_RULES, SUPER_MULTIPLIER_WEIGHTS, JACKPOT_APPEARANCE_PROBABILITY, JACKPOT_WIN_PROBABILITY, NATURAL_BONUS_PROBABILITY, COLS, ROWS, MIN_MATCH, REGULAR_SYMBOLS, SYMBOL_COUNT, SCATTER, HEAD, HEAD_WEIGHT_BASE, HEAD_WEIGHT_BONUS, MULTIPLIER, JACKPOT, JACKPOT_MIN_SYMBOLS, GEM_SYMBOLS, FREE_SPINS_AWARD, FREE_SPINS_BOUGHT, RETRIGGER_AWARD, RETRIGGER_MIN_SCATTER, BUY_COST_MULT, SUPER_BUY_COST_MULT, SUPER_MULTIPLIER_MIN, MAX_WIN_MULTIPLIER, BET_MIN, BET_MAX, PAYTABLE, MULTIPLIER_VALUES, BASE_WEIGHTS, FREESPIN_WEIGHTS, BASE_PAY_SCALE, FREESPIN_PAY_SCALE, BONUS_BANK_CAP, SUPER_BONUS_BANK_CAP, BASE_MULTIPLIER_WEIGHTS, BONUS_MULTIPLIER_WEIGHTS, APPLIED_MULTIPLIER_CAP_BASE, APPLIED_MULTIPLIER_CAP_BONUS, appliedMultiplierFor, resolvePayoutMultiplier, normalizeVolatility, pickMultiplierValue, symbolMultiplier, isJackpot, isHead, countJackpotSymbols, generateGrid, calculateWins, spin, classifyWinType };

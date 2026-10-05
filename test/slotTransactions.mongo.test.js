@@ -115,7 +115,8 @@ for (const folder of ["poseidon", "zenobia", "goldenTree"]) test(`${folder}: wal
   const buy = () => folder === "goldenTree" ? service.executeBuyBonus(user, "Triple",10000,{requestId:"mongo_purchase_01"}) : service.executeBuyBonus(user,10000,{requestId:"mongo_purchase_01"});
   const purchased = await buy();
   assert.equal((await Wallet.findOne({user}).lean()).balance, purchased.balance);
-  assert.equal((await Session.findOne({userId:user}).lean()).economyVersion, 2);
+  const version = require(`../games/${folder}/constants`).ECONOMY_VERSION || require("../games/utils/slotEconomy").VERSION;
+  assert.equal((await Session.findOne({userId:user}).lean()).economyVersion, version);
   manager.replaceBonusSession(user, null); // simulate process/reconnect cache loss
   assert.deepEqual(await buy(), purchased);
   const before = await Session.findOne({userId:user}).lean();

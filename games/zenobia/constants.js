@@ -74,12 +74,12 @@ const ROYAL_MULTIPLIER_MIN = 10;
 
 /** Base-game plaque faces — heavily skewed to the small gold end. */
 const BASE_MULTIPLIER_WEIGHTS = Object.freeze([
-  30, 21, 15, 11, 7.5, 5, 3.4, 2.4, 1.9, 1.0, 0.62, 0.3, 0.14, 0.08, 0.04, 0.012, 0.004,
+  30, 21, 15, 11, 7.5, 5, 3.4, 2.4, 1.9, 1.0, 0.62, 0.3, 0.14, 0.08, 0.004, 0.0012, 0.0004,
 ]);
 
 /** Free spins — the royal end opens up, x200/x500/x1000 stay rare. */
 const BONUS_MULTIPLIER_WEIGHTS = Object.freeze([
-  22, 17, 13.5, 11, 8.5, 6.5, 5, 4, 3.6, 2.5, 1.7, 1.0, 0.55, 0.16, 0.07, 0.055, 0.018,
+  22, 17, 13.5, 11, 8.5, 6.5, 5, 4, 3.6, 2.5, 1.7, 1.0, 0.55, 0.16, 0.007, 0.0055, 0.0018,
 ]);
 
 /**
@@ -87,7 +87,7 @@ const BONUS_MULTIPLIER_WEIGHTS = Object.freeze([
  * collapse toward the gold end so several huge faces rarely stack.
  */
 const SUPPRESSED_MULTIPLIER_WEIGHTS = Object.freeze([
-  36, 24, 16, 10, 6, 3.4, 1.9, 1.1, 0.75, 0.32, 0.15, 0.06, 0.025, 0.012, 0.005, 0.0015, 0.0005,
+  36, 24, 16, 10, 6, 3.4, 1.9, 1.1, 0.75, 0.32, 0.15, 0.06, 0.025, 0.012, 0.0005, 0.00015, 0.00005,
 ]);
 
 /** Plaques at/above this face count as "big" for stacking suppression. */
@@ -142,7 +142,7 @@ const BASE_WEIGHTS = Object.freeze([
   [SYMBOLS.NECKLACE, 6.5],
   [SYMBOLS.THRONE, 5],
   [SYMBOLS.QUEEN, 4],
-  ["mult", 2.74],
+  ["mult", 1.37],
   [SCATTER, 1.39],
   [JACKPOT, 0.61],
 ]);
@@ -159,12 +159,12 @@ const BONUS_WEIGHTS = Object.freeze([
   [SYMBOLS.NECKLACE, 6.5],
   [SYMBOLS.THRONE, 5],
   [SYMBOLS.QUEEN, 4],
-  ["mult", 6.5],
+  ["mult", 3.25],
   [SCATTER, 1.01],
   [JACKPOT, 0.61],
 ]);
 
-/** Super bonus: extra heavy multiplier plaque frequency and royal values only. */
+/** Super bonus: reduced plaque frequency, retaining royal values only. */
 const SUPER_BONUS_WEIGHTS = Object.freeze([
   [SYMBOLS.S, 20],
   [SYMBOLS.N, 20],
@@ -176,7 +176,7 @@ const SUPER_BONUS_WEIGHTS = Object.freeze([
   [SYMBOLS.NECKLACE, 6.5],
   [SYMBOLS.THRONE, 5],
   [SYMBOLS.QUEEN, 4],
-  ["mult", 9.0],
+  ["mult", 4.5],
   [SCATTER, 1.01],
   [JACKPOT, 0.61],
 ]);

@@ -19,19 +19,19 @@ test("each symbol pays the requested formula from 8 through 30, at multiple stak
 });
 
 const modes = [
-  { name: "base", bonus: false, superBonus: false, weights: [10, 6, 2.5, 0.8, 0.15, 0.05, 0.02, 0.005, 0.001] },
-  { name: "bonus", bonus: true, superBonus: false, weights: [12.5, 12.5, 10, 10, 5, 4, 2, 1, 0.5] },
-  { name: "super", bonus: true, superBonus: true, weights: [0, 0, 0, 15, 7, 5, 3, 2, 1] },
+  { name: "base", bonus: false, superBonus: false, weights: e.BASE_MULTIPLIER_WEIGHTS },
+  { name: "bonus", bonus: true, superBonus: false, weights: e.BONUS_MULTIPLIER_WEIGHTS },
+  { name: "super", bonus: true, superBonus: true, weights: e.SUPER_MULTIPLIER_WEIGHTS },
 ];
 for (const mode of modes) {
   test(`${mode.name}: complete unit interval gives the exact specified per-spin probabilities`, () => {
-    const counts = new Map(), draws = 100000;
+    const counts = new Map(), draws = 1000000;
     for (let i = 0; i < draws; i++) {
       const face = e.pickMultiplierValue(() => (i + 0.5) / draws, "high", { ...mode, bigAlready: true });
       counts.set(face, (counts.get(face) || 0) + 1);
     }
-    for (const [i, face] of e.MULTIPLIER_VALUES.entries()) assert.equal(counts.get(face) || 0, Math.round(mode.weights[i] * 1000));
-    assert.equal(counts.get(null), Math.round((100 - mode.weights.reduce((a,b) => a+b,0)) * 1000));
+    for (const [i, face] of e.MULTIPLIER_VALUES.entries()) assert.ok(Math.abs((counts.get(face) || 0) - mode.weights[i] * draws / 100) <= 1);
+    assert.ok(Math.abs(counts.get(null) - (100 - mode.weights.reduce((a,b) => a+b,0)) * draws / 100) <= 1);
   });
   test(`${mode.name}: full spins and cascades retain the sampled plaque/jackpot rates`, () => {
     const rng = rngFor(841), counts = new Map();
@@ -70,20 +70,20 @@ test("stake, bank, player hints and old payScale cannot change the new rules", (
   }
 });
 
-test("v1 and v2 bonus sessions keep exact legacy outcomes", () => {
-  for (const version of [1,2]) for (const superBonus of [false,true]) {
+test("v1, v2 and v3 bonus sessions keep exact legacy outcomes", () => {
+  for (const version of [1,2,3]) for (const superBonus of [false,true]) {
     const options = { serverSeed: "legacy", clientSeed: "client", nonce: 19, isFreeSpin: true, superBonus, freeSpinMultiplier: 115 };
     assert.deepEqual(e.spin(10000, { ...options, economyVersion: version }), require(`../games/dice/DiceEngine.v${version}`).spin(10000, options));
   }
 });
 
-test("new free sessions are standard bonus v3 and audits complete the actual settlement", () => {
+test("new free sessions are standard bonus v4 and audits complete the actual settlement", () => {
   const { stageSpinSession } = require("../games/dice/kingArthSettlement");
-  const staged = stageSpinSession(null, { economyVersion: 3, scatterCount: 4, capped: false, maxWin: 50000000 }, 10000, 10000);
-  assert.equal(staged.next.economyVersion, 3);
+  const staged = stageSpinSession(null, { economyVersion: 4, scatterCount: 4, capped: false, maxWin: 50000000 }, 10000, 10000);
+  assert.equal(staged.next.economyVersion, 4);
   assert.equal(staged.next.superBonus, false);
   for (const mode of ["base","bonus","super"]) {
-    const result = session({ mode, bet: 10000, version: 3, rng: rngFor(713), jackpotRng: rngFor(512) });
+    const result = session({ mode, bet: 10000, version: 4, rng: rngFor(713), jackpotRng: rngFor(512) });
     assert.ok(Number.isSafeInteger(result.payout));
     assert.ok(result.spins >= (mode === "base" || result.capped ? 1 : 10));
     if (result.capped && mode !== "base") assert.equal(result.payout, 10000 * e.MAX_WIN_MULTIPLIER);
@@ -97,16 +97,54 @@ test("the public paytable reflects the active version, fixed payouts and per-spi
   const read = () => new Promise((resolve, reject) => handler({ user: { id }, query: { betAmount: 10000 } }, { json: resolve }, reject));
   try {
     const fresh = (await read()).data;
-    assert.equal(fresh.economyVersion, 3);
-    assert.equal(fresh.bonusRtp, null);
+    assert.equal(fresh.economyVersion, 4);
+    assert.equal(fresh.bonusRtp, .46);
+    assert.deepEqual(fresh.targetRtp, { base: .965, bonus: .46, super: .46 });
     assert.equal(fresh.probabilityUnit, "per_spin");
     assert.deepEqual(fresh.payoutRows.find(row => row.symbol === 6).values, [1.1, .2]);
-    assert.deepEqual(fresh.multiplierProbabilities.super, [0,0,0,15,7,5,3,2,1]);
+    assert.deepEqual(fresh.multiplierProbabilities.super, e.SUPER_MULTIPLIER_WEIGHTS);
     await states.startFreeSpinSession(id, "king-arth", { lockedBaseBet: 10000, economyVersion: 2 });
     const old = (await read()).data;
     assert.equal(old.economyVersion, 2);
     assert.deepEqual(old.payoutColumns, ["8-9","10-11","12+"]);
     assert.equal(old.payoutRows[0].values.length, 3);
     assert.equal(old.multiplierProbabilities, undefined);
+    await states.startFreeSpinSession(id, "king-arth", { lockedBaseBet: 10000, economyVersion: 3 });
+    const v3 = (await read()).data;
+    assert.equal(v3.economyVersion, 3);
+    assert.equal(v3.bonusRtp, null);
+    assert.deepEqual(v3.multiplierProbabilities.bonus, require("../games/dice/DiceEngine.v3").BONUS_MULTIPLIER_WEIGHTS);
   } finally { await states.deleteFreeSpinSession(id, "king-arth"); }
+});
+
+test("stratified base audit weights rare bonus and jackpot draws rather than their oversampled counts", () => {
+  const { measureBase } = require("../tool/zeusRulesAudit");
+  const spinEngine = { ...e, spin(bet, { rng }) {
+    rng(); // plaque draw
+    const jp = rng();
+    if (jp >= e.JACKPOT_WIN_PROBABILITY && jp < e.JACKPOT_APPEARANCE_PROBABILITY) rng();
+    const natural = rng() < e.NATURAL_BONUS_PROBABILITY;
+    // A bounded analytical payout lets this test validate the estimator itself.
+    return { totalWin: natural ? bet : 0, scatterCount: 0, capped: false, maxWin: 5000*bet,
+      multipliers: { freeSpinTotal: 0 }, jackpotTriggered: jp < e.JACKPOT_WIN_PROBABILITY };
+  } };
+  const r = measureBase({ spinEngine, rounds: 1000 });
+  const expected = e.NATURAL_BONUS_PROBABILITY + e.JACKPOT_WIN_PROBABILITY * 1600/3;
+  assert.ok(Math.abs(r.rtp - expected) < .002);
+  assert.ok(Math.abs(r.strata.reduce((n,s) => n+s.weight,0)-1) < 1e-12);
+  assert.equal(r.sessions, r.completedSessions);
+});
+
+test("complete v4 session settlement scales across the supported bet range", () => {
+  for (const mode of ["base", "bonus", "super"]) for (let seed=1;seed<=100;seed++) {
+    const run=bet=>session({mode,bet,version:4,rng:rngFor(seed),jackpotRng:rngFor(seed+999)});
+    const first=run(10000);
+    for(const bet of [1000000,1000000000]) {
+      const next=run(bet),factor=bet/10000;
+      assert.equal(next.spins,first.spins);
+      assert.equal(next.payout,first.payout*factor);
+      assert.equal(next.jackpotPayout,first.jackpotPayout*factor);
+      assert.equal(next.cost,first.cost*factor);
+    }
+  }
 });
