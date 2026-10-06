@@ -53,8 +53,22 @@ function useMongo() {
   return mode === "mongo";
 }
 
+/**
+ * Games that run their calibrated profiles until an admin says otherwise
+ * (owner decision 2026-10-07: Poseidon + Zeus). A saved settings document
+ * always wins. Tests keep the legacy default unless they opt in.
+ */
+function defaultLiveGames() {
+  const raw = process.env.SLOT_ECONOMY_DEFAULT_LIVE
+    ?? (process.env.NODE_ENV === "test" ? "" : "poseidon,zeus");
+  return new Set(raw.split(",").map((g) => g.trim()).filter(Boolean));
+}
+
 function reset() {
-  for (const game of registry.GAMES) state.set(game, { ...structuredClone(DEFAULTS), game });
+  const live = defaultLiveGames();
+  for (const game of registry.GAMES) {
+    state.set(game, { ...structuredClone(DEFAULTS), game, economyLive: live.has(game) });
+  }
   lastSyncAt = 0;
 }
 reset();
@@ -64,7 +78,7 @@ function toPlain(doc) {
   return {
     ...structuredClone(DEFAULTS),
     game: plain.game,
-    economyLive: !!plain.economyLive,
+    economyLive: typeof plain.economyLive === "boolean" ? plain.economyLive : defaultLiveGames().has(plain.game),
     activeProfileId: plain.activeProfileId || null,
     pending: {
       profileId: plain.pending?.profileId || null,

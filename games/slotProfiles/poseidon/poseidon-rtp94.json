@@ -152,10 +152,11 @@
   "label": "94%",
   "volatility": "low",
   "buy": {
-    "standardCost": 58.1,
-    "superCost": 265.9,
+    "standardCost": 58.2,
+    "superCost": 265.3,
     "standardEv": 54.5917,
-    "superEv": 249.9475
+    "superEv": 249.9475,
+    "sharedWith": "zeus"
   },
   "measured": {
     "rtp": 0.94,
@@ -175,9 +176,9 @@
     },
     "naturalRoundEvX": 54.6162,
     "buy": {
-      "standardRtp": 0.93962,
+      "standardRtp": 0.938,
       "standardEvCi95X": 0.4223,
-      "superRtp": 0.94001,
+      "superRtp": 0.94213,
       "superEvCi95X": 0.8016,
       "standardMedianX": 50,
       "superMedianX": 200,

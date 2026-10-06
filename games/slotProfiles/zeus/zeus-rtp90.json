@@ -48,8 +48,8 @@
         0.006194982,
         0.001019189,
         0.000167675,
-        0.00001543,
-        0.000002538
+        1.543e-05,
+        2.538e-06
       ],
       "bonus": [
         32.650097018,
@@ -96,10 +96,11 @@
   "label": "90%",
   "volatility": "low",
   "buy": {
-    "standardCost": 61,
-    "superCost": 276.5,
+    "standardCost": 60.8,
+    "superCost": 277.1,
     "standardEv": 54.8754,
-    "superEv": 248.8562
+    "superEv": 248.8562,
+    "sharedWith": "poseidon"
   },
   "measured": {
     "rtp": 0.9,
@@ -119,9 +120,9 @@
     },
     "naturalRoundEvX": 54.9165,
     "buy": {
-      "standardRtp": 0.8996,
+      "standardRtp": 0.90256,
       "standardEvCi95X": 0.3223,
-      "superRtp": 0.90002,
+      "superRtp": 0.89807,
       "superEvCi95X": 1.0327,
       "standardMedianX": 50,
       "superMedianX": 200,

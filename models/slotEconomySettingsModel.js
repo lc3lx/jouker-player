@@ -13,7 +13,9 @@ const slotEconomySettingsSchema = new mongoose.Schema(
     game: { type: String, enum: ["poseidon", "zeus", "zenobia"], required: true, unique: true },
 
     /** false = the game still runs its legacy economy (pre-profile engines). */
-    economyLive: { type: Boolean, default: false },
+    // No schema default: an unset flag means "the game's default" (see
+    // services/slotEconomySettingsService.js defaultLiveGames).
+    economyLive: { type: Boolean },
     activeProfileId: { type: String, default: null },
     pending: {
       profileId: { type: String, default: null },

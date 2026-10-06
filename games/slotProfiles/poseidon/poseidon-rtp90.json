@@ -105,7 +105,7 @@
         0.00529478,
         0.001178381,
         0.000161676,
-        0.000035982
+        3.5982e-05
       ],
       "bonus": [
         56.996919275,
@@ -152,10 +152,11 @@
   "label": "90%",
   "volatility": "low",
   "buy": {
-    "standardCost": 60.7,
-    "superCost": 277.7,
+    "standardCost": 60.8,
+    "superCost": 277.1,
     "standardEv": 54.5917,
-    "superEv": 249.9475
+    "superEv": 249.9475,
+    "sharedWith": "zeus"
   },
   "measured": {
     "rtp": 0.9,
@@ -175,9 +176,9 @@
     },
     "naturalRoundEvX": 54.6162,
     "buy": {
-      "standardRtp": 0.89937,
+      "standardRtp": 0.89789,
       "standardEvCi95X": 0.4223,
-      "superRtp": 0.90006,
+      "superRtp": 0.90201,
       "superEvCi95X": 0.8016,
       "standardMedianX": 50,
       "superMedianX": 200,
