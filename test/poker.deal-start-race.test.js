@@ -18,6 +18,16 @@ function game() {
   return g;
 }
 
+test("an expired inter-hand deadline does not add another full pause", async (t) => {
+  const g = game();
+  const delays = [];
+  t.mock.method(global, "setTimeout", (_, delay) => { delays.push(delay); return 123; });
+  g.nextHandNotBefore = Date.now() - 100;
+  g.scheduleNextHand();
+  assert.deepEqual(delays, [0]);
+  g.nextHandTimer = null;
+});
+
 test("a lobby refresh must not reset a hand waiting for deal preparation", async () => {
   const g = game();
   g.running = true;

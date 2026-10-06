@@ -1299,7 +1299,9 @@ class PokerTable {
     if (!this.isOwner) return; // H-3: only the lease owner drives the loop
     this.clearNextHandTimer();
     const now = Date.now();
-    if (this.nextHandNotBefore <= now) {
+    // Publishing/settlement may already have consumed the reserved gap.
+    // Only create a deadline when none exists; never add a second full pause.
+    if (!this.nextHandNotBefore) {
       this.nextHandNotBefore = now + POKER_TIMINGS.NEXT_HAND_DELAY_MS;
     }
     const delay = Math.max(0, this.nextHandNotBefore - now);

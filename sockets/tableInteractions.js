@@ -100,6 +100,7 @@ function registerTableInteractionHandlers(nsp, roomForGame, fixedGameType = null
         const targetId = targetUserId ? String(targetUserId) : null;
         if (
           targetId &&
+          !(resolvedGameType === "poker" && targetId === "dealer") &&
           !(table.seats || []).some((seat) => String(seat?.user) === targetId)
         ) {
           return done({ ok: false, reason: "TARGET_NOT_IN_TABLE" });

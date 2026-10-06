@@ -14,12 +14,12 @@ const POKER_TIMINGS = {
   TURN_STREET_MS: envMs("POKER_TIMING_TURN_STREET_MS", 2000),
   RIVER_MS: envMs("POKER_TIMING_RIVER_MS", 2000),
   /** Brief suspense after showdown starts, before the first hole-card flip. */
-  SHOWDOWN_MS: envMs("POKER_TIMING_SHOWDOWN_MS", 800),
+  SHOWDOWN_MS: envMs("POKER_TIMING_SHOWDOWN_MS", 400),
   /** Hold all hole cards face-up so everyone can read the showdown. */
-  SHOWDOWN_CARD_HOLD_MS: envMs("POKER_TIMING_SHOWDOWN_CARD_HOLD_MS", 2400),
+  SHOWDOWN_CARD_HOLD_MS: envMs("POKER_TIMING_SHOWDOWN_CARD_HOLD_MS", 1000),
   WINNER_POT_MS: envMs("POKER_TIMING_WINNER_POT_MS", 3000),
   /** Gap between the winner display and the start of the next hand. */
-  NEXT_HAND_DELAY_MS: envMs("POKER_TIMING_NEXT_HAND_MS", 5000),
+  NEXT_HAND_DELAY_MS: envMs("POKER_TIMING_NEXT_HAND_MS", 3200),
   RECONNECT_WINDOW_MS: envMs("POKER_RECONNECT_WINDOW_MS", 30000),
   /** Seat vacate grace period before a bot replaces the leaving player. */
   VACATE_WINDOW_MS: envMs("POKER_VACATE_WINDOW_MS", 30000),
