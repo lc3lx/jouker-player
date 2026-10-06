@@ -122,12 +122,12 @@
         0,
         0,
         0,
-        61.100832824,
-        21.848110115,
-        10.035727544,
-        4.609818735,
-        1.648354411,
-        0.757156371
+        60.679845092,
+        21.9467819,
+        10.168517856,
+        4.71134018,
+        1.704004933,
+        0.789510037
       ]
     },
     "jackpot": {
@@ -155,7 +155,7 @@
     "standardCost": 60.8,
     "superCost": 608,
     "standardEv": 54.5917,
-    "superEv": 538.8946,
+    "superEv": 547.1,
     "sharedWith": "zeus"
   },
   "measured": {
@@ -178,8 +178,8 @@
     "buy": {
       "standardRtp": 0.89789,
       "standardEvCi95X": 0.4223,
-      "superRtp": 0.88634,
-      "superEvCi95X": 2.0527,
+      "superRtp": 0.89984,
+      "superEvCi95X": 1.3168,
       "standardMedianX": 50,
       "superMedianX": 500,
       "avgSpins": 11.542,
@@ -190,7 +190,7 @@
       "letterConcentration": 1.417,
       "baseAlpha": 2.167765,
       "bonusAlpha": 1.197656,
-      "superAlpha": 1.122363,
+      "superAlpha": 1.1099,
       "superPriceRatio": 10
     },
     "sims": {
@@ -200,5 +200,5 @@
     },
     "generatedAt": "2026-10-06T09:58:59.669Z"
   },
-  "digest": "732267c05d2ec17f68338cec1a04bef7dd5a9f152d497d5eb036a747184773e5"
+  "digest": "d3ba2d25de13013f4817f8bbb6023e5640ea943ab9746f619160e9bd5c56b2bd"
 }
