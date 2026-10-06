@@ -9,6 +9,9 @@ const { test, before, after } = require("node:test");
 const assert = require("node:assert/strict");
 const mongoose = require("mongoose");
 const { MongoMemoryReplSet } = require("mongodb-memory-server");
+// The Poseidon v3 standard buy is paused in production; these tests still
+// exercise its transactional mechanics.
+require("../games/poseidon/constants").STANDARD_BUY_PAUSED = false;
 let server;
 before(async () => {
   server = await MongoMemoryReplSet.create({ binary: { version: "7.0.9", systemBinary: process.env.MONGOMS_SYSTEM_BINARY || (process.platform === "win32" ? "C:/Program Files/MongoDB/Server/7.0/bin/mongod.exe" : undefined) }, replSet: { count: 1, storageEngine: "wiredTiger" } });
@@ -133,4 +136,38 @@ for (const folder of ["poseidon", "zenobia", "goldenTree"]) test(`${folder}: wal
   assert.deepEqual(await Session.findOne({userId:user}).lean(), after);
   const recovered = await service.getActiveSession(user);
   assert.equal(recovered.freeSpinsRemaining, after.freeSpinsRemaining);
+});
+
+test("jackpot: a legacy TTL index is dropped and an abandoned round is paid once across instances", async () => {
+  const JackpotRound = require("../models/poseidonJackpotRoundModel");
+  const Wallet = require("../models/walletModel");
+  const jackpotService = require("../games/poseidon/jackpot/jackpotService");
+  const sweeper = require("../services/slotJackpotSweeper");
+  const { ensureSlotProductionIndexes } = require("../services/slotProductionSchemaService");
+
+  // Recreate the old deleting index, then run the boot migration again.
+  await JackpotRound.collection.createIndex({ expiresAt: 1 }, { expireAfterSeconds: 0, name: "expiresAt_1" });
+  await ensureSlotProductionIndexes();
+  const indexes = await JackpotRound.collection.indexes();
+  assert.ok(!indexes.some(i => i.key.expiresAt === 1 && Object.keys(i.key).length === 1 && i.expireAfterSeconds != null));
+  assert.ok(indexes.some(i => i.key.purgeAt === 1 && i.expireAfterSeconds === 0));
+
+  const userId = String(new mongoose.Types.ObjectId());
+  await Wallet.create({ user: userId, balance: 0 });
+  const round = await jackpotService.createJackpotRound({ spinId: "abandoned", userId, betAmount: 10000, game: "zenobia" });
+  await JackpotRound.updateOne({ roundId: round.roundId }, { $set: { expiresAt: new Date(Date.now() - 1000) } });
+  jackpotService._clearStubForTests(); // another instance: no in-memory copy
+
+  // Two instances sweep at once: the lease lets exactly one of them resolve it.
+  const [a, b] = await Promise.all([sweeper.sweepOnce(), jackpotService.claimStaleRounds()]);
+  assert.equal(a.claimed + b.length, 1);
+  if (b.length) await sweeper.resolveRound(b[0]);
+
+  const doc = await JackpotRound.findOne({ roundId: round.roundId }).lean();
+  assert.equal(doc.status, "settled");
+  assert.ok(doc.purgeAt > new Date());
+  const wallet = await Wallet.findOne({ user: userId }).lean();
+  assert.equal(wallet.balance, doc.prizeAmount);
+  assert.equal((await sweeper.sweepOnce()).claimed, 0);
+  assert.equal((await Wallet.findOne({ user: userId }).lean()).balance, doc.prizeAmount);
 });

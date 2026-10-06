@@ -20,6 +20,7 @@ router.use(authService.protect);
 router.get("/session", requireUserId, session);
 router.post("/spin", requireUserId, spin);
 router.post("/buy-bonus", requireUserId, buyBonus);
+router.get("/jackpot/pending", requireUserId, require("../controllers/slotJackpotPendingController").pendingFor("zenobia"));
 router.get("/jackpot", requireUserId, jackpotRecover);
 router.post("/jackpot/reveal", requireUserId, jackpotReveal);
 router.post("/jackpot/revealed", requireUserId, jackpotReveal);

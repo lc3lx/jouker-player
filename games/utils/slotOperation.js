@@ -3,11 +3,18 @@ const { AsyncLocalStorage } = require("node:async_hooks");
 const crypto = require("node:crypto");
 const ApiError = require("../../utils/apiError");
 const logger = require("../../utils/logger");
+const { newOperationSeed, createOperationRng } = require("./operationRng");
 const context = new AsyncLocalStorage();
 const receipts = new Map();
 
 function currentSession() { return context.getStore()?.session || null; }
 function active() { return !!context.getStore(); }
+/**
+ * The operation's deterministic RNG, or undefined outside an operation (engines
+ * then fall back to their own crypto RNG). Every transaction attempt gets a
+ * fresh stream from the same seed, so a retry replays the same outcome.
+ */
+function rng() { return context.getStore()?.rng; }
 function withContext(session, jobs, work) { return context.run({ session, afterCommit: jobs }, work); }
 function afterCommit(work) {
   const pending = context.getStore()?.afterCommit;
@@ -25,6 +32,7 @@ async function run({ game, userId, wallet, manager, modelName, requestId, input 
   const fingerprint = crypto.createHash("sha256").update(JSON.stringify(input)).digest("hex");
   const key = JSON.stringify([game, user, requestId]);
   const startedAt = Date.now();
+  const seed = newOperationSeed();
   const completed = await wallet.withUserLock(user, async () => {
     const mongo = wallet.MODE === "mongo";
     async function execute(session) {
@@ -47,7 +55,7 @@ async function run({ game, userId, wallet, manager, modelName, requestId, input 
           manager.replaceBonusSession(user, doc && doc.freeSpinsRemaining > 0 ? doc : null);
         }
         const jobs = [];
-        const result = await context.run({ session, afterCommit: jobs }, work);
+        const result = await context.run({ session, afterCommit: jobs, rng: createOperationRng(seed) }, work);
         const next = manager.getBonusSession(user);
         if (mongo) {
           const query = doc ? { userId: user, $or: [{ revision: doc.revision || 0 }, ...(doc.revision ? [] : [{ revision: { $exists: false } }])] } : { userId: user };
@@ -106,4 +114,4 @@ async function run({ game, userId, wallet, manager, modelName, requestId, input 
 }
 
 function clearForTests() { receipts.clear(); }
-module.exports = { run, currentSession, active, afterCommit, walletTransaction, clearForTests, withContext };
+module.exports = { run, currentSession, active, rng, afterCommit, walletTransaction, clearForTests, withContext };

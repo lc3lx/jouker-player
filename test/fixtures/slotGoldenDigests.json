@@ -1,0 +1,45 @@
+{
+  "spinsPerMode": 400,
+  "digests": {
+    "poseidon-v1": {
+      "base": "8e93a26878f353e02701a4dced34ab84a29771b5b0cd3eeb87d135760ac4b048",
+      "bonus": "1461a1b6d9f9d28f3ac2d40379edf5910014e065664b323f273dbc485f827ae9",
+      "super": "7956103b9bd455aed03eaff6749c681e4ae4121ec2f08b8e995656032ae4138d"
+    },
+    "poseidon-v2": {
+      "base": "78a721eb437cdfc94f527aba2aad67279bcd67487b51b77a866b53d30e88b9ab",
+      "bonus": "1e82a7ea7470626af97e44fee3ea36d768c048e54c21b7e9d77cf64d2d609388",
+      "super": "1f148efc8379abf6bec8ff90f1fbb6adf072323de61859771a2461cf0dc6f60e"
+    },
+    "poseidon-v3": {
+      "base": "357a40b2237f10b2d6ea1a03a257b6ac74d51d91cb61ef22e94d50f8a5054a34",
+      "bonus": "2910db5ac72a65f32216648398abc45722a68185c79e05680ef5e3f90f589776",
+      "super": "4968528d455daad3df831f995b831978f66853ecd80b91debc464595728b347c"
+    },
+    "zenobia-v2": {
+      "base": "1df3fa045cbc89d54d2f7f78aa281a8699073722fe95bd0cdf0be315ad762962",
+      "bonus": "5c298f98ed13ae36e986b55a2f0bdf4c240fad6c9fe5be1a69a2148430541604",
+      "super": "ea3f20e3ec9a115b9b7622b0eaf4a1560d9da7daa4f802f9bb94a1bac8fb189b"
+    },
+    "zeus-v1": {
+      "base": "fe484553d1f708046104b6cc58b8cc8ca02693c209dbcdaa55342df0294dc97e",
+      "bonus": "1bf08df4bd05e5df3ea05541befd2f821f795bb7b7edf14254a174708a280be0",
+      "super": "0d07a3c5ff6d4fdb6d728e8bcd9dc066c42d8479b2705d93eb509ed1fdeb14d9"
+    },
+    "zeus-v2": {
+      "base": "f90cffad1d9b5b1199fe38d4a563f59c3e155177382f29d56b5e206a32b76bfe",
+      "bonus": "ea42c75aa28d87bbcd9827b239792446d57a5f70872d76d532d9d30d553622e0",
+      "super": "25171ef9cc3953855b22a8ef8bc7d42ba59ff70750fc1ab53271f95cab5a4b33"
+    },
+    "zeus-v3": {
+      "base": "2fb3cac86075376a400e1402b60bc59993c9a819423c2ebfeb74b63fc61bd0df",
+      "bonus": "f4b21cf3d89d86294dc3c67dc1eda44e5e0795f047442223d097d32466d7afce",
+      "super": "55574b869f217cbf15614ddd127a21b5c6acbb218c91456ee7f75b082b1a7dc2"
+    },
+    "zeus-v4": {
+      "base": "6cea0740206c8c0f2542a91307f845c66909bce8643313d207d6b40200fd964a",
+      "bonus": "2348ea94c1c35e1c15785e9e49c567f9cf069d85374d64cbc452e8d1d65b3c0e",
+      "super": "8b15216459706cb27ab8fc5b6f28f7b8ee381907775d4f7be4a8fe176a9c7260"
+    }
+  }
+}

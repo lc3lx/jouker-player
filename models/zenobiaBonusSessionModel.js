@@ -23,6 +23,14 @@ const zenobiaBonusSessionSchema = new mongoose.Schema(
     revision: { type: Number, default: 0 },
     superBonus: { type: Boolean, default: false },
     bonusMultiplier: { type: Number, default: 0, min: 0 },
+    /** Economy profile the session was sold/triggered under (v4+); null = legacy. */
+    profileId: { type: String, default: null },
+    /** natural | buy | super — what opened the session (stats + pricing audit). */
+    origin: { type: String, enum: ["natural", "buy", "super", null], default: null },
+    /** Coins paid for a bought session (0 for a natural trigger). */
+    costPaid: { type: Number, default: 0, min: 0 },
+    /** Bet multiples already paid this round, for the cumulative max-win cap. */
+    roundWonX: { type: Number, default: 0, min: 0 },
     createdAt: { type: Number, required: true },
     updatedAt: { type: Number, required: true },
   },

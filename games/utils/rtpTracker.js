@@ -36,11 +36,24 @@ function recordSpin(userId, gameKey, betAmount, winAmount) {
     }
   }
 
+  recordAggregate(gameKey, bet, win);
+}
+
+/**
+ * Fold one settled spin into the game's lifetime CasinoGameStats totals only.
+ * No per-player history: Poseidon, Zenobia and Zeus run a fixed, disclosed RTP
+ * and must never feed (or be steered by) the per-player streak tracker.
+ */
+function recordAggregate(gameKey, betAmount, winAmount) {
+  const bet = Math.max(0, Number(betAmount) || 0);
+  const win = Math.max(0, Number(winAmount) || 0);
+
   // Aggregate into CasinoGameStats (non-blocking, only if mongoose is connected)
   const mongoose = require("mongoose");
   if (mongoose.connection && mongoose.connection.readyState === 1 && (bet > 0 || win > 0)) {
-    const isBig = win >= bet * 12;
-    const isMega = win >= bet * 50;
+    // A free spin has no stake, so it can't be classified against one.
+    const isBig = bet > 0 && win >= bet * 12;
+    const isMega = bet > 0 && win >= bet * 50;
 
     const incUpdate = {
       totalBet: bet,
@@ -134,6 +147,7 @@ setInterval(() => {
 
 module.exports = {
   recordSpin,
+  recordAggregate,
   getPlayerRollingRtp,
   evaluateStreak,
   _clearForTests: () => playerHistories.clear(),

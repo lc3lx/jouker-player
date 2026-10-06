@@ -22,6 +22,7 @@ router.post("/spin", requireUserId, spin);
 router.post("/buy-bonus", requireUserId, buyBonus);
 
 // Jackpot — match-3: POST body { roundId, cardIndex } → one card face
+router.get("/jackpot/pending", requireUserId, require("../controllers/slotJackpotPendingController").pendingFor("poseidon"));
 router.get("/jackpot", requireUserId, jackpotRecover);
 router.post("/jackpot/revealed", requireUserId, jackpotReveal);
 router.post("/jackpot/reveal", requireUserId, jackpotReveal);

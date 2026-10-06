@@ -25,7 +25,11 @@ exports.buyBonus = asyncHandler(async (req, res) => {
   const data = await zenobiaService.executeBuyBonus(
     req.zenobiaUserId,
     currentBet,
-    { superBonus: superBonus === true || superBonus === "true", requestId: req.body.requestId },
+    {
+      superBonus: superBonus === true || superBonus === "true",
+      requestId: req.body.requestId,
+      expectedCost: req.body.expectedCost ?? null,
+    },
   );
   res.status(200).json({ status: "success", data });
 });

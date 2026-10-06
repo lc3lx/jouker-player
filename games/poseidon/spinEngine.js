@@ -226,9 +226,14 @@ function resolveSpin({
   edgeParams = null,
   economyVersion = ECONOMY_VERSION,
   payScale = null,
+  profile = null,
 } = {}) {
   if (economyVersion === 1) return require("./spinEngine.v1").resolveSpin({ bonusMode, superBonus, rng, edgeParams });
   if (economyVersion === 2) return require("./spinEngine.v2").resolveSpin({ bonusMode, superBonus, rng, edgeParams });
+  if (economyVersion === 4) return require("./spinEngine.v4").resolveSpin({ profile, bonusMode, superBonus, rng });
+  // Never fall through: a session pinned to an unknown engine must not be
+  // dealt a different game.
+  if (economyVersion !== 3) throw new Error(`UNKNOWN_POSEIDON_ECONOMY_VERSION:${economyVersion}`);
 
   const scale = payScale ?? 1;
   const matrix = generateGrid(rng, { bonus: bonusMode, superBonus: !!superBonus && bonusMode });

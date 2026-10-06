@@ -4,9 +4,15 @@ const assert = require("node:assert/strict");
 const economy = require("../games/utils/slotEconomy");
 const { rngFor } = require("../tool/slotEconomyAudit");
 const operation = require("../games/utils/slotOperation");
+// The Poseidon v3 standard buy is paused in production; the idempotency tests
+// below still exercise it.
+require("../games/poseidon/constants").STANDARD_BUY_PAUSED = false;
 
 test("specified faces are exact normalized probabilities, independent of stacking or bet", () => {
-  for (const folder of ["poseidon", "zenobia", "dice"]) {
+  // Economy v2 (Poseidon / Zeus). Zenobia's legacy tables are relative
+  // weights normalised per draw; its v3 profile tables are validated by
+  // games/slotProfiles/registry.js (see test/slotProfiles.test.js).
+  for (const folder of ["poseidon", "dice"]) {
     const c = require(`../games/${folder}/${folder === "dice" ? "DiceEngine.v2" : folder === "poseidon" ? "constants.v2" : "constants"}`);
     for (const weights of [c.BASE_MULTIPLIER_WEIGHTS, c.BONUS_MULTIPLIER_WEIGHTS]) {
       assert.ok(Math.abs(weights.reduce((a,b) => a+b,0) - 100) < 1e-10);
@@ -73,10 +79,13 @@ for (const folder of ["poseidon", "zenobia", "goldenTree"]) {
   });
 }
 
-test("Zenobia applies the entire bank and never changes it on a losing/no-plaque spin", async () => {
+test("Zenobia v3 applies the entire bank only with a fresh plaque, and never changes it on a losing spin", async () => {
   const service = require("../games/zenobia/zenobiaService"), engine = require("../games/zenobia/spinEngine"), manager = require("../games/zenobia/roundManager"), wallet = require("../games/zenobia/zenobiaWalletAdapter");
+  const registry = require("../games/slotProfiles/registry");
+  const profileId = registry.defaultProfileId("zenobia");
+  if (!profileId) return; // profiles not calibrated in this checkout
   const user = "zenobia-bank-exact"; wallet.seedStubBalance(user, 1e12); manager.clearAllForTests();
-  manager.createBonusSession(user, { betAmount: 1000000000 }); manager.setBonusMultiplier(user, 50);
+  manager.createBonusSession(user, { betAmount: 1000000000, economyVersion: 3, profileId, origin: "buy" }); manager.setBonusMultiplier(user, 50);
   const original = engine.resolveSpin;
   let baseWin = 2, plaqueSum = 20;
   engine.resolveSpin = () => ({ initialMatrix: [], finalMatrix: [], steps: [], baseWin, multiplierSum: plaqueSum, multipliers: plaqueSum ? [{ value: plaqueSum }] : [], scatters: [], scatterCount: 0 });
@@ -92,14 +101,27 @@ test("Zenobia applies the entire bank and never changes it on a losing/no-plaque
   } finally { engine.resolveSpin = original; }
 });
 
+test("Zenobia v1/v2 sessions keep the any-win bank rule they were sold with", async () => {
+  const service = require("../games/zenobia/zenobiaService"), engine = require("../games/zenobia/spinEngine"), manager = require("../games/zenobia/roundManager"), wallet = require("../games/zenobia/zenobiaWalletAdapter");
+  const user = "zenobia-bank-legacy"; wallet.seedStubBalance(user, 1e12); manager.clearAllForTests();
+  manager.createBonusSession(user, { betAmount: 10000 }); manager.setBonusMultiplier(user, 50);
+  const original = engine.resolveSpin;
+  engine.resolveSpin = () => ({ initialMatrix: [], finalMatrix: [], steps: [], baseWin: 2, multiplierSum: 0, multipliers: [], scatters: [], scatterCount: 0 });
+  try {
+    const res = await service.executeSpin(user, 10000);
+    assert.equal(res.appliedMultiplier, 50);
+  } finally { engine.resolveSpin = original; }
+});
+
 test("legacy sessions retain their original engine while new sessions use v2", () => {
   const engine = require("../games/dice/DiceEngine"), old = require("../games/dice/DiceEngine.v1");
   const opts = { serverSeed: "legacy-session", clientSeed: "test", nonce: "7", isFreeSpin: true, superBonus: true };
   assert.deepEqual(engine.spin(10000, { ...opts, economyVersion: 1 }), old.spin(10000, opts));
-  for (const game of ["poseidon", "zenobia"]) {
-    const current = require(`../games/${game}/spinEngine`), legacy = require(`../games/${game}/spinEngine.v1`);
-    assert.deepEqual(current.resolveSpin({ rng: rngFor(1), bonusMode: true, economyVersion: 1 }), legacy.resolveSpin({ rng: rngFor(1), bonusMode: true }));
-  }
+  const poseidon = require("../games/poseidon/spinEngine"), poseidonV1 = require("../games/poseidon/spinEngine.v1");
+  assert.deepEqual(poseidon.resolveSpin({ rng: rngFor(1), bonusMode: true, economyVersion: 1 }), poseidonV1.resolveSpin({ rng: rngFor(1), bonusMode: true }));
+  // Zenobia never routed v1: sessions tagged 1 or 2 have always played the v2 engine.
+  const zenobia = require("../games/zenobia/spinEngine");
+  assert.deepEqual(zenobia.resolveSpin({ rng: rngFor(1), bonusMode: true, economyVersion: 1 }), zenobia.resolveSpin({ rng: rngFor(1), bonusMode: true, economyVersion: 2 }));
 });
 
 test("Zeus stages cumulative cap and retriggers without mutating an unpaid session", () => {

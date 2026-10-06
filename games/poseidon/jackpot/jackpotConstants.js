@@ -62,8 +62,14 @@ const JACKPOT_STATUS = Object.freeze({
   EXPIRED:    "expired",
 });
 
-/** Round TTL in milliseconds — if not settled within this window, expire. */
-const JACKPOT_ROUND_TTL_MS = 10 * 60 * 1000; // 10 minutes
+/**
+ * Reveal deadline. A round the player has not finished within this window is
+ * revealed and settled by the server sweeper — the prize is always paid.
+ */
+const JACKPOT_ROUND_TTL_MS = 30 * 60 * 1000; // 30 minutes
+
+/** How long a settled round is kept for audit before MongoDB purges it. */
+const JACKPOT_RETENTION_MS = 180 * 24 * 60 * 60 * 1000; // 180 days
 
 /** Weight of the jackpot scatter in the base-game reel tables. */
 const JACKPOT_BASE_WEIGHT = 0.25;
@@ -80,6 +86,7 @@ module.exports = {
   JACKPOT_CARD_COUNT,
   JACKPOT_STATUS,
   JACKPOT_ROUND_TTL_MS,
+  JACKPOT_RETENTION_MS,
   JACKPOT_BASE_WEIGHT,
   JACKPOT_BONUS_WEIGHT,
 };

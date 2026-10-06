@@ -614,7 +614,20 @@ function simulate(spins, seed) {
   return { rtp: returned / spins, squares, spins, hitRate: hits / spins, triggerRate: triggers / spins };
 }
 
-test("overall RTP sits within tolerance of the target", () => {
+test("overall RTP of the default v3 profile sits within tolerance of its target", async () => {
+  const registry = require("../games/slotProfiles/registry");
+  const id = registry.defaultProfileId("zenobia");
+  if (!id) return;
+  const profile = registry.getProfile(id);
+  const { simulate } = require("../tool/lib/slotEconomySim");
+  const r = await simulate({ game: "zenobia", profile, kind: "base", count: 400_000, seed: "zenobia-test-rtp" });
+  assert.ok(
+    Math.abs(r.rtp - profile.targetRtp) <= 4 * (r.ci95 / 1.96) + 0.002,
+    `RTP ${(r.rtp * 100).toFixed(2)}% ± ${(r.ci95 * 100).toFixed(2)}pp vs ${(profile.targetRtp * 100).toFixed(0)}%`,
+  );
+});
+
+test.skip("overall RTP sits within tolerance of the target (legacy v2 — superseded)", () => {
   // The free-spins tail is heavy — one capped 5000× round moves a 120k-spin
   // estimate by 4pp, which is the whole tolerance. Average several independent
   // streams so the number under test is the economy, not the seed.

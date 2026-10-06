@@ -6,23 +6,21 @@ const {
   MAX_WIN_MULTIPLIER,
   BUY_BONUS_COST,
   SUPER_BUY_BONUS_COST,
-  FREE_SPINS_NATURAL,
   FREE_SPINS_BOUGHT,
-  RETRIGGER_AWARD,
-  TRIGGER_NATURAL_MIN,
-  TRIGGER_RETRIGGER_MIN,
-  resolvePayoutMultiplier,
-  BONUS_BANK_CAP,
-  SUPER_BONUS_BANK_CAP,
   winTierFor,
   roundMoney,
 } = require("./constants");
+// Read at call time so tests can lift the legacy standard-buy pause.
+const poseidonConstants = require("./constants");
+const economyRuntime = require("../utils/slotEconomyRuntime");
+const economyStats = require("../utils/slotEconomyStats");
 const spinEngine = require("./spinEngine");
+const { settleSpin } = require("./settlement");
 const roundManager = require("./roundManager");
 const wallet = require("./poseidonWalletAdapter");
 const jackpotService = require("./jackpot/jackpotService");
 const { settleJackpotRound } = require("./jackpot/jackpotSettlement");
-const houseEdgeController = require("../utils/houseEdgeController");
+const { recordAggregate } = require("../utils/rtpTracker");
 
 function mapWalletError(err) {
   if (
@@ -36,8 +34,9 @@ function mapWalletError(err) {
 
 function validateBet(betAmount) {
   const bet = roundMoney(betAmount);
-  if (!Number.isFinite(bet) || bet < BET_MIN || bet > BET_MAX) {
-    throw new ApiError(`Bet must be between ${BET_MIN} and ${BET_MAX} coins`, 400);
+  const { min, max } = economyRuntime.betLimits("poseidon", BET_MIN, BET_MAX);
+  if (!Number.isFinite(bet) || bet < min || bet > max) {
+    throw new ApiError(`Bet must be between ${min} and ${max} coins`, 400);
   }
   return bet;
 }
@@ -65,6 +64,7 @@ async function executeSpinInternal(userId, betAmountInput) {
     const isFreeSpin =
       bonusSession != null && bonusSession.freeSpinsRemaining > 0;
 
+    if (!isFreeSpin) economyRuntime.assertPaidPlayOpen("poseidon");
     const betAmount = isFreeSpin
       ? bonusSession.betAmount
       : validateBet(betAmountInput);
@@ -76,73 +76,49 @@ async function executeSpinInternal(userId, betAmountInput) {
       }
     }
 
-    const economyVersion = isFreeSpin ? (bonusSession.economyVersion || 3) : 3;
+    // One global, disclosed profile — no per-player or bet-size parameters. A
+    // bonus round keeps the engine + profile it was opened with.
+    const { economyVersion, profile, rules } = economyRuntime.resolveEconomy(
+      "poseidon",
+      isFreeSpin ? bonusSession : null,
+      3,
+    );
     const superBonus = !!(isFreeSpin && bonusSession.superBonus);
-    const edgeParams = economyVersion >= 2 && isFreeSpin ? null : houseEdgeController.calculateEdge({
-      game: "poseidon",
-      betAmount,
-      betMin: BET_MIN,
-      userId: userKey,
-      isBonusSpin: isFreeSpin,
-      economyVersion,
-    });
     const spin = spinEngine.resolveSpin({
       bonusMode: isFreeSpin,
       superBonus,
-      edgeParams,
       economyVersion,
+      profile,
+      rng: slotOperation.rng(),
     });
 
-    // --- win math (bet multiples) ---
-    // Base: this spin's plaques multiply a winning sequence. Bonus: plaques from
-    // winning spins bank into a session total activated only by fresh plaques.
-    // Losing spins ignore plaques for payout (they still count for the free-spins
-    // trigger below). Overall win is still hard-capped by MAX_WIN_MULTIPLIER.
-    const carried = isFreeSpin ? Number(bonusSession.bonusMultiplier || 0) : 0;
-    const freshPlaques = Math.max(0, Number(spin.multiplierSum) || 0);
-    const resolveMultiplier = economyVersion === 1 ? require("./constants.v1").resolvePayoutMultiplier : resolvePayoutMultiplier;
-    const { applied: appliedMultiplier, nextCarried } = resolveMultiplier({
-      baseWin: spin.baseWin,
-      plaqueSum: freshPlaques,
-      carried,
-      isFreeSpin,
-      bankCap: superBonus ? SUPER_BONUS_BANK_CAP : BONUS_BANK_CAP,
+    // --- win math (bet multiples) + bonus entitlement: shared settlement ---
+    const settled = settleSpin({
+      spin,
+      economyVersion,
+      rules,
+      session: isFreeSpin ? bonusSession : null,
+      canTrigger: !roundManager.hasActiveBonusSession(userKey),
     });
-
-    // Pay the displayed multiplier in full. Only the published maximum applies;
-    // bet-tier compression would make baseWin * appliedMultiplier disagree
-    // with both the credited amount and the bonus bank shown to the player.
-    const activeCapMultiplier = MAX_WIN_MULTIPLIER;
-    let totalWinX = spin.baseWin * appliedMultiplier;
-    const winCapped = totalWinX > activeCapMultiplier;
-    if (winCapped) totalWinX = activeCapMultiplier;
-
+    const { applied: appliedMultiplier, nextCarried, winCapped, scatterCount } = settled;
+    const totalWinX = settled.winX;
     const totalWin = roundMoney(totalWinX * betAmount);
-
-    // --- free spins: 4 heads in base / 3 heads during bonus ---
+    // paid | natural | buy | super — legacy sessions predate the origin tag.
+    const spinOrigin = !isFreeSpin
+      ? "paid"
+      : bonusSession.origin || (bonusSession.superBonus ? "super" : "natural");
     const multiplierCount = spin.multipliers.length;
-    const scatterCount = Number.isFinite(spin.scatterCount)
-      ? spin.scatterCount
-      : (spin.scatters || []).length;
+
     let freeSpinsTriggered = false;
     let freeSpinsAwarded = 0;
     let stagedBonusAction = null;
-    if (isFreeSpin) {
-      if (scatterCount >= TRIGGER_RETRIGGER_MIN) {
-        stagedBonusAction = { type: "retrigger", spins: RETRIGGER_AWARD };
-        freeSpinsAwarded = RETRIGGER_AWARD;
-      }
-    } else if (
-      scatterCount >= TRIGGER_NATURAL_MIN &&
-      !roundManager.hasActiveBonusSession(userKey)
-    ) {
-      stagedBonusAction = {
-        type: "create",
-        betAmount,
-        freeSpins: FREE_SPINS_NATURAL,
-      };
+    if (settled.award?.type === "retrigger") {
+      stagedBonusAction = { type: "retrigger", spins: settled.award.spins };
+      freeSpinsAwarded = settled.award.spins;
+    } else if (settled.award?.type === "create") {
+      stagedBonusAction = { type: "create", betAmount, freeSpins: settled.award.spins };
       freeSpinsTriggered = true;
-      freeSpinsAwarded = FREE_SPINS_NATURAL;
+      freeSpinsAwarded = settled.award.spins;
     }
 
     // --- settlement ---
@@ -151,7 +127,12 @@ async function executeSpinInternal(userId, betAmountInput) {
       balanceAfter = await wallet.atomicSpinWallet(userKey, {
         betAmount: isFreeSpin ? 0 : betAmount,
         winAmount: totalWin,
-        meta: { type: isFreeSpin ? "free_spin" : "main_spin" },
+        meta: {
+          type: isFreeSpin ? "free_spin" : "main_spin",
+          profileId: profile?.id ?? null,
+          origin: spinOrigin,
+          sessionId: bonusSession?.sessionId ?? null,
+        },
       });
     } catch (err) {
       mapWalletError(err);
@@ -165,6 +146,11 @@ async function executeSpinInternal(userId, betAmountInput) {
         roundManager.createBonusSession(userKey, {
           betAmount: stagedBonusAction.betAmount,
           freeSpins: stagedBonusAction.freeSpins,
+          economyVersion,
+          profileId: profile?.id ?? null,
+          origin: "natural",
+          // The cumulative round cap counts the triggering spin, as Zeus does.
+          roundWonX: profile ? totalWinX : 0,
         });
         await roundManager.touchSession(userKey);
       }
@@ -175,8 +161,10 @@ async function executeSpinInternal(userId, betAmountInput) {
       // A rejected wallet settlement must not bank this spin's plaques.
       roundManager.setBonusMultiplier(userKey, nextCarried);
       roundManager.addBonusWin(userKey, totalWin);
+      roundManager.addRoundWin(userKey, totalWinX);
       bonusTotalWon = roundManager.getBonusSession(userKey)?.totalWon ?? 0;
-      roundManager.consumeBonusSpin(userKey);
+      if (settled.capReached) roundManager.endBonusSession(userKey);
+      else roundManager.consumeBonusSpin(userKey);
     }
 
     const round = roundManager.createRound({
@@ -195,7 +183,17 @@ async function executeSpinInternal(userId, betAmountInput) {
       game: "poseidon",
       won: Number(totalWin || 0) > 0,
     }));
-    slotOperation.afterCommit(() => houseEdgeController.recordSpin(userKey, "poseidon", isFreeSpin ? 0 : betAmount, totalWin));
+    slotOperation.afterCommit(() => recordAggregate("poseidon", isFreeSpin ? 0 : betAmount, totalWin));
+    slotOperation.afterCommit(() => (isFreeSpin
+      ? economyStats.recordFreeSpin({
+        game: "poseidon", profileId: profile?.id, economyVersion, origin: spinOrigin,
+        win: totalWin, winX: totalWinX, roundCapped: settled.capReached,
+      })
+      : economyStats.recordPaidSpin({
+        game: "poseidon", profileId: profile?.id, economyVersion, bet: betAmount, win: totalWin, winX: totalWinX,
+        plaque: spin.multipliers.length > 0, naturalTrigger: freeSpinsTriggered,
+        jackpotTrigger: (spin.jackpotCount ?? spin.finalMatrix.flat().filter((c) => c === "jackpot").length) >= 3,
+      })));
 
     const liveSession = roundManager.getBonusSession(userKey);
 
@@ -207,6 +205,9 @@ async function executeSpinInternal(userId, betAmountInput) {
           spinId: round.roundId,
           betAmount,
           userId: userKey,
+          profileId: profile?.id ?? null,
+          economyVersion,
+          origin: spinOrigin,
         });
       } catch (err) {
         if (slotOperation.active()) throw err;
@@ -233,7 +234,10 @@ async function executeSpinInternal(userId, betAmountInput) {
       baseWinAmount: roundMoney(spin.baseWin * betAmount),
       totalWin,
       winCapped,
-      maxWinCap: roundMoney(MAX_WIN_MULTIPLIER * betAmount),
+      maxWinCap: roundMoney((rules?.maxWinX ?? MAX_WIN_MULTIPLIER) * betAmount),
+      roundCapReached: !!settled.capReached,
+      economyVersion,
+      profileId: profile?.id ?? null,
       winTier: winTierFor(totalWinX),
       isFreeSpin,
       freeSpinsTriggered,
@@ -250,7 +254,7 @@ async function executeSpinInternal(userId, betAmountInput) {
  * Buy bonus: pay the fixed cost and open a 10-free-spin session directly —
  * no forced trigger spin, the outcome is whatever the spins deal.
  */
-async function executeBuyBonusInternal(userId, currentBetInput, { superBonus = false } = {}) {
+async function executeBuyBonusInternal(userId, currentBetInput, { superBonus = false, expectedCost = null } = {}) {
   const userKey = String(userId);
   return wallet.withUserLock(userKey, async () => {
     await roundManager.ensureLoaded(userKey);
@@ -259,8 +263,14 @@ async function executeBuyBonusInternal(userId, currentBetInput, { superBonus = f
     }
 
     const betAmount = validateBet(currentBetInput);
-    const multiplier = superBonus ? SUPER_BUY_BONUS_COST : BUY_BONUS_COST;
-    const cost = roundMoney(betAmount * multiplier);
+    const { cost, profile } = economyRuntime.quoteBuy("poseidon", {
+      betAmount,
+      superBonus,
+      expectedCost,
+      legacyCost: superBonus ? SUPER_BUY_BONUS_COST : BUY_BONUS_COST,
+      legacyPaused: !superBonus && poseidonConstants.STANDARD_BUY_PAUSED,
+      roundMoney,
+    });
 
     const balance = await wallet.getBalance(userKey);
     if (balance < cost) {
@@ -268,19 +278,30 @@ async function executeBuyBonusInternal(userId, currentBetInput, { superBonus = f
     }
 
     try {
-      await wallet.deductBalance(userKey, cost, { leg: "buy_bonus" });
+      await wallet.deductBalance(userKey, cost, {
+        leg: "buy_bonus",
+        profileId: profile?.id ?? null,
+        origin: superBonus ? "super" : "buy",
+      });
     } catch (err) {
       mapWalletError(err);
     }
 
     const session = roundManager.createBonusSession(userKey, {
       betAmount,
-      freeSpins: FREE_SPINS_BOUGHT,
+      freeSpins: profile ? profile.rules.freeSpinsBought : FREE_SPINS_BOUGHT,
       superBonus: !!superBonus,
+      economyVersion: profile ? profile.economyVersion : 3,
+      profileId: profile?.id ?? null,
+      origin: superBonus ? "super" : "buy",
+      costPaid: cost,
     });
     await roundManager.touchSession(userKey);
 
-    slotOperation.afterCommit(() => houseEdgeController.recordSpin(String(userId), "poseidon", cost, 0));
+    slotOperation.afterCommit(() => recordAggregate("poseidon", cost, 0));
+    slotOperation.afterCommit(() => economyStats.recordBuy({
+      game: "poseidon", profileId: profile?.id, economyVersion: session.economyVersion, superBonus: !!superBonus, cost,
+    }));
     const balanceAfter = await wallet.getBalance(userKey);
 
     return {
@@ -288,8 +309,9 @@ async function executeBuyBonusInternal(userId, currentBetInput, { superBonus = f
       cost,
       betAmount,
       superBonus: !!superBonus,
+      profileId: profile?.id ?? null,
       freeSpinsTriggered: true,
-      freeSpinsAwarded: FREE_SPINS_BOUGHT,
+      freeSpinsAwarded: session.freeSpinsRemaining,
       freeSpinsRemaining: session.freeSpinsRemaining,
       balance: roundMoney(balanceAfter),
     };
@@ -306,7 +328,8 @@ async function getActiveSession(userId) {
   }
   return {
     active: true,
-    economyVersion: session.economyVersion || 1,
+    economyVersion: session.economyVersion || 3,
+    profileId: session.profileId || null,
     sessionId: session.sessionId,
     betAmount: session.betAmount,
     freeSpinsRemaining: session.freeSpinsRemaining,
@@ -379,5 +402,5 @@ function executeSpin(userId, betAmount, options = {}) {
   return slotOperation.run({ game: "poseidon", userId, wallet, manager: roundManager, modelName: "poseidonBonusSessionModel", requestId: options.requestId, input: ["spin", betAmount] }, () => executeSpinInternal(userId, betAmount));
 }
 function executeBuyBonus(userId, currentBet, options = {}) {
-  return slotOperation.run({ game: "poseidon", userId, wallet, manager: roundManager, modelName: "poseidonBonusSessionModel", requestId: options.requestId, input: ["buy", currentBet, !!options.superBonus] }, () => executeBuyBonusInternal(userId, currentBet, options));
+  return slotOperation.run({ game: "poseidon", userId, wallet, manager: roundManager, modelName: "poseidonBonusSessionModel", requestId: options.requestId, input: ["buy", currentBet, !!options.superBonus, options.expectedCost ?? null] }, () => executeBuyBonusInternal(userId, currentBet, options));
 }

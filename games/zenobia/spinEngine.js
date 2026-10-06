@@ -204,7 +204,23 @@ function scattersInRefills(refills) {
  *   scatters, scatterCount,
  * }
  */
-function resolveSpin({ bonusMode = false, superBonus = false, rng = secureRandom, edgeParams = null } = {}) {
+/** Current production version for paid spins until v3 profiles go live. */
+const ECONOMY_VERSION = 2;
+
+/**
+ * Version dispatch. Sessions tagged 1 or 2 have always played this file's v2
+ * game; v3 is the profile-driven engine. Unknown versions are rejected rather
+ * than silently dealt a different game.
+ */
+function resolveSpin({ economyVersion = ECONOMY_VERSION, profile = null, rng = secureRandom, ...rest } = {}) {
+  if (economyVersion === 3) return require("./spinEngine.v3").resolveSpin({ profile, rng, ...rest });
+  if (economyVersion !== 1 && economyVersion !== 2) {
+    throw new Error(`UNKNOWN_ZENOBIA_ECONOMY_VERSION:${economyVersion}`);
+  }
+  return resolveSpinV2({ rng, ...rest });
+}
+
+function resolveSpinV2({ bonusMode = false, superBonus = false, rng = secureRandom, edgeParams = null } = {}) {
   let weights = bonusMode
     ? (superBonus && SUPER_BONUS_WEIGHTS ? SUPER_BONUS_WEIGHTS : BONUS_WEIGHTS)
     : BASE_WEIGHTS;
@@ -264,6 +280,7 @@ function resolveSpin({ bonusMode = false, superBonus = false, rng = secureRandom
 }
 
 module.exports = {
+  ECONOMY_VERSION,
   resolveSpin,
   generateGrid,
   tumble,

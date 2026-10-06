@@ -22,7 +22,11 @@
     "rtp:king-earth": "node test/kingEarth.rtp.js",
     "test:island-jackpot": "node --test test/islandJackpot.hand.test.js test/islandJackpot.logic.test.js test/islandJackpot.edge.test.js test/islandJackpot.integration.test.js test/islandJackpot.tickets.test.js test/poker.jackpot-outbox.test.js",
     "loadtest:island-jackpot": "node scripts/loadTestIslandJackpot.js",
-    "simulate:island-economy": "node scripts/simulateIslandEconomy.js"
+    "simulate:island-economy": "node scripts/simulateIslandEconomy.js",
+    "test:slots": "node --test test/slotP0Hotfixes.test.js test/slotGoldenDigests.test.js test/slotProfiles.test.js test/slotEconomyLive.test.js test/slotEconomy.test.js test/poseidon.test.js test/zenobia.test.js test/kingEarth.test.js",
+    "slot:calibrate": "node tool/slotProfileCalibrate.js",
+    "slot:verify": "node tool/slotProfileVerify.js",
+    "slot:digests": "node tool/slotGoldenDigests.js"
   },
   "keywords": [],
   "author": "",

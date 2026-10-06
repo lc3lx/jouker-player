@@ -38,6 +38,12 @@ const poseidonJackpotRoundSchema = new mongoose.Schema(
     /** Server-determined prize type: "no_win" | "super10m" | "mega50m" | "grand100m". */
     prizeType: { type: String, required: true },
 
+    /** Economy context of the spin that triggered the round (stats only). */
+    profileId: { type: String, default: null },
+    economyVersion: { type: Number, default: null },
+    /** paid | natural | buy | super — the kind of spin that triggered it. */
+    origin: { type: String, default: null },
+
     /** Optional on legacy rounds; new rounds snapshot their validated base bet. */
     betAmount: { type: Number, min: 0 },
     payoutVersion: { type: Number },
@@ -68,8 +74,18 @@ const poseidonJackpotRoundSchema = new mongoose.Schema(
     /** ISO timestamp when the wallet credit was committed. */
     settledAt:  { type: Date, default: null },
 
-    /** Expiry — if not settled by this time the round is expired. */
-    expiresAt: { type: Date, required: true, index: { expireAfterSeconds: 0 } },
+    /**
+     * Reveal deadline. A round still unsettled past this point is resolved by
+     * the server (services/slotJackpotSweeper.js) — it is never deleted
+     * unpaid. (This used to carry a TTL index that silently deleted prizes.)
+     */
+    expiresAt: { type: Date, required: true },
+
+    /** Cross-instance claim held by the sweeper while it resolves the round. */
+    sweepLeaseUntil: { type: Date, default: null },
+
+    /** Set only once the round is settled; the record is purged after that. */
+    purgeAt: { type: Date, default: null, index: { expireAfterSeconds: 0 } },
   },
   {
     timestamps: true,
@@ -79,5 +95,7 @@ const poseidonJackpotRoundSchema = new mongoose.Schema(
 
 // Fast lookup: active rounds for a player
 poseidonJackpotRoundSchema.index({ userId: 1, status: 1 });
+// Sweeper scan: unsettled rounds past their reveal deadline
+poseidonJackpotRoundSchema.index({ status: 1, expiresAt: 1 });
 
 module.exports = mongoose.model("PoseidonJackpotRound", poseidonJackpotRoundSchema);

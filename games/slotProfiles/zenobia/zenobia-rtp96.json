@@ -1,0 +1,301 @@
+{
+  "game": "zenobia",
+  "economyVersion": 3,
+  "params": {
+    "symbols": {
+      "base": [
+        [
+          "s",
+          22
+        ],
+        [
+          "n",
+          22
+        ],
+        [
+          "e",
+          22
+        ],
+        [
+          "a",
+          22
+        ],
+        [
+          "ring",
+          12
+        ],
+        [
+          "spear",
+          10
+        ],
+        [
+          "pot",
+          8
+        ],
+        [
+          "necklace",
+          6.5
+        ],
+        [
+          "throne",
+          5
+        ],
+        [
+          "queen",
+          4
+        ],
+        [
+          "mult",
+          2.5
+        ]
+      ],
+      "bonus": [
+        [
+          "s",
+          22
+        ],
+        [
+          "n",
+          22
+        ],
+        [
+          "e",
+          22
+        ],
+        [
+          "a",
+          22
+        ],
+        [
+          "ring",
+          12
+        ],
+        [
+          "spear",
+          10
+        ],
+        [
+          "pot",
+          8
+        ],
+        [
+          "necklace",
+          6.5
+        ],
+        [
+          "throne",
+          5
+        ],
+        [
+          "queen",
+          4
+        ],
+        [
+          "mult",
+          8
+        ]
+      ],
+      "super": [
+        [
+          "s",
+          20
+        ],
+        [
+          "n",
+          20
+        ],
+        [
+          "e",
+          20
+        ],
+        [
+          "a",
+          20
+        ],
+        [
+          "ring",
+          12
+        ],
+        [
+          "spear",
+          10
+        ],
+        [
+          "pot",
+          8
+        ],
+        [
+          "necklace",
+          6.5
+        ],
+        [
+          "throne",
+          5
+        ],
+        [
+          "queen",
+          4
+        ],
+        [
+          "mult",
+          4.5
+        ]
+      ]
+    },
+    "scatterWeight": {
+      "base": 1.39,
+      "bonus": 1.01,
+      "super": 1.01
+    },
+    "jackpotWeight": {
+      "base": 0.3,
+      "bonus": 0.3,
+      "super": 0.3
+    },
+    "plaques": {
+      "values": [
+        2,
+        3,
+        4,
+        5,
+        6,
+        7,
+        8,
+        9,
+        10,
+        15,
+        20,
+        30,
+        50,
+        100,
+        200,
+        500,
+        1000
+      ],
+      "base": [
+        0.417653457259,
+        0.196825331587,
+        0.115414070114,
+        0.076285757257,
+        0.054390577224,
+        0.04086060118,
+        0.031893445029,
+        0.025632359104,
+        0.021080753873,
+        0.009934615167,
+        0.005825441076,
+        0.002745324746,
+        0.001064035688,
+        0.000294034893,
+        0.000081253401,
+        0.000014841197,
+        0.000004101206
+      ],
+      "bonus": [
+        0.294956463886,
+        0.17548668531,
+        0.121405851938,
+        0.091228482304,
+        0.072231373584,
+        0.059291102514,
+        0.049971377777,
+        0.042974628047,
+        0.037550191202,
+        0.022340783789,
+        0.015455884212,
+        0.009195600778,
+        0.004780423662,
+        0.001967651089,
+        0.000809897005,
+        0.000250496882,
+        0.000103106021
+      ],
+      "super": [
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0.619467813105,
+        0.264019087401,
+        0.082995843024,
+        0.026090196838,
+        0.005650723741,
+        0.00177633589
+      ]
+    },
+    "jackpot": {
+      "win": 0.0001
+    },
+    "naturalBonusProbability": 0.004
+  },
+  "rules": {
+    "maxWinX": 5000,
+    "roundCap": true,
+    "maxFreeSpins": 50,
+    "freeSpinsNatural": 10,
+    "freeSpinsBought": 10,
+    "retriggerAward": 5,
+    "triggerNaturalMin": 3,
+    "triggerRetriggerMin": 2
+  },
+  "id": "zenobia-rtp96",
+  "status": "active",
+  "targetRtp": 0.96,
+  "label": "96%",
+  "volatility": "low",
+  "buy": {
+    "standardCost": 56.6,
+    "superCost": 257.6,
+    "standardEv": 54.3044,
+    "superEv": 247.2566
+  },
+  "measured": {
+    "rtp": 0.96,
+    "rtpMonteCarlo": 0.97541,
+    "rtpMonteCarloCi95": 0.01349,
+    "sdPerSpin": 11.9224,
+    "hitRate": 0.31604,
+    "winAtLeastBetRate": 0.1244,
+    "plaqueVisibleRate": 0.44501,
+    "plaqueAppliedRate": 0.14612,
+    "freeSpinsOneIn": 250,
+    "jackpotOneIn": 10000,
+    "parts": {
+      "spins": 0.68945,
+      "freeSpins": 0.2148,
+      "jackpot": 0.05575
+    },
+    "naturalRoundEvX": 54.3029,
+    "buy": {
+      "standardRtp": 0.95944,
+      "standardEvCi95X": 0.2995,
+      "superRtp": 0.95985,
+      "superEvCi95X": 1.1712,
+      "standardMedianX": 50,
+      "superMedianX": 100,
+      "avgSpins": 11.189,
+      "retriggersPerRound": 0.2378
+    },
+    "maxWinX": 5000,
+    "calibration": {
+      "letterConcentration": 1,
+      "baseAlpha": 1.855487,
+      "bonusAlpha": 1.280664,
+      "superAlpha": 1.669531
+    },
+    "sims": {
+      "baseSpins": 4000000,
+      "sessions": 600000,
+      "verifySpins": 3000000
+    },
+    "generatedAt": "2026-10-06T00:31:30.071Z"
+  },
+  "digest": "a3642afe5066f4fd7b9fdec983d049f8b332d71e0db6d0d96a809034ca4626c4"
+}

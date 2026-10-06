@@ -1,9 +1,6 @@
 #!/usr/bin/env node
 "use strict";
-// Compatibility entry point: the common audit completes every bonus and includes
-// bank accumulation, retriggers, rounding, caps and jackpot prize liability.
-const { main } = require("./slotEconomyAudit");
-if (!process.argv.some(arg => arg.startsWith("--rounds="))) {
-  process.argv.push(`--rounds=${Number(process.argv[3]) || 20000}`);
-}
-main();
+// Poseidon + Zeus now run calibrated economy profiles. The old audit applied a
+// retired pay scale to them and misreported the money; verify the profiles.
+if (!process.argv.some((a) => a.startsWith("--game="))) process.argv.push("--game=poseidon");
+require("./slotProfileVerify");

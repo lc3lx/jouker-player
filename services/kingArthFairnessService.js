@@ -19,6 +19,7 @@ exports.verifySpin = asyncHandler(async (req, res, next) => {
     volatility,
     economyVersion,
     superBonus,
+    profileId,
   } = req.body || {};
 
   if (typeof serverSeed !== "string" || serverSeed.length < 16) {
@@ -36,6 +37,17 @@ exports.verifySpin = asyncHandler(async (req, res, next) => {
     return next(new ApiError("baseBet invalid", 400));
   }
 
+  const version = Number(economyVersion || DiceEngine.ECONOMY_VERSION);
+  let profile = null;
+  if (version >= 5) {
+    // v5 odds come from an immutable profile; the play record names it.
+    const registry = require("../games/slotProfiles/registry");
+    if (typeof profileId !== "string" || !registry.hasProfile(profileId)) {
+      return next(new ApiError("profileId required for economy v5 spins", 400));
+    }
+    profile = registry.getProfile(profileId);
+  }
+
   try {
     const outcome = DiceEngine.spin(bet, {
       serverSeed,
@@ -45,14 +57,16 @@ exports.verifySpin = asyncHandler(async (req, res, next) => {
       isFreeSpin: !!isFreeSpin,
       freeSpinMultiplier: Number(freeSpinMultiplier || 0),
       volatility: volatility || "medium",
-      economyVersion: Number(economyVersion || DiceEngine.ECONOMY_VERSION),
+      economyVersion: version,
+      profile,
       superBonus: !!superBonus,
     });
     res.status(200).json({
       status: "success",
       data: {
         grid: outcome.grid,
-        economyVersion: Number(economyVersion || DiceEngine.ECONOMY_VERSION),
+        economyVersion: version,
+        profileId: profile?.id ?? null,
         initialGrid: outcome.initialGrid,
         finalGrid: outcome.finalGrid,
         totalWin: outcome.totalWin,

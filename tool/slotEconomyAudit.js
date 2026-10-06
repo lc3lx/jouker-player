@@ -113,7 +113,16 @@ function main() {
   const bonusBets = (process.argv.find(s => /^--bets=/.test(s))?.split("=")[1] || "10000").split(",").map(Number);
   const selected = process.argv.find(s => /^--game=/.test(s))?.split("=")[1];
   const version = baseline ? 1 : 2, profiles = JSON.parse(fs.readFileSync(calibrationPath)), results = [];
-  for (const game of selected ? [selected] : ["zeus", "poseidon", "zenobia", "golden-tree"]) {
+  // Poseidon / Zeus / Zenobia now run calibrated profiles; this tool still
+  // applies the retired economy-v2 pay scale to them (it reported 6.9% for a
+  // bonus that really paid 165%). Measure them with tool/slotProfileVerify.js.
+  const PROFILE_GAMES = ["zeus", "poseidon", "zenobia"];
+  if (selected && PROFILE_GAMES.includes(selected) && !process.argv.includes("--legacy")) {
+    console.error(`${selected} runs calibrated profiles — use: node tool/slotProfileVerify.js --game=${selected}`);
+    process.exitCode = 2;
+    return;
+  }
+  for (const game of selected ? [selected] : process.argv.includes("--legacy") ? ["zeus", "poseidon", "zenobia", "golden-tree"] : ["golden-tree"]) {
     if (game === "zeus" && !baseline) {
       if (calibrate) throw new Error("Zeus uses fixed payouts. Use tool/calibrateZeusV4.js to calibrate probabilities, not pay scaling.");
       const modes = process.argv.includes("--base-only") ? ["base"] : bonusOnly ? ["bonus", "super"] : ["base", "bonus", "super"];

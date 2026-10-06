@@ -486,6 +486,19 @@ async function startServer() {
     logger.warn("system_monitor_settings_load_failed", { reason: e?.message });
   }
 
+  // Slot economy: verify every calibrated profile against the running engine
+  // code, then load the admin-selected settings and keep them in sync.
+  try {
+    const report = require("./games/slotProfiles/registry").verifyAll();
+    const failed = Object.entries(report).filter(([, r]) => !r.ok).map(([id]) => id);
+    if (failed.length) logger.error("slot_profile_verification_failed", { profiles: failed });
+    const slotEconomySettings = require("./services/slotEconomySettingsService");
+    await slotEconomySettings.loadFromDb();
+    slotEconomySettings.startPolling();
+  } catch (e) {
+    logger.warn("slot_economy_settings_load_failed", { reason: e?.message });
+  }
+
   await runBootSanitizer({ redis: realtimeRedis?.commandClient || null });
 
   startPokerTableGc();
@@ -520,6 +533,9 @@ async function startServer() {
   // Production monitoring + self-healing sweep — starts after every engine
   // it inspects (table game, clan tournaments) is already up.
   require("./services/systemHealthMonitorService").startEngine();
+
+  // Pays out slot jackpots the player abandoned mid-reveal (disconnect/crash).
+  require("./services/slotJackpotSweeper").start();
 
   // Bots: warm the persistent-identity pool, sync admin config into the live
   // behavior/chat caches, and start the believable-activity heartbeat.

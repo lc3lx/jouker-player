@@ -97,6 +97,7 @@ const mountRoutes = (app) => {
   app.use("/api/v1/admin/clans", adminClanRoute);
   app.use("/api/v1/admin/bots", adminBotRoute);
   app.use("/api/v1/admin/house-edge", adminHouseEdgeRoute);
+  app.use("/api/v1/admin/slot-economy", require("./adminSlotEconomyRoute"));
   // Staff / permissions /me — before generic /admin catch-all.
   app.use("/api/v1/admin", adminStaffRoute);
   app.use("/api/v1/admin", adminRoute);

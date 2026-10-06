@@ -110,7 +110,7 @@ function isJackpotTriggered(finalMatrix) {
   return countJackpotSymbols(finalMatrix) >= JACKPOT_MIN_SYMBOLS;
 }
 
-async function createJackpotRound({ spinId, userId, betAmount, game = "poseidon" }) {
+async function createJackpotRound({ spinId, userId, betAmount, game = "poseidon", profileId = null, economyVersion = null, origin = null }) {
   const roundId = crypto.randomUUID();
   const cards = buildMatchThreeLayout(betAmount);
 
@@ -122,6 +122,9 @@ async function createJackpotRound({ spinId, userId, betAmount, game = "poseidon"
     spinId,
     userId: String(userId),
     game: gameKey,
+    profileId,
+    economyVersion,
+    origin,
     betAmount,
     payoutVersion: 2,
     prizeType: "pending",
@@ -253,6 +256,77 @@ function _toGameData(round) {
   };
 }
 
+const UNSETTLED = [JACKPOT_STATUS.PENDING, JACKPOT_STATUS.SCRATCHING, JACKPOT_STATUS.REVEALED];
+const SWEEP_LEASE_MS = 2 * 60 * 1000;
+
+/** The player's unsettled rounds for one game, oldest first (reconnect recovery). */
+async function listPendingRounds(userId, game) {
+  const key = String(userId);
+  if (MODE === "mongo") {
+    const PoseidonJackpotRound = require("../../../models/poseidonJackpotRoundModel");
+    const docs = await PoseidonJackpotRound.find({ userId: key, game, status: { $in: UNSETTLED } })
+      .sort({ createdAt: 1 }).limit(20).lean();
+    for (const doc of docs) _stubRounds.set(doc.roundId, doc);
+    return docs.map(_toGameData);
+  }
+  return [..._stubRounds.values()]
+    .filter((r) => r.userId === key && r.game === game && UNSETTLED.includes(r.status))
+    .sort((a, b) => new Date(a.createdAt) - new Date(b.createdAt))
+    .map(_toGameData);
+}
+
+/**
+ * Unsettled rounds past their reveal deadline, each claimed with a short lease
+ * so only one server instance resolves it. Returns [{ roundId, userId, game }].
+ */
+async function claimStaleRounds({ now = Date.now(), limit = 50 } = {}) {
+  const deadline = new Date(now);
+  if (MODE !== "mongo") {
+    return [..._stubRounds.values()]
+      .filter((r) => UNSETTLED.includes(r.status) && new Date(r.expiresAt) <= deadline)
+      .slice(0, limit)
+      .map((r) => ({ roundId: r.roundId, userId: r.userId, game: r.game }));
+  }
+  const PoseidonJackpotRound = require("../../../models/poseidonJackpotRoundModel");
+  const candidates = await PoseidonJackpotRound.find({ status: { $in: UNSETTLED }, expiresAt: { $lte: deadline } })
+    .sort({ expiresAt: 1 }).limit(limit).select("roundId").lean();
+  const claimed = [];
+  for (const { roundId } of candidates) {
+    const doc = await PoseidonJackpotRound.findOneAndUpdate(
+      {
+        roundId,
+        status: { $in: UNSETTLED },
+        $or: [{ sweepLeaseUntil: null }, { sweepLeaseUntil: { $lt: deadline } }],
+      },
+      { $set: { sweepLeaseUntil: new Date(now + SWEEP_LEASE_MS) } },
+      { new: true },
+    ).lean();
+    if (doc) claimed.push({ roundId: doc.roundId, userId: doc.userId, game: doc.game });
+  }
+  return claimed;
+}
+
+/**
+ * Reveal the remaining cards in index order until the first triple. The board
+ * is a uniform server-side shuffle, so index order is exactly as fair as any
+ * order the player could have chosen. Returns the reveal of the final card.
+ */
+async function autoRevealRound(roundId, userId) {
+  const round = await _loadRound(roundId);
+  if (!round) throw new Error(`Jackpot round not found: ${roundId}`);
+  if (round.status === JACKPOT_STATUS.REVEALED || round.status === JACKPOT_STATUS.SETTLED) {
+    return { matched: true, prizeType: round.prizeType, prizeAmount: round.prizeAmount };
+  }
+  const revealed = new Set(round.revealedCards ?? []);
+  let last = null;
+  for (const card of [...round.cards].sort((a, b) => a.index - b.index)) {
+    if (revealed.has(card.index)) continue;
+    last = await revealJackpotCard(roundId, userId, card.index);
+    if (last.gameOver) return last;
+  }
+  return last;
+}
+
 function _clearStubForTests() {
   _stubRounds.clear();
 }
@@ -267,6 +341,9 @@ module.exports = {
   createJackpotRound,
   recoverJackpotRound,
   revealJackpotCard,
+  listPendingRounds,
+  claimStaleRounds,
+  autoRevealRound,
   _clearStubForTests,
   _getStubRounds,
 };

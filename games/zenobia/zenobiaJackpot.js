@@ -29,12 +29,15 @@ function isJackpotTriggered(matrix) {
   return countJackpotSymbols(matrix) >= (JACKPOT_MIN_SYMBOLS || 3);
 }
 
-async function createRoundForSpin({ spinId, userId, betAmount }) {
+async function createRoundForSpin({ spinId, userId, betAmount, profileId = null, economyVersion = null, origin = null }) {
   return jackpotService.createJackpotRound({
     spinId,
     betAmount,
     userId,
     game: "zenobia",
+    profileId,
+    economyVersion,
+    origin,
   });
 }
 

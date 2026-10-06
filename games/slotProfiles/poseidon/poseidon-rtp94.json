@@ -1,0 +1,202 @@
+{
+  "game": "poseidon",
+  "economyVersion": 4,
+  "params": {
+    "symbols": {
+      "base": [
+        [
+          "s",
+          15.587
+        ],
+        [
+          "n",
+          15.587
+        ],
+        [
+          "e",
+          15.587
+        ],
+        [
+          "a",
+          15.587
+        ],
+        [
+          "starfish",
+          9
+        ],
+        [
+          "coral",
+          9
+        ],
+        [
+          "fish",
+          7.5
+        ],
+        [
+          "crown",
+          5.5
+        ],
+        [
+          "pearl",
+          5
+        ]
+      ],
+      "bonus": [
+        [
+          "s",
+          13
+        ],
+        [
+          "n",
+          13
+        ],
+        [
+          "e",
+          13
+        ],
+        [
+          "a",
+          13
+        ],
+        [
+          "starfish",
+          8
+        ],
+        [
+          "coral",
+          8
+        ],
+        [
+          "fish",
+          6
+        ],
+        [
+          "crown",
+          4.5
+        ],
+        [
+          "pearl",
+          4
+        ]
+      ]
+    },
+    "headWeight": {
+      "base": 1,
+      "bonus": 1.7
+    },
+    "plaques": {
+      "values": [
+        2,
+        5,
+        10,
+        20,
+        50,
+        100,
+        200,
+        500,
+        1000
+      ],
+      "base": [
+        24.215953725,
+        4.259502835,
+        1.143979192,
+        0.307239704,
+        0.054042405,
+        0.014514226,
+        0.003898101,
+        0.000685663,
+        0.000184149
+      ],
+      "bonus": [
+        56.996919275,
+        19.021994154,
+        8.293265864,
+        3.615722838,
+        1.206701337,
+        0.526101255,
+        0.229371198,
+        0.076549709,
+        0.033374371
+      ],
+      "super": [
+        0,
+        0,
+        0,
+        86.927442274,
+        10.472433463,
+        2.112361635,
+        0.426077825,
+        0.05133099,
+        0.010353813
+      ]
+    },
+    "jackpot": {
+      "win": 0.0001,
+      "appearance": 0.18
+    },
+    "naturalBonusProbability": 0.004
+  },
+  "rules": {
+    "maxWinX": 5000,
+    "roundCap": true,
+    "maxFreeSpins": 50,
+    "freeSpinsNatural": 10,
+    "freeSpinsBought": 10,
+    "retriggerAward": 5,
+    "triggerNaturalMin": 4,
+    "triggerRetriggerMin": 3
+  },
+  "id": "poseidon-rtp94",
+  "status": "active",
+  "targetRtp": 0.94,
+  "label": "94%",
+  "volatility": "low",
+  "buy": {
+    "standardCost": 58.1,
+    "superCost": 265.9,
+    "standardEv": 54.5917,
+    "superEv": 249.9475
+  },
+  "measured": {
+    "rtp": 0.94,
+    "rtpMonteCarlo": 0.93885,
+    "rtpMonteCarloCi95": 0.01339,
+    "sdPerSpin": 11.8346,
+    "hitRate": 0.30944,
+    "winAtLeastBetRate": 0.19675,
+    "plaqueVisibleRate": 0.30005,
+    "plaqueAppliedRate": 0.08274,
+    "freeSpinsOneIn": 250,
+    "jackpotOneIn": 10000,
+    "parts": {
+      "spins": 0.6682,
+      "freeSpins": 0.21608,
+      "jackpot": 0.05572
+    },
+    "naturalRoundEvX": 54.6162,
+    "buy": {
+      "standardRtp": 0.93962,
+      "standardEvCi95X": 0.4223,
+      "superRtp": 0.94001,
+      "superEvCi95X": 0.8016,
+      "standardMedianX": 50,
+      "superMedianX": 200,
+      "avgSpins": 11.542,
+      "retriggersPerRound": 0.3085
+    },
+    "maxWinX": 5000,
+    "calibration": {
+      "letterConcentration": 1.417,
+      "baseAlpha": 1.896624,
+      "bonusAlpha": 1.197656,
+      "superAlpha": 2.309668
+    },
+    "sims": {
+      "baseSpins": 4000000,
+      "sessions": 600000,
+      "verifySpins": 3000000
+    },
+    "generatedAt": "2026-10-06T10:00:08.808Z"
+  },
+  "digest": "29f60ab8d8f0b98322dd986c0817c5e5fb9440d95264e09562ed6931755e9c0a"
+}

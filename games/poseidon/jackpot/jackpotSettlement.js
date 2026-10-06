@@ -16,7 +16,7 @@
  */
 
 const crypto = require("crypto");
-const { JACKPOT_STATUS } = require("./jackpotConstants");
+const { JACKPOT_STATUS, JACKPOT_RETENTION_MS } = require("./jackpotConstants");
 
 const MODE =
   process.env.POSEIDON_WALLET_MODE ||
@@ -41,11 +41,13 @@ async function _markSettled(roundId, settlementId, session) {
     const rounds = jackpotService._getStubRounds();
     const r = rounds.get(roundId);
     if (r) {
+      const settledAt = new Date();
       rounds.set(roundId, {
         ...r,
         status: JACKPOT_STATUS.SETTLED,
         settlementId,
-        settledAt: new Date(),
+        settledAt,
+        purgeAt: new Date(settledAt.getTime() + JACKPOT_RETENTION_MS),
       });
     }
     return;
@@ -53,7 +55,7 @@ async function _markSettled(roundId, settlementId, session) {
   const PoseidonJackpotRound = require("../../../models/poseidonJackpotRoundModel");
   await PoseidonJackpotRound.findOneAndUpdate(
     { roundId },
-    { $set: { status: JACKPOT_STATUS.SETTLED, settlementId, settledAt: new Date() } },
+    { $set: { status: JACKPOT_STATUS.SETTLED, settlementId, settledAt: new Date(), purgeAt: new Date(Date.now() + JACKPOT_RETENTION_MS) } },
     { session }
   );
 }
@@ -70,15 +72,33 @@ async function _markSettled(roundId, settlementId, session) {
 async function settleJackpotRound(roundId, userId) {
   const wallet = require("../poseidonWalletAdapter");
   return wallet.withUserLock(userId, async () => {
-    if (MODE !== "mongo") return settleWithinTransaction(roundId, userId);
+    if (MODE !== "mongo") return recordStats(await settleWithinTransaction(roundId, userId));
     const { withMongoTransaction } = require("../../../services/walletLedgerService");
     const result = await withMongoTransaction(async (session) => {
       // Never commit the prize and round marker separately.
       if (!session) throw new Error("JACKPOT_REQUIRES_MONGO_TRANSACTION");
       return settleWithinTransaction(roundId, userId, session);
     });
-    return { ...result, balance: await wallet.getBalance(userId) };
+    return recordStats({ ...result, balance: await wallet.getBalance(userId) });
   });
+}
+
+const STATS_GAME = { "king-arth": "zeus", poseidon: "poseidon", zenobia: "zenobia" };
+
+/** Economy telemetry for a first-time settlement of a profile-game round. */
+function recordStats(result) {
+  const ctx = result._stats;
+  delete result._stats;
+  if (ctx && !result.alreadySettled && STATS_GAME[ctx.game] && result.prizeAmount > 0) {
+    require("../../utils/slotEconomyStats").recordJackpotPaid({
+      game: STATS_GAME[ctx.game],
+      profileId: ctx.profileId,
+      economyVersion: ctx.economyVersion,
+      origin: ctx.origin,
+      amount: result.prizeAmount,
+    });
+  }
+  return result;
 }
 
 async function settleWithinTransaction(roundId, userId, session) {
@@ -158,6 +178,7 @@ async function settleWithinTransaction(roundId, userId, session) {
     prizeType: round.prizeType,
     prizeAmount,
     balance: balanceAfter,
+    _stats: { game: round.game, profileId: round.profileId, economyVersion: round.economyVersion, origin: round.origin },
   };
 }
 

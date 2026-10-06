@@ -43,6 +43,14 @@ const { codeForReason } = require("../../engine/errors/ErrorCodes");
 const DICE_MIN_BET = 10000;
 const DICE_MAX_BET = 1000000000;
 const BET_EPS = 1e-4;
+const slotEconomySettings = require("../../services/slotEconomySettingsService");
+const slotEconomyRuntime = require("../../games/utils/slotEconomyRuntime");
+
+/** Paid Zeus bet within the engine bounds narrowed by the admin limits. */
+function zeusBetAllowed(bet) {
+  const { min, max } = slotEconomyRuntime.betLimits("zeus", DICE_MIN_BET, DICE_MAX_BET);
+  return bet >= min && bet <= max;
+}
 
 /** Additive `{ reason, code }` on every invalid_move (clients may ignore code). */
 function emitInvalidMove(socket, reason, extra = {}) {
@@ -1191,14 +1199,44 @@ function registerGameHandlers(nsp, jwtVerify) {
           return;
         }
         bet = fsBefore.lockedBaseBet;
-      } else if (bet < DICE_MIN_BET || bet > DICE_MAX_BET) {
+      } else if (!slotEconomySettings.getSettings("zeus").enabled) {
+        await kingArthRoundState.releaseLock(userId, tableId);
+        socket.emit("dice_result", { ok: false, code: "game_disabled" });
+        return;
+      } else if (!zeusBetAllowed(bet)) {
         await kingArthRoundState.releaseLock(userId, tableId);
         socket.emit("dice_result", { ok: false, code: "invalid_bet" });
+        return;
+      } else if (doubleChance) {
+        // The v4 engine has no ante effect, so a 25% surcharge would buy nothing.
+        await kingArthRoundState.releaseLock(userId, tableId);
+        socket.emit("dice_result", { ok: false, code: "ante_disabled" });
         return;
       }
 
       const stake =
         Math.round(bet * (doubleChance ? 1.25 : 1) * 100) / 100;
+
+      // One global, disclosed profile. A bonus round keeps the engine + profile
+      // it was opened with; a paid spin must name the profile the client is
+      // showing, so the server can never pick the odds after seeing the seed.
+      const economy = slotEconomyRuntime.resolveEconomy(
+        "zeus",
+        isFreeSpin ? { ...fsBefore, economyVersion: fsBefore.economyVersion || 1 } : null,
+        DiceEngine.ECONOMY_VERSION,
+      );
+      if (!isFreeSpin && economy.profile) {
+        const claimed = payload && typeof payload.profileId === "string" ? payload.profileId : null;
+        if (claimed !== economy.profile.id) {
+          await kingArthRoundState.releaseLock(userId, tableId);
+          socket.emit("dice_result", {
+            ok: false,
+            code: claimed ? "profile_changed" : "client_update_required",
+            profileId: economy.profile.id,
+          });
+          return;
+        }
+      }
 
       const seedPack = await kingArthSeedRotation.getSeedForSpin(userId);
       const serverSeed = seedPack.seed;
@@ -1223,39 +1261,21 @@ function registerGameHandlers(nsp, jwtVerify) {
           clientSeed,
           nonce: nonceStr,
           isFreeSpin,
-          economyVersion: isFreeSpin ? (fsBefore.economyVersion || 1) : DiceEngine.ECONOMY_VERSION,
+          economyVersion: economy.economyVersion,
+          profile: economy.profile,
           superBonus: !!(isFreeSpin && fsBefore.superBonus),
           freeSpinMultiplier: isFreeSpin
             ? Number(fsBefore.totalMultiplier || 0)
             : 0,
           volatility,
         });
-        const carried = isFreeSpin ? Number(fsBefore.totalMultiplier || 0) : 0;
-        const freshPlaques = Math.max(0, Number(outcome.multipliers.collected) || 0);
-        const resolved = DiceEngine.resolvePayoutMultiplier({
-          baseWin: outcome.baseWin,
-          plaqueSum: freshPlaques,
-          carried,
-          isFreeSpin,
-          bankCap: isFreeSpin
-            ? (fsBefore.superBonus ? DiceEngine.SUPER_BONUS_BANK_CAP : DiceEngine.BONUS_BANK_CAP)
-            : Infinity,
-        });
-        // A bought/free-spin bank never multiplies a win that has no new plaque.
-        const applied = freshPlaques > 0 ? resolved.applied : 1;
-        const multiplied = Math.round(outcome.baseWin * applied * 100) / 100;
-        const winCap = outcome.maxWin;
-        outcome.totalWin = Math.min(multiplied, winCap);
-        outcome.capped = multiplied > winCap;
-        outcome.multipliers.applied = applied;
-        outcome.multipliers.freeSpinTotal = resolved.nextCarried;
-        outcome.winType = DiceEngine.classifyWinType(outcome.totalWin, stake);
-        let payout = outcome.totalWin;
-        let roundCapReached = outcome.capped;
-
-        const staged = require("../../games/dice/kingArthSettlement").stageSpinSession(fsBefore, outcome, payout, bet);
-        payout = staged.payout;
-        roundCapReached = staged.capReached;
+        const staged = require("../../games/dice/kingArthSettlement").settleSpin(outcome, fsBefore, bet, stake);
+        // paid | natural | buy | super — legacy sessions predate the origin tag.
+        const spinOrigin = !isFreeSpin
+          ? "paid"
+          : fsBefore.origin || (fsBefore.superBonus ? "super" : "natural");
+        const payout = staged.payout;
+        const roundCapReached = staged.capReached;
 
         const {
           withMongoTransaction,
@@ -1278,7 +1298,7 @@ function registerGameHandlers(nsp, jwtVerify) {
                   userId,
                   amount: Math.round(stake),
                   ledgerType: "game_loss",
-                  meta: { tableId, source: "king_arth_spin" },
+                  meta: { tableId, source: "king_arth_spin", profileId: economy.profile?.id ?? null, origin: spinOrigin },
                 });
               }
               if (payout > 0) {
@@ -1291,6 +1311,8 @@ function registerGameHandlers(nsp, jwtVerify) {
                     tableId,
                     source: "king_arth_spin",
                     winType: outcome.winType,
+                    profileId: economy.profile?.id ?? null,
+                    origin: spinOrigin,
                   },
                 });
               }
@@ -1310,6 +1332,7 @@ function registerGameHandlers(nsp, jwtVerify) {
                   seedGeneration,
                   volatility: outcome.volatility,
                   economyVersion: outcome.economyVersion || (fsBefore?.economyVersion || DiceEngine.ECONOMY_VERSION),
+                  profileId: economy.profile?.id ?? null,
                   lineWins: outcome.lineWins,
                   scatterCount: outcome.scatterCount,
                   multipliers: outcome.multipliers,
@@ -1322,6 +1345,7 @@ function registerGameHandlers(nsp, jwtVerify) {
               }], { session });
               jackpotGame = outcome.jackpotTriggered ? await kingArthJackpot.createRoundForSpin({
                 betAmount: bet, spinId: String(playId), userId,
+                profileId: economy.profile?.id ?? null, economyVersion: economy.economyVersion, origin: spinOrigin,
               }) : null;
             });
           });
@@ -1337,31 +1361,19 @@ function registerGameHandlers(nsp, jwtVerify) {
         wallet = await Wallet.findOne({ user: userId });
 
         for (const job of postCommit) { try { await job(); } catch (_) {} }
-        // #region agent log
-        try {
-          fetch("http://127.0.0.1:7937/ingest/b9a00eef-7143-4edb-b1d5-038072464bf7", {
-            method: "POST",
-            headers: {
-              "Content-Type": "application/json",
-              "X-Debug-Session-Id": "4de1a0",
-            },
-            body: JSON.stringify({
-              sessionId: "4de1a0",
-              hypothesisId: "D",
-              location: "game.handlers.js:dice_spin",
-              message: "king_arth settled via ledger txn",
-              data: {
-                isFreeSpin,
-                stake,
-                payout,
-                balance: wallet?.balance,
-              },
-              timestamp: Date.now(),
-              runId: "prod-hardening",
-            }),
-          }).catch(() => {});
-        } catch (_) {}
-        // #endregion
+        const economyStats = require("../../games/utils/slotEconomyStats");
+        if (isFreeSpin) {
+          economyStats.recordFreeSpin({
+            game: "zeus", profileId: economy.profile?.id, economyVersion: economy.economyVersion,
+            origin: spinOrigin, win: payout, winX: payout / bet, roundCapped: roundCapReached,
+          });
+        } else {
+          economyStats.recordPaidSpin({
+            game: "zeus", profileId: economy.profile?.id, economyVersion: economy.economyVersion,
+            bet: stake, win: payout, winX: payout / bet, plaque: Number(outcome.multipliers.collected) > 0,
+            naturalTrigger: staged.awarded > 0, jackpotTrigger: !!outcome.jackpotTriggered,
+          });
+        }
 
         await Promise.allSettled([
           kingArthSeedRotation.recordSpinCompleted(userId),
@@ -1402,6 +1414,7 @@ function registerGameHandlers(nsp, jwtVerify) {
           ok: true,
           tableId,
           economyVersion: outcome.economyVersion || fsBefore?.economyVersion || 1,
+          profileId: economy.profile?.id ?? null,
           grid: outcome.grid,
           initialGrid: outcome.initialGrid,
           finalGrid: outcome.finalGrid,
@@ -1453,7 +1466,7 @@ function registerGameHandlers(nsp, jwtVerify) {
         }
         const Receipt = require("../../models/slotOperationModel");
         const receiptKey = { game: "zeus-buy", userId: String(userId), requestId };
-        const fingerprint = JSON.stringify([tableId, Number(payload?.bet), !!payload?.superBonus]);
+        const fingerprint = JSON.stringify([tableId, Number(payload?.bet), !!payload?.superBonus, payload?.expectedCost ?? null]);
         if (requestId) {
           const previous = await Receipt.findOne(receiptKey).lean();
           if (previous) {
@@ -1473,7 +1486,7 @@ function registerGameHandlers(nsp, jwtVerify) {
           socket.emit("dice_buy_result", { ok: false, code: "buy_disabled_ante" });
           return;
         }
-        if (rawBet < DICE_MIN_BET || rawBet > DICE_MAX_BET) {
+        if (!zeusBetAllowed(rawBet)) {
           socket.emit("dice_buy_result", { ok: false, code: "invalid_bet" });
           return;
         }
@@ -1486,10 +1499,21 @@ function registerGameHandlers(nsp, jwtVerify) {
 
         const bet = rawBet;
         const stake = Math.round(bet * 100) / 100;
-        const costMult = superBonus
-          ? DiceEngine.SUPER_BUY_COST_MULT
-          : DiceEngine.BUY_COST_MULT;
-        const cost = Math.round(bet * costMult * 100) / 100;
+        let quote;
+        try {
+          quote = slotEconomyRuntime.quoteBuy("zeus", {
+            betAmount: bet,
+            superBonus,
+            expectedCost: payload?.expectedCost ?? null,
+            legacyCost: superBonus ? DiceEngine.SUPER_BUY_COST_MULT : DiceEngine.BUY_COST_MULT,
+            roundMoney: (x) => Math.round(x),
+          });
+        } catch (err) {
+          socket.emit("dice_buy_result", { ok: false, code: err?.data?.code || "buy_unavailable", message: err.message, ...(err?.data || {}) });
+          return;
+        }
+        const { cost, profile } = quote;
+        const boughtSpins = profile ? profile.rules.freeSpinsBought : DiceEngine.FREE_SPINS_BOUGHT;
 
         const user = await User.findById(userId);
         if (!user) {
@@ -1516,20 +1540,22 @@ function registerGameHandlers(nsp, jwtVerify) {
               userId,
               amount: Math.round(cost),
               ledgerType: "game_loss",
-              meta: { tableId, source: "king_arth_buy_bonus", bet, superBonus },
+              meta: { tableId, source: "king_arth_buy_bonus", bet, superBonus, profileId: profile?.id ?? null, origin: superBonus ? "super" : "buy" },
             });
             await kingArthRoundState.commitSession(userId, tableId, null, {
               lockedBaseBet: bet, lockedDoubleChance: false,
-              remaining: DiceEngine.FREE_SPINS_BOUGHT,
-              roundCap: DiceEngine.MAX_WIN_MULTIPLIER * stake, roundWon: 0,
-              totalMultiplier: 0, superBonus, economyVersion: DiceEngine.ECONOMY_VERSION,
+              remaining: boughtSpins,
+              roundCap: (profile ? profile.rules.maxWinX : DiceEngine.MAX_WIN_MULTIPLIER) * stake, roundWon: 0,
+              totalMultiplier: 0, superBonus,
+              economyVersion: profile ? profile.economyVersion : DiceEngine.ECONOMY_VERSION,
+              profileId: profile?.id ?? null, origin: superBonus ? "super" : "buy", costPaid: cost,
             }, session);
             if (requestId) {
               const settledWallet = await Wallet.findOne({ user: userId }).session(session);
               await Receipt.create([{ ...receiptKey, fingerprint, response: {
-                ok: true, tableId, cost, betPerSpin: bet, superBonus,
-                freeSpinsRemaining: DiceEngine.FREE_SPINS_BOUGHT,
-                freeSpinsAwarded: DiceEngine.FREE_SPINS_BOUGHT, balance: settledWallet.balance,
+                ok: true, tableId, cost, betPerSpin: bet, superBonus, profileId: profile?.id ?? null,
+                freeSpinsRemaining: boughtSpins,
+                freeSpinsAwarded: boughtSpins, balance: settledWallet.balance,
               } }], { session });
             }
           });
@@ -1542,6 +1568,10 @@ function registerGameHandlers(nsp, jwtVerify) {
         }
 
         await recordSpin(cost, 0);
+        require("../../games/utils/slotEconomyStats").recordBuy({
+          game: "zeus", profileId: profile?.id, economyVersion: profile ? profile.economyVersion : DiceEngine.ECONOMY_VERSION,
+          superBonus, cost,
+        });
 
         wallet = await Wallet.findOne({ user: userId });
 
@@ -1556,6 +1586,7 @@ function registerGameHandlers(nsp, jwtVerify) {
             betPerSpin: bet,
             cost,
             superBonus,
+            profileId: profile?.id ?? null,
             tableId,
           }),
         });
@@ -1578,8 +1609,9 @@ function registerGameHandlers(nsp, jwtVerify) {
           cost,
           betPerSpin: bet,
           superBonus,
+          profileId: profile?.id ?? null,
           freeSpinsRemaining,
-          freeSpinsAwarded: DiceEngine.FREE_SPINS_BOUGHT,
+          freeSpinsAwarded: boughtSpins,
           balance: wallet.balance,
           playId: String(play._id),
         });

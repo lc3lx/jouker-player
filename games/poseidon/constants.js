@@ -56,6 +56,11 @@ const RETRIGGER_AWARD = 5;
 const BUY_BONUS_COST = 25;
 /** Super buy bonus — 3× standard cost (UI tier). */
 const SUPER_BUY_BONUS_COST = 250;
+/**
+ * The v3 standard buy returns ~41× bet on a 25× price (165% RTP — measured
+ * 2026-10-06). It stays closed until calibrated economy profiles replace v3.
+ */
+const STANDARD_BUY_PAUSED = true;
 
 const SYMBOLS = Object.freeze({
   // low pays (royals — all pay the same)
@@ -299,6 +304,7 @@ module.exports = {
   RETRIGGER_AWARD,
   BUY_BONUS_COST,
   SUPER_BUY_BONUS_COST,
+  STANDARD_BUY_PAUSED,
   SYMBOLS,
   SCATTER,
   HEAD_WEIGHT_BASE,

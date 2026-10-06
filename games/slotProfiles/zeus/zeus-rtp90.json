@@ -1,0 +1,146 @@
+{
+  "game": "zeus",
+  "economyVersion": 5,
+  "params": {
+    "symbols": {
+      "base": [
+        13.7688,
+        13.7688,
+        13.7688,
+        13.7688,
+        8,
+        8,
+        8,
+        8
+      ],
+      "bonus": [
+        11,
+        11,
+        11,
+        11,
+        6.2,
+        5.4,
+        4.4,
+        3.2
+      ]
+    },
+    "headWeight": {
+      "base": 1,
+      "bonus": 1.7
+    },
+    "plaques": {
+      "values": [
+        2,
+        5,
+        10,
+        20,
+        50,
+        100,
+        200,
+        500,
+        1000
+      ],
+      "base": [
+        27.028832805,
+        2.487248591,
+        0.409198162,
+        0.067320627,
+        0.006194982,
+        0.001019189,
+        0.000167675,
+        0.00001543,
+        0.000002538
+      ],
+      "bonus": [
+        32.650097018,
+        8.136652336,
+        2.844212187,
+        0.994210227,
+        0.247764745,
+        0.086607548,
+        0.030274151,
+        0.007544549,
+        0.002637239
+      ],
+      "super": [
+        0,
+        0,
+        0,
+        35.04716271,
+        4.005477076,
+        0.776354023,
+        0.150475351,
+        0.017197557,
+        0.003333284
+      ]
+    },
+    "jackpot": {
+      "win": 0.0001,
+      "appearance": 0.18
+    },
+    "naturalBonusProbability": 0.004
+  },
+  "rules": {
+    "maxWinX": 5000,
+    "roundCap": true,
+    "maxFreeSpins": 50,
+    "freeSpinsNatural": 10,
+    "freeSpinsBought": 10,
+    "retriggerAward": 5,
+    "triggerNaturalMin": 4,
+    "triggerRetriggerMin": 3
+  },
+  "id": "zeus-rtp90",
+  "status": "active",
+  "targetRtp": 0.9,
+  "label": "90%",
+  "volatility": "low",
+  "buy": {
+    "standardCost": 61,
+    "superCost": 276.5,
+    "standardEv": 54.8754,
+    "superEv": 248.8562
+  },
+  "measured": {
+    "rtp": 0.9,
+    "rtpMonteCarlo": 0.90955,
+    "rtpMonteCarloCi95": 0.01297,
+    "sdPerSpin": 11.4645,
+    "hitRate": 0.31038,
+    "winAtLeastBetRate": 0.20097,
+    "plaqueVisibleRate": 0.30014,
+    "plaqueAppliedRate": 0.08285,
+    "freeSpinsOneIn": 250,
+    "jackpotOneIn": 10000,
+    "parts": {
+      "spins": 0.627,
+      "freeSpins": 0.21653,
+      "jackpot": 0.05647
+    },
+    "naturalRoundEvX": 54.9165,
+    "buy": {
+      "standardRtp": 0.8996,
+      "standardEvCi95X": 0.3223,
+      "superRtp": 0.90002,
+      "superEvCi95X": 1.0327,
+      "standardMedianX": 50,
+      "superMedianX": 200,
+      "avgSpins": 15.391,
+      "retriggersPerRound": 1.0782
+    },
+    "maxWinX": 5000,
+    "calibration": {
+      "letterConcentration": 1.7211,
+      "baseAlpha": 2.603679,
+      "bonusAlpha": 1.516406,
+      "superAlpha": 2.367188
+    },
+    "sims": {
+      "baseSpins": 4000000,
+      "sessions": 600000,
+      "verifySpins": 3000000
+    },
+    "generatedAt": "2026-10-06T10:11:17.703Z"
+  },
+  "digest": "12e3c5a3fda32463616b45e6f9621df74276671655fbc2f0e7b9d5992f21acb4"
+}

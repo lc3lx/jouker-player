@@ -29,6 +29,7 @@ router.get(
 );
 
 // Jackpot match-3 (same flow as Poseidon)
+router.get("/jackpot/pending", authService.protect, require("../controllers/slotJackpotPendingController").pendingFor("king-arth"));
 router.get("/jackpot", authService.protect, jackpotRecover);
 router.post("/jackpot/reveal", authService.protect, jackpotReveal);
 router.post("/jackpot/revealed", authService.protect, jackpotReveal);

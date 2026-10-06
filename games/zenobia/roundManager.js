@@ -85,6 +85,10 @@ function sessionSnapshot(session) {
     totalWon: session.totalWon,
     superBonus: !!session.superBonus,
     bonusMultiplier: Number(session.bonusMultiplier || 0),
+    profileId: session.profileId || null,
+    origin: session.origin || null,
+    costPaid: Number(session.costPaid || 0),
+    roundWonX: Number(session.roundWonX || 0),
     economyVersion: session.economyVersion || 1,
     createdAt: session.createdAt,
   };
@@ -106,6 +110,10 @@ async function persistSession(session) {
         totalWon: session.totalWon,
         superBonus: !!session.superBonus,
         bonusMultiplier: Number(session.bonusMultiplier || 0),
+        profileId: session.profileId || null,
+        origin: session.origin || null,
+        costPaid: Number(session.costPaid || 0),
+        roundWonX: Number(session.roundWonX || 0),
         economyVersion: session.economyVersion || 1,
     createdAt: session.createdAt,
         updatedAt: now,
@@ -153,6 +161,10 @@ async function ensureLoaded(userId) {
       totalWon: roundMoney(doc.totalWon || 0),
       superBonus: !!doc.superBonus,
       bonusMultiplier: Number(doc.bonusMultiplier || 0),
+      profileId: doc.profileId || null,
+      origin: doc.origin || null,
+      costPaid: Number(doc.costPaid || 0),
+      roundWonX: Number(doc.roundWonX || 0),
       economyVersion: doc.economyVersion || 1,
       createdAt: doc.createdAt || Date.now(),
     };
@@ -170,6 +182,10 @@ function createBonusSession(userId, {
   freeSpins = FREE_SPINS_NATURAL,
   superBonus = false,
   economyVersion = 2,
+  profileId = null,
+  origin = null,
+  costPaid = 0,
+  roundWonX = 0,
 }) {
   const session = {
     sessionId: uuidv4(),
@@ -180,6 +196,10 @@ function createBonusSession(userId, {
     superBonus: !!superBonus,
     economyVersion,
     bonusMultiplier: 0,
+    profileId,
+    origin,
+    costPaid: roundMoney(costPaid),
+    roundWonX: Math.max(0, Number(roundWonX) || 0),
     createdAt: Date.now(),
   };
   bonusSessions.set(String(userId), session);
@@ -219,6 +239,25 @@ function setBonusMultiplier(userId, value) {
   if (!session) return null;
   session.bonusMultiplier = Math.max(0, Number(value) || 0);
   void persistSession(session);
+  return session;
+}
+
+/** Fold this spin's credited win (bet multiples) into the round-cap tally. */
+function addRoundWin(userId, winX) {
+  const session = getBonusSession(userId);
+  if (!session) return null;
+  session.roundWonX = Math.max(0, Number(session.roundWonX || 0) + (Number(winX) || 0));
+  void persistSession(session);
+  return session;
+}
+
+/** End the round now (cumulative cap reached): no spins remain. */
+function endBonusSession(userId) {
+  const session = getBonusSession(userId);
+  if (!session) return null;
+  session.freeSpinsRemaining = 0;
+  bonusSessions.delete(String(userId));
+  void deletePersistedSession(userId);
   return session;
 }
 
@@ -275,6 +314,8 @@ module.exports = {
   addRetriggerSpins,
   addBonusWin,
   setBonusMultiplier,
+  addRoundWin,
+  endBonusSession,
   consumeBonusSpin,
   ensureLoaded,
   touchSession,
