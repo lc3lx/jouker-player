@@ -12,6 +12,7 @@ function initSocial(io, options = {}) {
   presenceService.setRedisClient(options.redis || null);
   invitationService.setSocialIo(nsp);
   chatService.setSocialIo(nsp);
+  friendService.setSocialIo(nsp);
 
   nsp.use(async (socket, next) => {
     try {
@@ -50,15 +51,14 @@ function initSocial(io, options = {}) {
       socket.emit("presence:batch", batch);
     });
 
+    // friendService emits the live friend:* events itself, so this path and the
+    // REST routes announce exactly the same things.
     socket.on("friend:send_request", async ({ toUserId, message } = {}, ack) => {
       try {
         const req = await friendService.sendFriendRequest(uid, toUserId, message);
-        nsp.to(`user:${toUserId}`).emit("friend:request_received", {
-          requestId: String(req._id),
-          fromUserId: uid,
-          message: req.message,
-        });
-        if (typeof ack === "function") ack({ ok: true, requestId: String(req._id) });
+        if (typeof ack === "function") {
+          ack({ ok: true, requestId: String(req._id), accepted: req.status === "accepted" });
+        }
       } catch (e) {
         if (typeof ack === "function") ack({ ok: false, error: e.message });
       }
@@ -66,9 +66,7 @@ function initSocial(io, options = {}) {
 
     socket.on("friend:accept", async ({ requestId } = {}, ack) => {
       try {
-        const friendship = await friendService.acceptFriendRequest(uid, requestId);
-        const friendId = friendship.users.map(String).find((id) => id !== uid);
-        nsp.to(`user:${friendId}`).emit("friend:accepted", { userId: uid });
+        await friendService.acceptFriendRequest(uid, requestId);
         if (typeof ack === "function") ack({ ok: true });
       } catch (e) {
         if (typeof ack === "function") ack({ ok: false, error: e.message });

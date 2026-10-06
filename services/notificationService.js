@@ -139,12 +139,30 @@ async function recordFriendRequestNotification(request, fromUser) {
   return createNotification({
     userId: request.to,
     category: "friend",
-    title: `أضافك ${name} كصديق`,
+    // A request, not a friendship: "أضافك كصديق" told the player it was done
+    // and left them nothing to do about it.
+    title: `أرسل لك ${name} طلب صداقة`,
     subtitle: "الأصدقاء · الآن",
     icon: "people",
     sourceType: "friend_request",
     sourceId: String(request._id),
     meta: { fromUserId: String(request.from) },
+  });
+}
+
+/** Tell the sender their request was accepted. */
+async function recordFriendAcceptedNotification(request, accepter) {
+  if (!request?.from || !request?._id) return null;
+  const name = accepter?.name?.trim() || "لاعب";
+  return createNotification({
+    userId: request.from,
+    category: "friend",
+    title: `قبل ${name} طلب صداقتك`,
+    subtitle: "الأصدقاء · الآن",
+    icon: "people",
+    sourceType: "friend_accepted",
+    sourceId: String(request._id),
+    meta: { friendUserId: String(request.to) },
   });
 }
 
@@ -175,6 +193,7 @@ async function backfillNotifications(userId, limit = 40) {
 exports.createNotification = createNotification;
 exports.recordNotificationFromActivity = recordNotificationFromActivity;
 exports.recordFriendRequestNotification = recordFriendRequestNotification;
+exports.recordFriendAcceptedNotification = recordFriendAcceptedNotification;
 
 exports.getNotifications = asyncHandler(async (req, res) => {
   const userId = req.user._id;

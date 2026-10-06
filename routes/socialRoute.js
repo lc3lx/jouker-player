@@ -36,6 +36,15 @@ router.get("/users/search", asyncHandler(async (req, res) => {
   res.json({ results: data.length, data });
 }));
 
+/**
+ * `accepted: true` means the target had already asked you, so instead of a new
+ * request you are now friends — the client words its confirmation off it.
+ */
+function sendRequestResponse(res, reqDoc) {
+  const accepted = reqDoc.status === "accepted";
+  res.status(accepted ? 200 : 201).json({ data: reqDoc, accepted });
+}
+
 /** Add a friend by their player number, without searching first. */
 router.post("/friends/request-by-player-id", asyncHandler(async (req, res) => {
   const reqDoc = await friendService.sendFriendRequestByPlayerId(
@@ -43,7 +52,7 @@ router.post("/friends/request-by-player-id", asyncHandler(async (req, res) => {
     req.body.playerId,
     req.body.message
   );
-  res.status(201).json({ data: reqDoc });
+  sendRequestResponse(res, reqDoc);
 }));
 
 router.post("/friends/request", asyncHandler(async (req, res) => {
@@ -52,7 +61,7 @@ router.post("/friends/request", asyncHandler(async (req, res) => {
     req.body.toUserId,
     req.body.message
   );
-  res.status(201).json({ data: reqDoc });
+  sendRequestResponse(res, reqDoc);
 }));
 
 router.post("/friends/accept/:requestId", asyncHandler(async (req, res) => {

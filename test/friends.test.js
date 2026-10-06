@@ -10,6 +10,9 @@
  * returned a 500.
  */
 process.env.NODE_ENV = "test";
+// Small enough that the cap test does not need a hundred accounts; no other test
+// here holds more than one outgoing request open at a time.
+process.env.FRIEND_REQUEST_MAX_PENDING = "3";
 
 const { test, before, after } = require("node:test");
 const assert = require("node:assert/strict");
@@ -140,7 +143,9 @@ guarded("accepting clears the mirrored request from the other side", async () =>
   const [a, b] = await Promise.all([mkUser(), mkUser()]);
 
   const outgoing = await friendService.sendFriendRequest(a._id, b._id);
-  const mirrored = await friendService.sendFriendRequest(b._id, a._id);
+  // Sending now accepts a mirrored request instead of creating one, so this
+  // pair can only exist as data written before that — which still has to heal.
+  const mirrored = await FriendRequest.create({ from: b._id, to: a._id, status: "pending" });
 
   await friendService.acceptFriendRequest(b._id, outgoing._id);
 
@@ -181,7 +186,8 @@ guarded("a deactivated player cannot be added", async () => {
 guarded("concurrent accepts of the same pair settle on one friendship", async () => {
   const [a, b] = await Promise.all([mkUser(), mkUser()]);
   const one = await friendService.sendFriendRequest(a._id, b._id);
-  const two = await friendService.sendFriendRequest(b._id, a._id);
+  // Legacy mirrored pair (see above): the service no longer creates one.
+  const two = await FriendRequest.create({ from: b._id, to: a._id, status: "pending" });
 
   const results = await Promise.allSettled([
     friendService.acceptFriendRequest(b._id, one._id),
@@ -224,6 +230,165 @@ guarded("removing a friend frees the pair to be re-added", async () => {
   const again = await friendService.sendFriendRequest(a._id, b._id);
   await friendService.acceptFriendRequest(b._id, again._id);
   assert.equal((await friendService.listFriends(a._id)).length, 1);
+});
+
+guarded("two simultaneous sends leave exactly one pending request", async () => {
+  const [a, b] = await Promise.all([mkUser(), mkUser()]);
+  // A double tap, or the add button in the profile popup and the search dialog
+  // at once. Both passed the "already sent?" read before either had written.
+  const results = await Promise.allSettled([
+    friendService.sendFriendRequest(a._id, b._id),
+    friendService.sendFriendRequest(a._id, b._id),
+  ]);
+  assert.equal(results.filter((r) => r.status === "fulfilled").length, 1);
+  assert.equal(results.find((r) => r.status === "rejected").reason.statusCode, 400);
+  const pending = await FriendRequest.countDocuments({ from: a._id, to: b._id, status: "pending" });
+  assert.equal(pending, 1);
+});
+
+guarded("adding a player who already asked you makes you friends", async () => {
+  const [a, b] = await Promise.all([mkUser(), mkUser()]);
+  const theirs = await friendService.sendFriendRequest(b._id, a._id);
+
+  // The search dialog has no idea B already asked; pressing add must not park a
+  // second, mirrored request next to the first.
+  const result = await friendService.sendFriendRequest(a._id, b._id);
+  assert.equal(String(result._id), String(theirs._id));
+  assert.equal(result.status, "accepted");
+
+  assert.equal((await friendService.listFriends(a._id)).length, 1);
+  const open = await FriendRequest.countDocuments({
+    status: "pending",
+    $or: [{ from: a._id }, { to: a._id }],
+  });
+  assert.equal(open, 0);
+});
+
+guarded("an accept racing a cancel cannot both win", async () => {
+  const [a, b] = await Promise.all([mkUser(), mkUser()]);
+  const req = await friendService.sendFriendRequest(a._id, b._id);
+
+  const [accept, cancel] = await Promise.allSettled([
+    friendService.acceptFriendRequest(b._id, req._id),
+    friendService.cancelFriendRequest(a._id, req._id),
+  ]);
+  assert.equal(
+    [accept, cancel].filter((r) => r.status === "fulfilled").length,
+    1,
+    "the request is answered once"
+  );
+
+  const row = await FriendRequest.findById(req._id).lean();
+  const friends = await friendService.listFriends(a._id);
+  if (accept.status === "fulfilled") {
+    assert.equal(row.status, "accepted");
+    assert.equal(friends.length, 1);
+  } else {
+    assert.equal(row.status, "cancelled");
+    assert.equal(friends.length, 0, "a cancelled request never became a friendship");
+  }
+});
+
+guarded("a rejected sender has to wait before asking again", async () => {
+  const [a, b] = await Promise.all([mkUser(), mkUser()]);
+  const req = await friendService.sendFriendRequest(a._id, b._id);
+  await friendService.rejectFriendRequest(b._id, req._id);
+
+  // Otherwise send → reject → send is an unlimited push-notification cannon.
+  await assert.rejects(
+    () => friendService.sendFriendRequest(a._id, b._id),
+    (e) => e.statusCode === 429
+  );
+  // The player who said no can still change their mind.
+  const back = await friendService.sendFriendRequest(b._id, a._id);
+  assert.equal(back.status, "pending");
+});
+
+guarded("open outgoing requests are capped", async () => {
+  const me = await mkUser();
+  const others = await Promise.all([mkUser(), mkUser(), mkUser(), mkUser()]);
+  for (const other of others.slice(0, 3)) {
+    await friendService.sendFriendRequest(me._id, other._id);
+  }
+  await assert.rejects(
+    () => friendService.sendFriendRequest(me._id, others[3]._id),
+    (e) => e.statusCode === 429
+  );
+});
+
+guarded("malformed ids are a 404, not a server error", async () => {
+  const a = await mkUser();
+  for (const call of [
+    () => friendService.sendFriendRequest(a._id, "not-an-id"),
+    () => friendService.sendFriendRequest(a._id, undefined),
+    () => friendService.acceptFriendRequest(a._id, "not-an-id"),
+    () => friendService.rejectFriendRequest(a._id, "not-an-id"),
+    () => friendService.cancelFriendRequest(a._id, "not-an-id"),
+    () => friendService.removeFriend(a._id, "not-an-id"),
+  ]) {
+    await assert.rejects(call, (e) => e.statusCode === 404);
+  }
+});
+
+guarded("a request from a deleted player cannot be accepted", async () => {
+  const [gone, me] = await Promise.all([mkUser(), mkUser()]);
+  const req = await friendService.sendFriendRequest(gone._id, me._id);
+  await User.deleteOne({ _id: gone._id });
+
+  const list = await friendService.listPendingRequests(me._id);
+  assert.equal(list.incoming.length, 0, "no nameless tile offering a ghost");
+  await assert.rejects(
+    () => friendService.acceptFriendRequest(me._id, req._id),
+    (e) => e.statusCode === 404
+  );
+  assert.equal((await friendService.listFriends(me._id)).length, 0);
+  assert.notEqual((await FriendRequest.findById(req._id).lean()).status, "pending");
+});
+
+guarded("every request path tells both players in real time", async () => {
+  const events = [];
+  friendService.setSocialIo({
+    to: (room) => ({ emit: (event, payload) => events.push({ room, event, payload }) }),
+  });
+  try {
+    const [a, b] = await Promise.all([mkUser(), mkUser()]);
+    const roomA = `user:${a._id}`;
+    const roomB = `user:${b._id}`;
+    const got = (room, event) => events.some((e) => e.room === room && e.event === event);
+
+    // The REST routes are what the app calls; they used to emit nothing.
+    const req = await friendService.sendFriendRequest(a._id, b._id);
+    assert.ok(got(roomB, "friend:request"), "recipient hears about the request");
+    const heard = events.find((e) => e.room === roomB && e.event === "friend:request");
+    assert.equal(heard.payload.requestId, String(req._id));
+
+    events.length = 0;
+    await friendService.acceptFriendRequest(b._id, req._id);
+    assert.ok(got(roomA, "friend:added") && got(roomB, "friend:added"));
+
+    events.length = 0;
+    await friendService.removeFriend(a._id, b._id);
+    assert.ok(got(roomA, "friend:removed") && got(roomB, "friend:removed"));
+  } finally {
+    friendService.setSocialIo(null);
+  }
+});
+
+guarded("duplicate open requests from before the index are folded on boot", async () => {
+  const coll = FriendRequest.collection;
+  await coll.dropIndex("one_pending_per_direction");
+  const [a, b] = await Promise.all([mkUser(), mkUser()]);
+  const first = await FriendRequest.create({ from: a._id, to: b._id, status: "pending" });
+  await FriendRequest.create({ from: a._id, to: b._id, status: "pending" });
+
+  delete require.cache[require.resolve("../services/friendSchemaService")];
+  await require("../services/friendSchemaService").ensureFriendshipIndexes();
+
+  const open = await FriendRequest.find({ from: a._id, to: b._id, status: "pending" }).lean();
+  assert.equal(open.length, 1);
+  assert.equal(String(open[0]._id), String(first._id), "the oldest one survives");
+  const names = (await coll.indexes()).map((i) => i.name);
+  assert.ok(names.includes("one_pending_per_direction"), "the index could build");
 });
 
 guarded("the legacy per-user unique index is repaired on boot", async () => {
