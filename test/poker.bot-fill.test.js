@@ -22,15 +22,15 @@ test("a lone player gets 15 seconds for a real opponent before bots", () => {
 
 test("bot fill stops at the per-table ceiling, leaving chairs for humans", () => {
   const capacity = POKER_CAPACITY;
-  const maxBots = 4;
+  const maxBots = 2;
   const active = 1; // one seated human
   const missing = Math.max(0, capacity - active);
   const toAdd = Math.min(missing, maxBots);
 
-  assert.equal(toAdd, 4, "a lone human is joined by at most four bots");
+  assert.equal(toAdd, 2, "a lone human is joined by at most two bots");
   assert.equal(
     capacity - (active + toAdd),
-    4,
+    6,
     "the rest of the table stays open for real players",
   );
 });

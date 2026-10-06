@@ -440,6 +440,7 @@ class PokerTable {
   constructor(nsp, table, options = null) {
     this.nsp = nsp;
     this.tableId = String(table._id);
+    this.tableTier = table.tier;
     this.smallBlind = toSafeInt(table.smallBlind, 0);
     this.bigBlind = toSafeInt(table.bigBlind, 0);
     this.minBuyIn = toSafeInt(table.minBuyIn, this.bigBlind * 100);
@@ -532,7 +533,7 @@ class PokerTable {
      * join. The remaining chairs stay open.
      */
     this.maxBotsPerTable = clampInt(
-      process.env.POKER_BOT_MAX_PER_TABLE || 4,
+      2,
       0,
       Math.max(0, this.capacity - 1)
     );
@@ -1348,6 +1349,16 @@ class PokerTable {
       if (this.round !== "idle") return;
     }
 
+    // Apply the bot ceiling only between settled hands, never remove live bets.
+    let keptBots = 0;
+    this.seats = this.seats.filter((seat) => {
+      if (!seat.isBot) return true;
+      if (this.botsEnabled && keptBots++ < this.maxBotsPerTable) return true;
+      botPoolService.release(seat.userId);
+      return false;
+    });
+    this.reindexSeatsByPosition();
+
     // A human who joined mid-hand may still be parked in Mongo without a live
     // chair (bot-full table). Between hands there is room — pull them in before
     // bots refill the seats.
@@ -1817,6 +1828,8 @@ class PokerTable {
     ) {
       this.botsEnabled = false;
     }
+    this.tableTier = table.tier || this.tableTier;
+    if (this.tableTier === "beast") this.botsEnabled = false;
     this.botFillTarget = clampInt(this.botFillTarget || 2, 2, Math.max(2, this.capacity));
 
     const isHandRunning = this.running && this.round && String(this.round) !== "idle";
@@ -2014,6 +2027,9 @@ class PokerTable {
     ) {
       this.botsEnabled = false;
     }
+
+    this.tableTier = table.tier || this.tableTier;
+    if (this.tableTier === "beast") this.botsEnabled = false;
 
     if (handActive) {
       const mongoIds = new Set(table.seats.map((s) => String(s.user?._id || s.user)));
@@ -2496,7 +2512,7 @@ class PokerTable {
     // ordinary table a bot inherits the engine-side stack so a hand in flight
     // can still be played out; on a humans-only table nothing takes the chair —
     // it simply opens up again.
-    if (this.botsEnabled) {
+    if (this.botsEnabled && this.botHeadroom() > 0) {
       const bot = this.createBotSeat();
       bot.chips = pending.chips;
       const insertAt = Math.min(pending.seatIndex, this.seats.length);
@@ -2695,7 +2711,7 @@ class PokerTable {
 
       // 2. Put a bot in their place ("بتخلي مكانو بوت") if bots are enabled
       let bot = null;
-      if (this.botsEnabled) {
+      if (this.botsEnabled && this.botHeadroom() > 0) {
         bot = this.createBotSeat(chair);
         bot.chips = this.botBuyIn;
         bot.invested = seat.invested || 0;
@@ -4205,7 +4221,7 @@ class PokerTable {
 
     const need = Math.max(0, this.currentBet - seat.bet);
     const stack = seat.chips;
-    const canRaise = this.botRaiseSize(seatIndex) > 0;
+    const canRaise = false; // Bots may check/call/fold, never open or raise the bet.
     const roll = secureRandomInt(1_000_000_000) / 1_000_000_000;
 
     // Personality/skill tuning of the EXISTING thresholds (same branches). When
